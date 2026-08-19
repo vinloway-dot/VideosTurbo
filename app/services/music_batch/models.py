@@ -82,6 +82,7 @@ class BatchState(BaseModel):
     )
     started_at: str | None = None
     completed_at: str | None = None
+    fatal_error: str | None = None
     compilation_status: str | None = None
     compilation_path: str | None = None
     compilation_members: list[str] = Field(default_factory=list)
