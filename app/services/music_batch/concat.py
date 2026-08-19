@@ -10,7 +10,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Sequence
 
-from app.config import config
+from app.utils import utils
 
 
 @dataclass(frozen=True)
@@ -25,13 +25,13 @@ class MediaSignature:
 
 
 def _ffmpeg_executable() -> str:
-    configured = getattr(config, "ffmpeg_path", "")
-    if configured and Path(configured).is_file():
-        return configured
-    executable = shutil.which("ffmpeg")
-    if not executable:
-        raise RuntimeError("ffmpeg executable was not found")
-    return executable
+    candidate = utils.get_ffmpeg_binary()
+    if Path(candidate).is_file():
+        return candidate
+    resolved = shutil.which(candidate)
+    if resolved:
+        return resolved
+    raise RuntimeError("ffmpeg executable was not found")
 
 
 def _ffprobe_executable() -> str:
@@ -43,7 +43,10 @@ def _ffprobe_executable() -> str:
         return str(sibling)
     executable = shutil.which("ffprobe")
     if not executable:
-        raise RuntimeError("ffprobe executable was not found")
+        raise RuntimeError(
+            "ffprobe executable was not found. Install the standard FFmpeg tools "
+            "so final compilation compatibility can be checked safely."
+        )
     return executable
 
 
@@ -74,8 +77,14 @@ def probe_media_signature(path: Path) -> MediaSignature:
     )
     payload = json.loads(result.stdout or "{}")
     streams = payload.get("streams", [])
-    video = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
-    audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
+    video = next(
+        (stream for stream in streams if stream.get("codec_type") == "video"),
+        None,
+    )
+    audio = next(
+        (stream for stream in streams if stream.get("codec_type") == "audio"),
+        None,
+    )
     if video is None:
         raise RuntimeError(f"no video stream found in {path}")
     if audio is None:
@@ -84,7 +93,9 @@ def probe_media_signature(path: Path) -> MediaSignature:
         video_codec=str(video.get("codec_name") or ""),
         width=int(video.get("width") or 0),
         height=int(video.get("height") or 0),
-        frame_rate=str(video.get("avg_frame_rate") or video.get("r_frame_rate") or "0/1"),
+        frame_rate=str(
+            video.get("avg_frame_rate") or video.get("r_frame_rate") or "0/1"
+        ),
         audio_codec=str(audio.get("codec_name") or ""),
         sample_rate=int(audio.get("sample_rate") or 0),
         channel_layout=str(audio.get("channel_layout") or ""),
@@ -171,9 +182,7 @@ def _fps_value(rate: str) -> float:
     return value
 
 
-def concat_reencode(
-    paths: Sequence[Path], output: Path, codec: str
-) -> Path:
+def concat_reencode(paths: Sequence[Path], output: Path, codec: str) -> Path:
     items = [Path(path) for path in paths]
     if not items:
         raise ValueError("at least one video is required")
@@ -194,10 +203,12 @@ def concat_reencode(
     for index in range(len(items)):
         filters.append(
             f"[{index}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps:.6f}[v{index}]"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+            f"fps={fps:.6f}[v{index}]"
         )
         filters.append(
-            f"[{index}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a{index}]"
+            f"[{index}:a]aresample=48000,"
+            f"aformat=sample_fmts=fltp:channel_layouts=stereo[a{index}]"
         )
         concat_inputs.append(f"[v{index}][a{index}]")
     filters.append(
