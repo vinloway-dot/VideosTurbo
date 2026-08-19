@@ -86,6 +86,7 @@ class BatchState(BaseModel):
     compilation_path: str | None = None
     compilation_members: list[str] = Field(default_factory=list)
     compilation_error: str | None = None
+    used_clips: dict[str, list[str]] = Field(default_factory=dict)
 
     @classmethod
     def new_for_test(
