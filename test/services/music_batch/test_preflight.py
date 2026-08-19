@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from app.services.music_batch import preflight
-from app.services.music_batch.models import BatchSettings, SongItem
+from app.services.music_batch.models import BatchSettings, SongItem, SongOverride
 from app.services.music_batch.preflight import run_preflight
 
 
@@ -41,6 +41,34 @@ def test_missing_provider_key_is_reported(monkeypatch, tmp_path):
     )
     issues = run_preflight(settings, [SongItem(source_path=str(song), added_index=0)])
     assert any(i.code == "missing_provider_key" for i in issues)
+
+
+def test_provider_key_required_when_only_song_override_uses_provider(
+    monkeypatch, tmp_path
+):
+    song = tmp_path / "song.mp3"
+    song.write_bytes(b"x")
+    monkeypatch.setattr(preflight, "probe_encoder", lambda codec: (True, "ok"))
+    monkeypatch.setattr(preflight, "_ffmpeg_executable", lambda: "ffmpeg")
+    monkeypatch.setattr(
+        preflight.config,
+        "app",
+        {"pexels_api_keys": ["configured"], "coverr_api_keys": []},
+    )
+    settings = BatchSettings(
+        output_root=str(tmp_path),
+        stock_sources=["pexels"],
+    )
+    item = SongItem(
+        source_path=str(song),
+        added_index=0,
+        override=SongOverride(stock_sources=["coverr"]),
+    )
+    issues = run_preflight(settings, [item])
+    assert any(
+        issue.code == "missing_provider_key" and "coverr" in issue.message
+        for issue in issues
+    )
 
 
 def test_unreadable_or_missing_song_is_error(monkeypatch, tmp_path):
