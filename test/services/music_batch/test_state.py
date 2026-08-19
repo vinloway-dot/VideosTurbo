@@ -26,12 +26,14 @@ def test_retry_failed_only_resets_failed_songs(tmp_path):
     state = BatchState.new_for_test(
         song_statuses=[SongStatus.completed, SongStatus.failed]
     )
+    state.songs[1].attempts = 3
     state.songs[1].latest_error = "boom"
     store = BatchStateStore(tmp_path)
     store.save(state)
     retried = store.retry_failed()
     assert retried.songs[0].status == SongStatus.completed
     assert retried.songs[1].status == SongStatus.pending
+    assert retried.songs[1].attempts == 0
     assert retried.songs[1].latest_error is None
 
 
