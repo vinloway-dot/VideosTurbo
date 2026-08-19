@@ -61,11 +61,13 @@ class BatchStateStore:
             for song in state.songs:
                 if song.status == SongStatus.failed:
                     song.status = SongStatus.pending
+                    song.attempts = 0
                     song.latest_error = None
                     song.started_at = None
                     song.completed_at = None
             if any(song.status == SongStatus.pending for song in state.songs):
                 state.status = BatchStatus.interrupted
+                state.fatal_error = None
             return state
 
         return self.mutate(reset)
