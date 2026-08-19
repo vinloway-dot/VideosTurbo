@@ -34,6 +34,14 @@ RenderAdapter = Callable[[dict[str, object], Path], Path]
 SongRenderer = Callable[[SongItem, dict[str, object], Path], Path]
 
 
+class BatchFatalError(RuntimeError):
+    """A batch-level failure where continuing would be unsafe or misleading."""
+
+
+class EncoderFallbackError(BatchFatalError):
+    """The requested hardware encoder failed and the existing core fell back."""
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -88,8 +96,7 @@ class MusicBatchManager:
         return state
 
     def start_over(self, batch_dir: Path) -> BatchState:
-        old_store = BatchStateStore(batch_dir)
-        previous = old_store.load()
+        previous = BatchStateStore(batch_dir).load()
         restart_dir = make_restart_directory(Path(batch_dir))
         restart_dir.mkdir(parents=True, exist_ok=False)
         songs = [
@@ -162,9 +169,7 @@ class MusicBatchManager:
             progress=5,
         )
 
-        script = params.video_script
-        if not script:
-            script = task_service.generate_script(task_id, params)
+        script = params.video_script or task_service.generate_script(task_id, params)
         if not script:
             raise RuntimeError("video script generation failed")
 
@@ -224,6 +229,20 @@ class MusicBatchManager:
             subtitle_path="",
             audio_duration=audio_duration,
         )
+
+        requested_codec = str(render_params.get("video_encoder") or "libx264")
+        disabled_codecs = getattr(
+            task_service.video,
+            "_runtime_disabled_video_codecs",
+            set(),
+        )
+        if requested_codec != "libx264" and requested_codec in disabled_codecs:
+            raise EncoderFallbackError(
+                f"{requested_codec} failed at runtime and the existing renderer fell "
+                "back to libx264. Music Batch stopped so a long GPU batch is not "
+                "silently converted to CPU rendering."
+            )
+
         if not final_paths:
             raise RuntimeError("existing video core produced no final video")
         source_output = Path(final_paths[0])
@@ -309,29 +328,34 @@ class MusicBatchManager:
                     raise RuntimeError("renderer produced an empty or missing video")
                 os.replace(temp_path, final_path)
 
-                def complete(state: BatchState) -> BatchState:
-                    target = self._song_by_added_index(state, added_index)
+                def complete(current: BatchState) -> BatchState:
+                    target = self._song_by_added_index(current, added_index)
                     target.status = SongStatus.completed
                     target.output_path = str(final_path)
                     target.completed_at = _utc_now()
                     target.latest_error = None
-                    return state
+                    if current.settings.avoid_reusing_clips:
+                        current.used_clips = self.used_clips.snapshot()
+                    return current
 
                 store.mutate(complete)
                 return
+            except BatchFatalError:
+                temp_path.unlink(missing_ok=True)
+                raise
             except Exception as exc:
                 temp_path.unlink(missing_ok=True)
                 error = f"{type(exc).__name__}: {exc}"
 
-                def fail_or_retry(state: BatchState) -> BatchState:
-                    target = self._song_by_added_index(state, added_index)
+                def fail_or_retry(current: BatchState) -> BatchState:
+                    target = self._song_by_added_index(current, added_index)
                     target.latest_error = error
                     if target.attempts <= retry_limit:
                         target.status = SongStatus.retrying
                     else:
                         target.status = SongStatus.failed
                         target.completed_at = _utc_now()
-                    return state
+                    return current
 
                 updated = store.mutate(fail_or_retry)
                 target = self._song_by_added_index(updated, added_index)
@@ -355,6 +379,7 @@ class MusicBatchManager:
                 BatchStatus.completed_with_failures if failed else BatchStatus.completed
             )
             state.completed_at = _utc_now()
+            state.fatal_error = None
             return state
 
         return store.mutate(finalize)
@@ -390,6 +415,26 @@ class MusicBatchManager:
 
         return store.mutate(mark_complete)
 
+    def _mark_fatal(
+        self, store: BatchStateStore, error: BaseException
+    ) -> BatchState | None:
+        message = f"{type(error).__name__}: {error}"
+        try:
+            def fail(current: BatchState) -> BatchState:
+                current.status = BatchStatus.failed
+                current.fatal_error = message
+                current.completed_at = _utc_now()
+                for song in current.songs:
+                    if song.status in {SongStatus.processing, SongStatus.retrying}:
+                        song.status = SongStatus.pending
+                return current
+
+            failed = store.mutate(fail)
+            self._write_reports(failed)
+            return failed
+        except Exception:
+            return None
+
     def run_batch(self, state: BatchState) -> BatchState:
         batch_dir = Path(state.batch_dir)
         batch_dir.mkdir(parents=True, exist_ok=True)
@@ -399,17 +444,23 @@ class MusicBatchManager:
 
         def start(current: BatchState) -> BatchState:
             current.status = BatchStatus.processing
+            current.fatal_error = None
             if current.started_at is None:
                 current.started_at = _utc_now()
             current.completed_at = None
             return current
 
         running = store.mutate(start)
+        self.used_clips.load_snapshot(running.used_clips)
         ordered = sort_song_items(running.songs, running.settings.sort_mode)
         pending_indices = [
             song.added_index
             for song in ordered
-            if song.status in {SongStatus.pending, SongStatus.retrying, SongStatus.processing}
+            if song.status in {
+                SongStatus.pending,
+                SongStatus.retrying,
+                SongStatus.processing,
+            }
         ]
 
         codec_context = (
@@ -417,26 +468,32 @@ class MusicBatchManager:
             if self._uses_default_core
             else nullcontext()
         )
-        with codec_context:
-            if running.settings.parallel_jobs <= 1:
-                for added_index in pending_indices:
-                    self._process_song(store, added_index)
-            else:
-                with ThreadPoolExecutor(
-                    max_workers=running.settings.parallel_jobs,
-                    thread_name_prefix="music-batch",
-                ) as executor:
-                    futures = {
-                        executor.submit(self._process_song, store, added_index): added_index
-                        for added_index in pending_indices
-                    }
-                    for future in as_completed(futures):
-                        future.result()
+        try:
+            with codec_context:
+                if running.settings.parallel_jobs <= 1:
+                    for added_index in pending_indices:
+                        self._process_song(store, added_index)
+                else:
+                    with ThreadPoolExecutor(
+                        max_workers=running.settings.parallel_jobs,
+                        thread_name_prefix="music-batch",
+                    ) as executor:
+                        futures = {
+                            executor.submit(
+                                self._process_song, store, added_index
+                            ): added_index
+                            for added_index in pending_indices
+                        }
+                        for future in as_completed(futures):
+                            future.result()
 
-        finalized = self._finalize_status(store)
-        finalized = self._combine_if_requested(store)
-        self._write_reports(finalized)
-        return finalized
+            finalized = self._finalize_status(store)
+            finalized = self._combine_if_requested(store)
+            self._write_reports(finalized)
+            return finalized
+        except Exception as exc:
+            self._mark_fatal(store, exc)
+            raise
 
     def resume_batch(self, batch_dir: Path) -> BatchState:
         store = BatchStateStore(batch_dir)
@@ -457,7 +514,11 @@ class MusicBatchManager:
         if not paths:
             raise ValueError("no completed videos are available to combine")
         output = Path(state.batch_dir) / "Full_Compilation.mp4"
-        concat_reencode(paths, output, state.settings.video_encoder)
+        try:
+            concat_reencode(paths, output, state.settings.video_encoder)
+        except Exception as exc:
+            self._mark_fatal(store, exc)
+            raise
 
         def complete(current: BatchState) -> BatchState:
             current.compilation_status = "completed"
@@ -475,6 +536,27 @@ class MusicBatchManager:
         self._write_reports(updated)
         return updated
 
+    def keep_separate(self, batch_dir: Path) -> BatchState:
+        store = BatchStateStore(batch_dir)
+        state = store.load()
+        if state.compilation_status != "needs_reencode_confirmation":
+            raise ValueError("batch is not waiting for a compilation decision")
+
+        def keep(current: BatchState) -> BatchState:
+            current.compilation_status = "kept_separate"
+            current.compilation_path = None
+            current.compilation_error = None
+            failed = any(song.status == SongStatus.failed for song in current.songs)
+            current.status = (
+                BatchStatus.completed_with_failures if failed else BatchStatus.completed
+            )
+            current.completed_at = _utc_now()
+            return current
+
+        updated = store.mutate(keep)
+        self._write_reports(updated)
+        return updated
+
     def _write_reports(self, state: BatchState) -> None:
         batch_dir = Path(state.batch_dir)
         batch_dir.mkdir(parents=True, exist_ok=True)
@@ -487,6 +569,7 @@ class MusicBatchManager:
             "created_at": state.created_at,
             "started_at": state.started_at,
             "completed_at": state.completed_at,
+            "fatal_error": state.fatal_error,
             "settings": state.settings.model_dump(mode="json"),
             "sort_mode": state.settings.sort_mode.value,
             "total_songs": len(state.songs),
@@ -494,13 +577,13 @@ class MusicBatchManager:
             "failed_count": len(failed),
             "skipped_count": len(skipped),
             "songs": [song.model_dump(mode="json") for song in state.songs],
+            "used_clips": state.used_clips,
             "compilation_status": state.compilation_status,
             "compilation_path": state.compilation_path,
             "compilation_members": state.compilation_members,
             "compilation_error": state.compilation_error,
         }
-        json_path = batch_dir / "batch_report.json"
-        json_path.write_text(
+        (batch_dir / "batch_report.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
@@ -513,11 +596,14 @@ class MusicBatchManager:
             f"Failed: {len(failed)}",
             f"Skipped: {len(skipped)}",
         ]
+        if state.fatal_error:
+            lines.extend(["", f"Fatal error: {state.fatal_error}"])
         if failed:
             lines.extend(["", "Failed songs:"])
             for song in failed:
                 lines.append(
-                    f"- {Path(song.source_path).name}: {song.latest_error or 'unknown error'}"
+                    f"- {Path(song.source_path).name}: "
+                    f"{song.latest_error or 'unknown error'}"
                 )
         if state.compilation_status:
             lines.extend(
