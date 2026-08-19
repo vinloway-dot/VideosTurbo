@@ -138,6 +138,8 @@ For a long relaxation-music batch on a Windows PC with a working NVIDIA NVENC se
 
 ## Verification Before Long Runs
 
+The repository CI verifies Python compilation, linting, automated tests, and coverage on pull requests. Local Windows/NVENC smoke testing is still required before trusting a long GPU batch.
+
 Before trusting a multi-hour batch, test with a few short songs and confirm:
 
 - the Music Batch page loads without affecting the normal Video Generator;
