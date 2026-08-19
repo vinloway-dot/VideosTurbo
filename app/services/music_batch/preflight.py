@@ -112,6 +112,20 @@ def _check_output_root(output_root: Path) -> list[PreflightIssue]:
     return issues
 
 
+def _required_stock_sources(
+    settings: BatchSettings, songs: list[SongItem]
+) -> set[str]:
+    required = {str(source).strip().lower() for source in settings.stock_sources}
+    for song in songs:
+        if song.override and song.override.stock_sources is not None:
+            required.update(
+                str(source).strip().lower()
+                for source in song.override.stock_sources
+                if str(source).strip()
+            )
+    return required
+
+
 def run_preflight(
     settings: BatchSettings, songs: list[SongItem]
 ) -> list[PreflightIssue]:
@@ -164,7 +178,7 @@ def run_preflight(
             )
 
     online_sources = {"pexels", "pixabay", "coverr"}
-    for provider in sorted(set(settings.stock_sources) & online_sources):
+    for provider in sorted(_required_stock_sources(settings, songs) & online_sources):
         if not _configured_keys(provider):
             issues.append(
                 PreflightIssue(
