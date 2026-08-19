@@ -1,15 +1,19 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from app.services.music_batch import manager as manager_module
-from app.services.music_batch.manager import MusicBatchManager
+from app.services.music_batch.manager import BatchFatalError, MusicBatchManager
 from app.services.music_batch.models import (
     BatchSettings,
     BatchState,
+    BatchStatus,
     SongItem,
     SongStatus,
     resolve_song_settings,
 )
+from app.services.music_batch.state import BatchStateStore
 
 
 def make_batch(tmp_path, names, retry_count=2, parallel_jobs=1, combine_all=False):
@@ -120,10 +124,28 @@ def test_incompatible_combine_requires_confirmation(monkeypatch, tmp_path):
     state = MusicBatchManager(song_renderer=renderer).run_batch(
         make_batch(tmp_path, ["a.mp3", "b.mp3"], combine_all=True)
     )
-    assert state.status.value == "needs_reencode_confirmation"
+    assert state.status == BatchStatus.needs_reencode_confirmation
     assert state.compilation_status == "needs_reencode_confirmation"
     assert "resolution mismatch" in (state.compilation_error or "")
     assert stream_copy_called == []
+
+
+def test_keep_separate_finishes_confirmation_without_reencode(monkeypatch, tmp_path):
+    def renderer(_song, _resolved, output_path):
+        output_path.write_bytes(b"video")
+        return output_path
+
+    monkeypatch.setattr(
+        manager_module,
+        "are_stream_copy_compatible",
+        lambda paths: (False, "resolution mismatch"),
+    )
+    manager = MusicBatchManager(song_renderer=renderer)
+    state = manager.run_batch(make_batch(tmp_path, ["a.mp3"], combine_all=True))
+    resolved = manager.keep_separate(Path(state.batch_dir))
+    assert resolved.status == BatchStatus.completed
+    assert resolved.compilation_status == "kept_separate"
+    assert resolved.compilation_path is None
 
 
 def test_compatible_combine_uses_stream_copy(monkeypatch, tmp_path):
@@ -164,3 +186,33 @@ def test_parallel_jobs_complete_without_corrupting_state(tmp_path):
         (Path(state.batch_dir) / "batch_state.json").read_text(encoding="utf-8")
     )
     assert len(loaded["songs"]) == 4
+
+
+def test_batch_fatal_error_stops_without_song_retries(tmp_path):
+    calls = []
+
+    def renderer(song, _resolved, _output_path):
+        calls.append(Path(song.source_path).name)
+        raise BatchFatalError("GPU encoder fallback detected")
+
+    manager = MusicBatchManager(song_renderer=renderer)
+    batch = make_batch(tmp_path, ["a.mp3", "b.mp3"], retry_count=2)
+    with pytest.raises(BatchFatalError, match="GPU encoder"):
+        manager.run_batch(batch)
+
+    persisted = BatchStateStore(Path(batch.batch_dir)).load()
+    assert calls == ["a.mp3"]
+    assert persisted.status == BatchStatus.failed
+    assert "GPU encoder fallback" in (persisted.fatal_error or "")
+    assert persisted.songs[0].attempts == 1
+
+
+def test_used_clip_snapshot_is_loaded_on_resume(tmp_path):
+    manager = MusicBatchManager(song_renderer=lambda *_args: Path("unused"))
+    batch = make_batch(tmp_path, ["a.mp3"])
+    batch.used_clips = {"pexels": ["clip-1"]}
+    store = BatchStateStore(Path(batch.batch_dir))
+    store.save(batch)
+    recovered = store.recover_interrupted()
+    manager.used_clips.load_snapshot(recovered.used_clips)
+    assert manager.used_clips.seen("pexels", "clip-1") is True
