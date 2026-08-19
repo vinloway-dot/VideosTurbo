@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from app.config import config
 from app.services.music_batch.models import BatchSettings, SongItem
+from app.utils import utils
 
 
 class PreflightIssue(BaseModel):
@@ -20,10 +21,13 @@ class PreflightIssue(BaseModel):
 
 
 def _ffmpeg_executable() -> str | None:
-    configured = getattr(config, "ffmpeg_path", "")
-    if configured and Path(configured).is_file():
-        return configured
-    return shutil.which("ffmpeg")
+    candidate = utils.get_ffmpeg_binary()
+    if Path(candidate).is_file():
+        return candidate
+    resolved = shutil.which(candidate)
+    if resolved:
+        return resolved
+    return None
 
 
 def probe_encoder(codec: str) -> tuple[bool, str]:
