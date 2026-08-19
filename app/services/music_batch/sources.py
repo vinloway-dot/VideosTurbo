@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Sequence, TypeVar
 
@@ -21,7 +22,7 @@ def build_source_plan(
         raise ValueError("target_duration must be non-negative")
 
     per_source = target_duration / len(normalized_sources)
-    plans = [
+    return [
         SourcePlan(
             provider=provider,
             keywords=list(keywords),
@@ -29,7 +30,6 @@ def build_source_plan(
         )
         for provider in normalized_sources
     ]
-    return plans
 
 
 T = TypeVar("T")
@@ -38,6 +38,7 @@ T = TypeVar("T")
 class UsedClipRegistry:
     def __init__(self) -> None:
         self._used: dict[str, set[str]] = {}
+        self._lock = threading.RLock()
 
     @staticmethod
     def _provider(provider: str) -> str:
@@ -48,10 +49,30 @@ class UsedClipRegistry:
         return str(clip_id)
 
     def seen(self, provider: str, clip_id: object) -> bool:
-        return self._clip_id(clip_id) in self._used.get(self._provider(provider), set())
+        with self._lock:
+            return self._clip_id(clip_id) in self._used.get(
+                self._provider(provider), set()
+            )
 
     def mark(self, provider: str, clip_id: object) -> None:
-        self._used.setdefault(self._provider(provider), set()).add(self._clip_id(clip_id))
+        with self._lock:
+            self._used.setdefault(self._provider(provider), set()).add(
+                self._clip_id(clip_id)
+            )
+
+    def snapshot(self) -> dict[str, list[str]]:
+        with self._lock:
+            return {
+                provider: sorted(clip_ids)
+                for provider, clip_ids in self._used.items()
+            }
+
+    def load_snapshot(self, snapshot: dict[str, list[str]] | None) -> None:
+        with self._lock:
+            self._used = {
+                self._provider(provider): {self._clip_id(clip_id) for clip_id in clip_ids}
+                for provider, clip_ids in (snapshot or {}).items()
+            }
 
     def filter_candidates(
         self,
@@ -64,7 +85,11 @@ class UsedClipRegistry:
         if not avoid_reuse or not items:
             return items
 
-        unseen = [item for item in items if not self.seen(provider, item[0])]
+        with self._lock:
+            used = self._used.get(self._provider(provider), set())
+            unseen = [
+                item for item in items if self._clip_id(item[0]) not in used
+            ]
         # Best effort: if every result has been seen, keep the provider results rather
         # than failing the whole batch solely because the search pool is exhausted.
         return unseen or items
