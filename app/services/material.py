@@ -765,7 +765,30 @@ def download_videos(
     audio_duration: float = 0.0,
     max_clip_duration: int = 5,
     match_script_order: bool = False,
+    image_duration: int = 8,
+    image_motion: str = "random",
 ) -> List[str]:
+    normalized_source = str(source or "").strip().lower()
+    if normalized_source.endswith(("_image", "_mixed")):
+        # Local import avoids a module cycle: stock_materials deliberately delegates
+        # ordinary video mode back to this legacy downloader.
+        from app.services import stock_materials
+
+        return stock_materials.download_stock_materials(
+            task_id=task_id,
+            search_terms=search_terms,
+            source=stock_materials.base_source(normalized_source),
+            material_type=stock_materials.material_type_from_source(normalized_source),
+            video_aspect=video_aspect,
+            video_concat_mode=video_concat_mode,
+            audio_duration=audio_duration,
+            max_clip_duration=max_clip_duration,
+            image_duration=image_duration,
+            image_motion=image_motion,
+            match_script_order=match_script_order,
+        )
+
+    source = normalized_source
     provider = "pexels"
     remote_search_videos = search_videos_pexels
     if source == "pixabay":

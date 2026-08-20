@@ -675,6 +675,12 @@ def get_video_materials(
             audio_duration=audio_duration * params.video_count,
             max_clip_duration=params.video_clip_duration,
             match_script_order=params.match_materials_to_script,
+            image_duration=params.image_duration,
+            image_motion=(
+                params.image_motion.value
+                if hasattr(params.image_motion, "value")
+                else str(params.image_motion)
+            ),
         )
         if not downloaded_videos:
             _mark_task_failed(
