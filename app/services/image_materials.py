@@ -57,6 +57,12 @@ def motion_fraction(time_value: float, duration: float) -> float:
     return max(0.0, min(1.0, float(time_value) / float(duration)))
 
 
+def output_filename_for_image(path: str | Path) -> str:
+    """Keep the prepared clip identity tied to the downloaded source asset."""
+
+    return f"image-clip-{Path(path).stem}.mp4"
+
+
 def _fit_image_array(path: Path, width: int, height: int) -> np.ndarray:
     with Image.open(path) as source:
         source.load()
@@ -163,16 +169,18 @@ def prepare_image_clips(
     rng = random_module.Random()
     results: list[str] = []
 
-    for index, raw_path in enumerate(paths, start=1):
+    for raw_path in paths:
         image_path = Path(raw_path)
         if not image_path.is_file():
             logger.warning(f"skip missing stock image: {image_path}")
             continue
         selected_motion = choose_image_motion(image_motion, rng=rng)
-        output_path = destination / f"image-clip-{index:03d}.mp4"
+        base_filename = output_filename_for_image(image_path)
+        output_path = destination / base_filename
+        output_stem = Path(base_filename).stem
         suffix = 2
         while output_path.exists():
-            output_path = destination / f"image-clip-{index:03d}-{suffix}.mp4"
+            output_path = destination / f"{output_stem}-{suffix}.mp4"
             suffix += 1
 
         composite = None
