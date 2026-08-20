@@ -45,6 +45,7 @@ class BatchStateStore:
             for song in state.songs:
                 if song.status in {SongStatus.processing, SongStatus.retrying}:
                     song.status = SongStatus.pending
+                    song.progress = 0
                     song.started_at = None
             if state.status not in {
                 BatchStatus.completed,
@@ -62,6 +63,7 @@ class BatchStateStore:
                 if song.status == SongStatus.failed:
                     song.status = SongStatus.pending
                     song.attempts = 0
+                    song.progress = 0
                     song.latest_error = None
                     song.started_at = None
                     song.completed_at = None
