@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import os
 import re
 from pathlib import Path
 from typing import Callable
@@ -155,7 +154,10 @@ def search_images_pixabay(
         if not _matches_image_aspect(width, height, aspect):
             continue
         image_url = str(
-            hit.get("largeImageURL") or hit.get("fullHDURL") or hit.get("webformatURL") or ""
+            hit.get("largeImageURL")
+            or hit.get("fullHDURL")
+            or hit.get("webformatURL")
+            or ""
         ).strip()
         if not image_url:
             continue
@@ -189,7 +191,11 @@ def search_images_pixabay(
 
 
 def _extension_for_image(item: MaterialInfo, response: requests.Response) -> str:
-    content_type = str((response.headers or {}).get("content-type", "")).split(";", 1)[0].lower()
+    content_type = (
+        str((response.headers or {}).get("content-type", ""))
+        .split(";", 1)[0]
+        .lower()
+    )
     if content_type == "image/png":
         return ".png"
     if content_type == "image/webp":
@@ -208,19 +214,27 @@ def _download_image(item: MaterialInfo, directory: Path, index: int) -> Path:
         timeout=(30, 120),
     )
     response.raise_for_status()
-    content_type = str((response.headers or {}).get("content-type", "")).split(";", 1)[0].lower()
+    content_type = (
+        str((response.headers or {}).get("content-type", ""))
+        .split(";", 1)[0]
+        .lower()
+    )
     if content_type and content_type not in _IMAGE_CONTENT_TYPES:
         raise ValueError(f"unexpected image content type: {content_type}")
     if not response.content:
         raise ValueError("downloaded image is empty")
 
     source = item.source_info if isinstance(item.source_info, dict) else {}
-    asset_id = _SAFE_FILENAME.sub("-", str(source.get("asset_id") or index)).strip("-_")
+    asset_id = _SAFE_FILENAME.sub(
+        "-", str(source.get("asset_id") or index)
+    ).strip("-_")
     extension = _extension_for_image(item, response)
     target = directory / f"stock-image-{index:03d}-{asset_id or index}{extension}"
     suffix = 2
     while target.exists():
-        target = directory / f"stock-image-{index:03d}-{asset_id or index}-{suffix}{extension}"
+        target = directory / (
+            f"stock-image-{index:03d}-{asset_id or index}-{suffix}{extension}"
+        )
         suffix += 1
     target.write_bytes(response.content)
     return target
@@ -270,7 +284,9 @@ def download_images(
                 continue
             seen.add(dedupe_key)
             try:
-                local_path = _download_image(item, material_directory, len(downloaded) + 1)
+                local_path = _download_image(
+                    item, material_directory, len(downloaded) + 1
+                )
             except Exception as exc:
                 logger.warning(
                     "failed to download stock image: "
@@ -279,7 +295,9 @@ def download_images(
                 continue
             downloaded.append(local_path)
             try:
-                source_records.append(material._material_source_record(item, str(local_path)))
+                source_records.append(
+                    material._material_source_record(item, str(local_path))
+                )
             except Exception as exc:
                 logger.warning(
                     "failed to prepare image source record: "
