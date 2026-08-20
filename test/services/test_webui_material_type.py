@@ -13,6 +13,16 @@ def test_main_video_settings_expose_material_type_and_ken_burns_controls():
     assert 'f"{selected_video_source}_{params.material_type}"' in source
 
 
+def test_main_generation_validation_accepts_synthetic_image_and_mixed_sources():
+    source = Path("webui/Main.py").read_text(encoding="utf-8")
+
+    assert "validated_video_source = stock_materials.base_source(params.video_source)" in source
+    assert "if validated_video_source not in [" in source
+    assert 'if validated_video_source == "pexels"' in source
+    assert 'if validated_video_source == "pixabay"' in source
+    assert 'if validated_video_source == "coverr"' in source
+
+
 def test_main_task_restore_normalizes_synthetic_material_source_and_restores_image_controls():
     source = Path("webui/Main.py").read_text(encoding="utf-8")
 
