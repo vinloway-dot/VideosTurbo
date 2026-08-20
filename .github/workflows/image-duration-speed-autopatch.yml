@@ -1,0 +1,36 @@
+name: Image Duration Speed Autopatch
+
+on:
+  push:
+    branches:
+      - feature/material-type-mixed
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[image-speed-autopatch]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/material-type-mixed
+          fetch-depth: 0
+
+      - name: Apply exact image duration speed patch
+        run: python scripts/apply_image_duration_speed_patch.py
+
+      - name: Commit and push core change
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No patch changes were required."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/services/video.py
+          git commit -m "fix: keep image duration independent from clip speed [image-speed-autopatch]"
+          git push origin HEAD:feature/material-type-mixed
