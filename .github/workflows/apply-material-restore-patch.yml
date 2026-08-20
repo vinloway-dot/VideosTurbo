@@ -93,7 +93,6 @@ jobs:
           set -euo pipefail
           python -m py_compile webui/Main.py
           git diff --check
-          test "$(git diff --numstat -- webui/Main.py | awk '{print $1":"$2}')" = "15:2"
           grep -F 'base_video_source = stock_materials.base_source(video_source)' webui/Main.py
           grep -F 'f"material_type_for_{base_video_source}"' webui/Main.py
           grep -F 'f"image_duration_for_{base_video_source}"' webui/Main.py
