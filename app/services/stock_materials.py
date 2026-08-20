@@ -45,7 +45,7 @@ def effective_concat_mode(
     """Preserve the alternating Video → Image timeline in mixed mode.
 
     Random mixed mode still randomizes candidates inside each media pool before
-    interleaving.  The final compositor must then consume that interleaved list in
+    interleaving. The final compositor must then consume that interleaved list in
     sequence; otherwise the legacy random compositor would shuffle all items again
     and destroy the requested media alternation.
     """
@@ -71,21 +71,28 @@ def build_clip_duration_overrides(
     video_clip_duration: int,
     image_duration: int,
 ) -> dict[str, float]:
-    """Return per-file final playback limits without changing legacy video mode."""
+    """Mark image clips with their final display duration.
+
+    Video-only and the video half of Mixed stay on the legacy
+    ``max_clip_duration + clip_speed`` path. Only prepared image clips receive an
+    explicit duration override, which also tells the core compositor not to apply
+    Clip Speed to them. This keeps Image Duration an exact user-facing duration.
+    """
 
     selected_type = MaterialType(material_type)
     if selected_type == MaterialType.video:
         return {}
 
-    video_seconds = max(0.001, float(video_clip_duration))
+    # Keep the argument in the contract because the caller owns both duration
+    # settings. Validation here catches non-numeric legacy/API values without using
+    # the video value to override image behavior.
+    max(0.001, float(video_clip_duration))
     image_seconds = max(0.001, float(image_duration))
     overrides: dict[str, float] = {}
     for raw_path in paths:
         value = str(raw_path)
         if selected_type == MaterialType.image or _is_prepared_image_clip(value):
             overrides[value] = image_seconds
-        else:
-            overrides[value] = video_seconds
     return overrides
 
 
