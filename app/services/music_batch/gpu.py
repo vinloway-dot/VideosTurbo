@@ -17,6 +17,9 @@ NVENC_ENCODERS = frozenset({"h264_nvenc", "hevc_nvenc", "av1_nvenc"})
 _active_gpu_index: ContextVar[int | None] = ContextVar(
     "music_batch_nvidia_gpu_index", default=None
 )
+_music_batch_gpu_context: ContextVar[bool] = ContextVar(
+    "music_batch_gpu_context_active", default=False
+)
 _hook_lock = threading.Lock()
 _hooks_installed = False
 _original_write_videofile = video_service._write_videofile_with_codec_fallback
@@ -89,19 +92,24 @@ def current_gpu_index() -> int | None:
     return _active_gpu_index.get()
 
 
+def music_batch_gpu_context_active() -> bool:
+    return _music_batch_gpu_context.get()
+
+
 @contextmanager
 def nvenc_gpu_context(gpu_index: int | None) -> Iterator[None]:
-    """Bind NVENC calls in the current execution context to one NVIDIA GPU."""
+    """Bind Music Batch NVENC calls to one GPU and disable silent CPU fallback."""
 
-    if gpu_index is None:
-        yield
-        return
-
-    token = _active_gpu_index.set(int(gpu_index))
+    context_token = _music_batch_gpu_context.set(True)
+    gpu_token = None
+    if gpu_index is not None:
+        gpu_token = _active_gpu_index.set(int(gpu_index))
     try:
         yield
     finally:
-        _active_gpu_index.reset(token)
+        if gpu_token is not None:
+            _active_gpu_index.reset(gpu_token)
+        _music_batch_gpu_context.reset(context_token)
 
 
 def _gpu_ffmpeg_params(codec: str) -> list[str]:
@@ -112,20 +120,23 @@ def _gpu_ffmpeg_params(codec: str) -> list[str]:
 
 
 def _gpu_aware_write_videofile(clip, output_file: str, codec: str, **kwargs):
-    """Preserve the original writer, adding -gpu only for scheduled NVENC jobs."""
+    """Use scheduled NVENC and fail closed for Music Batch hardware encoding."""
 
-    gpu_index = current_gpu_index()
-    if gpu_index is None or not is_nvenc_encoder(codec):
+    if not music_batch_gpu_context_active() or not is_nvenc_encoder(codec):
         return _original_write_videofile(clip, output_file, codec, **kwargs)
 
     effective_codec = video_service._get_effective_video_codec(codec)
     if not is_nvenc_encoder(effective_codec):
-        return _original_write_videofile(clip, output_file, codec, **kwargs)
+        raise RuntimeError(
+            f"Music Batch requested {codec}, but it is unavailable at runtime; "
+            "CPU fallback is disabled"
+        )
 
     hardware_kwargs = dict(kwargs)
     ffmpeg_params = list(hardware_kwargs.get("ffmpeg_params") or [])
     ffmpeg_params.extend(_gpu_ffmpeg_params(effective_codec))
-    hardware_kwargs["ffmpeg_params"] = ffmpeg_params
+    if ffmpeg_params:
+        hardware_kwargs["ffmpeg_params"] = ffmpeg_params
 
     try:
         clip.write_videofile(
@@ -135,16 +146,11 @@ def _gpu_aware_write_videofile(clip, output_file: str, codec: str, **kwargs):
         )
         return effective_codec
     except Exception as exc:
-        if effective_codec == video_service._DEFAULT_VIDEO_CODEC:
-            raise
-        # The CPU fallback must not inherit the NVENC-only -gpu parameter.
-        return video_service._fallback_write_videofile(
-            clip,
-            output_file,
-            effective_codec,
-            str(exc),
-            **kwargs,
+        logger.error(
+            "Music Batch NVENC write failed; refusing libx264 fallback: "
+            f"codec={effective_codec}, gpu={current_gpu_index()}, error={exc}"
         )
+        raise
 
 
 def _gpu_aware_concat(
@@ -154,10 +160,9 @@ def _gpu_aware_concat(
     output_dir: str,
     max_duration: float | None = None,
 ):
-    """Use the scheduled NVIDIA device for the direct FFmpeg concat encode."""
+    """Use the scheduled NVIDIA device and fail closed inside Music Batch."""
 
-    gpu_index = current_gpu_index()
-    if gpu_index is None:
+    if not music_batch_gpu_context_active():
         return _original_concat(
             clip_files,
             output_file,
@@ -166,42 +171,57 @@ def _gpu_aware_concat(
             max_duration,
         )
 
+    requested_codec = video_service._get_configured_video_codec()
+    if not is_nvenc_encoder(requested_codec):
+        return _original_concat(
+            clip_files,
+            output_file,
+            threads,
+            output_dir,
+            max_duration,
+        )
+
+    effective_codec = video_service._get_effective_video_codec(requested_codec)
+    if not is_nvenc_encoder(effective_codec):
+        raise RuntimeError(
+            f"Music Batch requested {requested_codec}, but it is unavailable at runtime; "
+            "CPU fallback is disabled"
+        )
+
     concat_list_file = str(Path(output_dir) / "ffmpeg-concat-list.txt")
     with open(concat_list_file, "w", encoding="utf-8") as fp:
         for clip_file in clip_files:
             formatted = video_service._format_ffmpeg_concat_path(clip_file)
             fp.write(f"file '{formatted}'\n")
 
-    def build_command(codec: str) -> list[str]:
-        command = [
-            utils.get_ffmpeg_binary(),
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            concat_list_file,
-            "-c:v",
-            codec,
+    command = [
+        utils.get_ffmpeg_binary(),
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        concat_list_file,
+        "-c:v",
+        effective_codec,
+    ]
+    command.extend(_gpu_ffmpeg_params(effective_codec))
+    command.extend(
+        [
+            "-threads",
+            str(threads or 2),
+            "-pix_fmt",
+            "yuv420p",
         ]
-        command.extend(_gpu_ffmpeg_params(codec))
-        command.extend(
-            [
-                "-threads",
-                str(threads or 2),
-                "-pix_fmt",
-                "yuv420p",
-            ]
-        )
-        if max_duration is not None and max_duration > 0:
-            command.extend(["-t", f"{max_duration:.3f}"])
-        command.append(output_file)
-        return command
+    )
+    if max_duration is not None and max_duration > 0:
+        command.extend(["-t", f"{max_duration:.3f}"])
+    command.append(output_file)
 
-    def run_concat(codec: str):
+    try:
         result = subprocess.run(
-            build_command(codec),
+            command,
             capture_output=True,
             text=True,
             check=False,
@@ -209,18 +229,13 @@ def _gpu_aware_concat(
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
             raise RuntimeError(detail or "ffmpeg concat failed")
-        return codec
-
-    try:
-        effective_codec = video_service._get_effective_video_codec()
-        try:
-            return run_concat(effective_codec)
-        except Exception as exc:
-            if effective_codec == video_service._DEFAULT_VIDEO_CODEC:
-                raise
-            result_codec = run_concat(video_service._DEFAULT_VIDEO_CODEC)
-            video_service._disable_runtime_video_codec(effective_codec, str(exc))
-            return result_codec
+        return effective_codec
+    except Exception as exc:
+        logger.error(
+            "Music Batch NVENC concat failed; refusing libx264 fallback: "
+            f"codec={effective_codec}, gpu={current_gpu_index()}, error={exc}"
+        )
+        raise
     finally:
         video_service.delete_files(concat_list_file)
 
