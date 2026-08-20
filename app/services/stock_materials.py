@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from typing import Iterable
 
@@ -35,6 +36,57 @@ def material_type_from_source(source: str) -> MaterialType:
 
 def supported_material_types(source: str) -> set[MaterialType]:
     return set(_PROVIDER_MATERIAL_TYPES.get(base_source(source), {MaterialType.video}))
+
+
+def effective_concat_mode(
+    material_type: MaterialType | str,
+    requested_mode: VideoConcatMode | str,
+) -> VideoConcatMode:
+    """Preserve the alternating Video → Image timeline in mixed mode.
+
+    Random mixed mode still randomizes candidates inside each media pool before
+    interleaving.  The final compositor must then consume that interleaved list in
+    sequence; otherwise the legacy random compositor would shuffle all items again
+    and destroy the requested media alternation.
+    """
+
+    selected_type = MaterialType(material_type)
+    requested = VideoConcatMode(requested_mode)
+    if selected_type == MaterialType.mixed:
+        return VideoConcatMode.sequential
+    return requested
+
+
+def _is_prepared_image_clip(path: str | Path) -> bool:
+    candidate = Path(path)
+    return candidate.parent.name == "stock-image-clips" or candidate.name.startswith(
+        "image-clip-"
+    )
+
+
+def build_clip_duration_overrides(
+    paths: Iterable[str | Path],
+    *,
+    material_type: MaterialType | str,
+    video_clip_duration: int,
+    image_duration: int,
+) -> dict[str, float]:
+    """Return per-file final playback limits without changing legacy video mode."""
+
+    selected_type = MaterialType(material_type)
+    if selected_type == MaterialType.video:
+        return {}
+
+    video_seconds = max(0.001, float(video_clip_duration))
+    image_seconds = max(0.001, float(image_duration))
+    overrides: dict[str, float] = {}
+    for raw_path in paths:
+        value = str(raw_path)
+        if selected_type == MaterialType.image or _is_prepared_image_clip(value):
+            overrides[value] = image_seconds
+        else:
+            overrides[value] = video_seconds
+    return overrides
 
 
 def interleave_material_paths(
@@ -106,20 +158,21 @@ def download_stock_materials(
             f"'{selected_type.value}'"
         )
 
+    requested_concat_mode = VideoConcatMode(video_concat_mode)
     if selected_type == MaterialType.video:
         return material.download_videos(
             task_id=task_id,
             search_terms=search_terms,
             source=provider,
             video_aspect=VideoAspect(video_aspect),
-            video_concat_mode=VideoConcatMode(video_concat_mode),
+            video_concat_mode=requested_concat_mode,
             audio_duration=audio_duration,
             max_clip_duration=max_clip_duration,
             match_script_order=match_script_order,
         )
 
     if selected_type == MaterialType.image:
-        return _prepare_image_materials(
+        images = _prepare_image_materials(
             task_id=task_id,
             search_terms=search_terms,
             source=provider,
@@ -129,6 +182,9 @@ def download_stock_materials(
             image_motion=image_motion,
             match_script_order=match_script_order,
         )
+        if requested_concat_mode == VideoConcatMode.random and not match_script_order:
+            random.shuffle(images)
+        return images
 
     half_duration = max(0.0, float(audio_duration)) / 2.0
     videos = material.download_videos(
@@ -136,7 +192,7 @@ def download_stock_materials(
         search_terms=search_terms,
         source=provider,
         video_aspect=VideoAspect(video_aspect),
-        video_concat_mode=VideoConcatMode(video_concat_mode),
+        video_concat_mode=requested_concat_mode,
         audio_duration=half_duration,
         max_clip_duration=max_clip_duration,
         match_script_order=match_script_order,
@@ -151,6 +207,8 @@ def download_stock_materials(
         image_motion=image_motion,
         match_script_order=match_script_order,
     )
+    if requested_concat_mode == VideoConcatMode.random and not match_script_order:
+        random.shuffle(images)
     if not videos:
         return images
     if not images:
