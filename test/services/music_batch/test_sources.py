@@ -31,6 +31,35 @@ def test_used_clip_registry_filters_seen_but_can_fallback():
     ) == [("123", "a")]
 
 
+def test_used_clip_registry_reserves_unseen_candidates_atomically():
+    registry = UsedClipRegistry()
+
+    first = registry.reserve_candidates(
+        "pexels",
+        [("shared", "shared-a"), ("first-only", "first")],
+        avoid_reuse=True,
+    )
+    second = registry.reserve_candidates(
+        "pexels",
+        [("shared", "shared-b"), ("second-only", "second")],
+        avoid_reuse=True,
+    )
+
+    assert first == [("shared", "shared-a"), ("first-only", "first")]
+    assert second == [("second-only", "second")]
+    assert registry.seen("pexels", "shared") is True
+    assert registry.seen("pexels", "second-only") is True
+
+
+def test_used_clip_registry_reservation_keeps_best_effort_fallback():
+    registry = UsedClipRegistry()
+    registry.mark("pexels", "only")
+
+    assert registry.reserve_candidates(
+        "pexels", [("only", "clip")], avoid_reuse=True
+    ) == [("only", "clip")]
+
+
 def test_used_clip_registry_does_not_filter_when_option_is_off():
     registry = UsedClipRegistry()
     registry.mark("pixabay", "x")
