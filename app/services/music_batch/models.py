@@ -65,6 +65,7 @@ class SongItem(BaseModel):
     override: SongOverride | None = None
     status: SongStatus = SongStatus.pending
     attempts: int = Field(default=0, ge=0)
+    progress: int = Field(default=0, ge=0, le=100)
     output_path: str | None = None
     latest_error: str | None = None
     started_at: str | None = None
