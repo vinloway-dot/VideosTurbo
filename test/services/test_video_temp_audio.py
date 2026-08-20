@@ -1,17 +1,20 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from app.services import video as vd
+from app.services.music_batch import gpu
 
 
-def test_windows_temp_audio_directories_are_isolated_and_cleaned_up():
-    with patch.object(vd.sys, "platform", "win32"):
-        with vd._isolated_temp_audio_dir("unused-output-dir") as first:
-            first_path = Path(first)
+def test_windows_music_batch_temp_audio_directories_are_isolated_and_cleaned_up():
+    original = {"temp_audiofile_path": "shared-temp", "logger": None}
+
+    with patch.object(gpu.sys, "platform", "win32"):
+        with gpu._isolated_moviepy_temp_audio_kwargs(original) as first_kwargs:
+            first_path = Path(first_kwargs["temp_audiofile_path"])
             assert first_path.is_dir()
+            assert first_kwargs["logger"] is None
 
-            with vd._isolated_temp_audio_dir("unused-output-dir") as second:
-                second_path = Path(second)
+            with gpu._isolated_moviepy_temp_audio_kwargs(original) as second_kwargs:
+                second_path = Path(second_kwargs["temp_audiofile_path"])
                 assert second_path.is_dir()
                 assert second_path != first_path
 
@@ -19,8 +22,12 @@ def test_windows_temp_audio_directories_are_isolated_and_cleaned_up():
 
         assert not first_path.exists()
 
+    assert original["temp_audiofile_path"] == "shared-temp"
 
-def test_non_windows_temp_audio_directory_keeps_existing_output_dir(tmp_path):
-    with patch.object(vd.sys, "platform", "linux"):
-        with vd._isolated_temp_audio_dir(str(tmp_path)) as temp_audio_dir:
-            assert temp_audio_dir == str(tmp_path)
+
+def test_non_windows_music_batch_keeps_existing_temp_audio_directory():
+    original = {"temp_audiofile_path": "/tmp/task-a", "logger": None}
+
+    with patch.object(gpu.sys, "platform", "linux"):
+        with gpu._isolated_moviepy_temp_audio_kwargs(original) as effective:
+            assert effective["temp_audiofile_path"] == "/tmp/task-a"
