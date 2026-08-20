@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,6 +16,7 @@ from app.services.music_batch.input import (
 from app.services.music_batch.manager import MusicBatchManager
 from app.services.music_batch.models import (
     BatchSettings,
+    BatchState,
     BatchStatus,
     SongItem,
     SongOverride,
@@ -189,6 +191,40 @@ def _render_override(prefix: str) -> SongOverride | None:
     )
 
 
+def _batch_progress_percent(state: BatchState) -> int:
+    if state.status in {BatchStatus.completed, BatchStatus.completed_with_failures}:
+        return 100
+    if not state.songs:
+        return 0
+
+    terminal = {SongStatus.completed, SongStatus.failed, SongStatus.skipped}
+    progress_total = 0
+    for song in state.songs:
+        if song.status in terminal:
+            progress_total += 100
+        else:
+            progress_total += max(0, min(100, int(song.progress)))
+    return max(0, min(100, round(progress_total / len(state.songs))))
+
+
+def _batch_status_text(state: BatchState, progress_percent: int) -> str:
+    if state.status == BatchStatus.completed:
+        return "เสร็จแล้ว 100%"
+    if state.status == BatchStatus.completed_with_failures:
+        return "เสร็จแล้ว (มีบางเพลงล้มเหลว) 100%"
+    if state.status == BatchStatus.failed:
+        return f"ล้มเหลว {progress_percent}%"
+    if state.status == BatchStatus.needs_reencode_confirmation:
+        return f"รอยืนยันการรวมวิดีโอ {progress_percent}%"
+    if state.status == BatchStatus.interrupted:
+        return f"หยุดชั่วคราว {progress_percent}%"
+    return f"กำลังทำงาน {progress_percent}%"
+
+
+def _should_auto_refresh(state: BatchState) -> bool:
+    return state.status == BatchStatus.processing
+
+
 def _render_state(batch_dir: Path) -> None:
     state_file = batch_dir / "batch_state.json"
     if not state_file.is_file():
@@ -201,15 +237,16 @@ def _render_state(batch_dir: Path) -> None:
 
     completed = sum(song.status == SongStatus.completed for song in state.songs)
     failed = sum(song.status == SongStatus.failed for song in state.songs)
-    skipped = sum(song.status == SongStatus.skipped for song in state.songs)
     total = len(state.songs)
-    finished = completed + failed + skipped
+    progress_percent = _batch_progress_percent(state)
+    status_text = _batch_status_text(state, progress_percent)
+
     st.progress(
-        finished / total if total else 0.0,
-        text=f"{completed} completed · {failed} failed · {total} total",
+        progress_percent / 100,
+        text=f"{status_text} · {completed} เสร็จ · {failed} ล้มเหลว · {total} ทั้งหมด",
     )
     st.write(
-        f"**Batch:** `{state.batch_id}`  ·  **Status:** `{state.status.value}`"
+        f"**Batch:** `{state.batch_id}`  ·  **Status:** **{status_text}**"
     )
     if state.fatal_error:
         st.error(state.fatal_error)
@@ -219,6 +256,7 @@ def _render_state(batch_dir: Path) -> None:
             {
                 "Song": Path(song.source_path).name,
                 "Status": song.status.value,
+                "Progress": f"{song.progress}%",
                 "Attempts": song.attempts,
                 "Output": song.output_path or "",
                 "Error": song.latest_error or "",
@@ -278,6 +316,10 @@ def _render_state(batch_dir: Path) -> None:
     if report.is_file():
         with st.expander("Batch Report"):
             st.code(report.read_text(encoding="utf-8"), language="text")
+
+    if _should_auto_refresh(state):
+        time.sleep(1)
+        st.rerun()
 
 
 def _render_resume_section(default_root: str) -> None:
