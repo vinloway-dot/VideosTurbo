@@ -8,6 +8,7 @@ Type=oneshot
 User=videosturbo
 Group=videosturbo
 WorkingDirectory=/opt/VideosTurbo
+Environment=PYTHONPATH=/opt/VideosTurbo
 Environment=MPT_CLOUD_SAFE_MODE=1
 Environment=MPT_MUSIC_BATCH_OUTPUT_ROOT=/var/lib/videosturbo/output
 Environment=MPT_CLOUD_MIN_FREE_DISK_GB=10
