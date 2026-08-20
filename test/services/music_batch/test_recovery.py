@@ -36,8 +36,9 @@ def test_find_incomplete_batches_ignores_terminal_states(tmp_path):
 
 
 def test_resume_incomplete_batches_runs_sequentially_and_continues_after_error(tmp_path):
-    first = _write_batch(tmp_path, "batch-a", BatchStatus.processing)
-    second = _write_batch(tmp_path, "batch-b", BatchStatus.interrupted)
+    _write_batch(tmp_path, "batch-a", BatchStatus.processing)
+    _write_batch(tmp_path, "batch-b", BatchStatus.interrupted)
+    expected_order = find_incomplete_batch_dirs(tmp_path)
     calls = []
 
     class Manager:
@@ -49,6 +50,6 @@ def test_resume_incomplete_batches_runs_sequentially_and_continues_after_error(t
 
     result = resume_incomplete_batches(tmp_path, manager_factory=Manager)
 
-    assert calls == [first, second]
-    assert result.resumed == [second]
-    assert result.failed == [(first, "RuntimeError: first failed")]
+    assert calls == expected_order
+    assert result.resumed == [expected_order[1]]
+    assert result.failed == [(expected_order[0], "RuntimeError: first failed")]
