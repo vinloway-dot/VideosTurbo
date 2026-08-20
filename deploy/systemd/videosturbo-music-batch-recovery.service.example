@@ -1,0 +1,30 @@
+[Unit]
+Description=VideosTurbo Music Batch Recovery
+After=network-online.target
+Before=videosturbo-webui.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=videosturbo
+Group=videosturbo
+WorkingDirectory=/opt/VideosTurbo
+Environment=PYTHONPATH=/opt/VideosTurbo
+Environment=MPT_CLOUD_SAFE_MODE=1
+Environment=MPT_MUSIC_BATCH_OUTPUT_ROOT=/var/lib/videosturbo/output
+Environment=MPT_CLOUD_MIN_FREE_DISK_GB=10
+Environment=MPT_CLOUD_MAX_MEMORY_PERCENT=90
+Environment=MPT_CLOUD_MAX_LOAD_RATIO=1.25
+Environment=MPT_CLOUD_MAX_GPU_TEMP_C=85
+Environment=MPT_CLOUD_MAX_GPU_MEMORY_PERCENT=95
+Environment=MPT_CLOUD_GUARD_POLL_SECONDS=10
+Environment=MPT_CLOUD_GUARD_TIMEOUT_SECONDS=600
+ExecStart=/bin/sh -c 'exec /usr/bin/flock -n /run/lock/videosturbo-music-batch.lock /opt/VideosTurbo/.venv/bin/python /opt/VideosTurbo/scripts/music_batch_recover.py --output-root "$MPT_MUSIC_BATCH_OUTPUT_ROOT"'
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStopSec=20
+SendSIGKILL=yes
+FinalKillSignal=SIGKILL
+
+[Install]
+WantedBy=multi-user.target

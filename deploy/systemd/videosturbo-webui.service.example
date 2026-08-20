@@ -1,0 +1,32 @@
+[Unit]
+Description=VideosTurbo WebUI (Cloud Safe Mode)
+After=network-online.target videosturbo-music-batch-recovery.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=videosturbo
+Group=videosturbo
+WorkingDirectory=/opt/VideosTurbo
+Environment=PYTHONPATH=/opt/VideosTurbo
+Environment=MPT_WEBUI_HOST=127.0.0.1
+Environment=MPT_WEBUI_PORT=8501
+Environment=MPT_CLOUD_SAFE_MODE=1
+Environment=MPT_CLOUD_MIN_FREE_DISK_GB=10
+Environment=MPT_CLOUD_MAX_MEMORY_PERCENT=90
+Environment=MPT_CLOUD_MAX_LOAD_RATIO=1.25
+Environment=MPT_CLOUD_MAX_GPU_TEMP_C=85
+Environment=MPT_CLOUD_MAX_GPU_MEMORY_PERCENT=95
+Environment=MPT_CLOUD_GUARD_POLL_SECONDS=10
+Environment=MPT_CLOUD_GUARD_TIMEOUT_SECONDS=600
+ExecStart=/usr/bin/flock -n /run/lock/videosturbo-music-batch.lock /opt/VideosTurbo/.venv/bin/python -m streamlit run /opt/VideosTurbo/webui/Main.py --server.address=127.0.0.1 --server.port=8501 --browser.gatherUsageStats=False --client.toolbarMode=minimal --logger.hideWelcomeMessage=True --server.showEmailPrompt=False --server.enableCORS=True
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStopSec=20
+SendSIGKILL=yes
+FinalKillSignal=SIGKILL
+
+[Install]
+WantedBy=multi-user.target
