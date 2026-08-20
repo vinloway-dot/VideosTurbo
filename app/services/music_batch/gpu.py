@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
+import tempfile
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -112,6 +114,32 @@ def nvenc_gpu_context(gpu_index: int | None) -> Iterator[None]:
         _music_batch_gpu_context.reset(context_token)
 
 
+@contextmanager
+def _isolated_moviepy_temp_audio_kwargs(
+    kwargs: dict[str, object],
+) -> Iterator[dict[str, object]]:
+    """Give each Windows Music Batch render its own MoviePy temp-audio directory.
+
+    MoviePy derives the temporary audio filename from the final output basename.
+    Parallel songs can therefore target the same file when every render shares the
+    system temp directory (for example ``final-1TEMP_MPY_wvf_snd.mp4``), which on
+    Windows surfaces as WinError 32.  A per-render directory keeps those names from
+    colliding while preserving the existing non-Windows task-local behavior.
+    """
+
+    if sys.platform != "win32" or not kwargs.get("temp_audiofile_path"):
+        yield kwargs
+        return
+
+    with tempfile.TemporaryDirectory(
+        prefix="mpt-music-batch-audio-",
+        ignore_cleanup_errors=True,
+    ) as temp_dir:
+        isolated = dict(kwargs)
+        isolated["temp_audiofile_path"] = temp_dir
+        yield isolated
+
+
 def _gpu_ffmpeg_params(codec: str) -> list[str]:
     gpu_index = current_gpu_index()
     if gpu_index is None or not is_nvenc_encoder(codec):
@@ -122,8 +150,17 @@ def _gpu_ffmpeg_params(codec: str) -> list[str]:
 def _gpu_aware_write_videofile(clip, output_file: str, codec: str, **kwargs):
     """Use scheduled NVENC and fail closed for Music Batch hardware encoding."""
 
-    if not music_batch_gpu_context_active() or not is_nvenc_encoder(codec):
+    if not music_batch_gpu_context_active():
         return _original_write_videofile(clip, output_file, codec, **kwargs)
+
+    if not is_nvenc_encoder(codec):
+        with _isolated_moviepy_temp_audio_kwargs(kwargs) as isolated_kwargs:
+            return _original_write_videofile(
+                clip,
+                output_file,
+                codec,
+                **isolated_kwargs,
+            )
 
     effective_codec = video_service._get_effective_video_codec(codec)
     if not is_nvenc_encoder(effective_codec):
@@ -139,11 +176,12 @@ def _gpu_aware_write_videofile(clip, output_file: str, codec: str, **kwargs):
         hardware_kwargs["ffmpeg_params"] = ffmpeg_params
 
     try:
-        clip.write_videofile(
-            output_file,
-            codec=effective_codec,
-            **hardware_kwargs,
-        )
+        with _isolated_moviepy_temp_audio_kwargs(hardware_kwargs) as isolated_kwargs:
+            clip.write_videofile(
+                output_file,
+                codec=effective_codec,
+                **isolated_kwargs,
+            )
         return effective_codec
     except Exception as exc:
         logger.error(
