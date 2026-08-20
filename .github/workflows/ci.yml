@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - feature/material-type-mixed
 
 permissions:
   contents: write
@@ -13,7 +14,9 @@ permissions:
 jobs:
   apply-image-source-validation-fix:
     name: Apply image source validation fix
-    if: github.event_name == 'pull_request' && github.head_ref == 'feature/material-type-mixed'
+    if: >-
+      (github.event_name == 'pull_request' && github.head_ref == 'feature/material-type-mixed') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/feature/material-type-mixed')
     runs-on: ubuntu-latest
     steps:
       - name: Check out feature branch
