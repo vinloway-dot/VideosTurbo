@@ -7,6 +7,8 @@ Cloud Safe Mode is intended for unattended Music Batch runs on hourly GPU server
 - **No silent CPU fallback in Music Batch:** if an NVENC render fails, that render fails instead of silently switching to `libx264` and driving CPU usage to 100%.
 - **Whole process-tree shutdown with systemd:** the supplied units use `KillMode=control-group`. Stopping or restarting the service terminates Streamlit/Python and FFmpeg descendants in the service cgroup.
 - **Persistent batch recovery:** `scripts/music_batch_recover.py` scans an output root for non-terminal `batch_state.json` files and resumes them sequentially with the GPU-aware manager.
+- **No recovery/WebUI overlap:** both systemd units hold the same non-blocking `flock` lock. Recovery runs before the WebUI at boot, and a manual recovery attempt cannot accidentally render the same batch while the WebUI service is active.
+- **Localhost-only WebUI by default:** the example service binds Streamlit to `127.0.0.1`, so a newly created public cloud server does not expose the control UI directly to the Internet.
 - **Resource admission guard:** before a new song starts, Cloud Safe Mode checks free disk, memory pressure, normalized 1-minute load, GPU temperature, and VRAM pressure. Low disk fails closed. Temporary pressure pauses admission until healthy or until the configured timeout.
 
 ## Recommended Ubuntu layout
@@ -32,14 +34,18 @@ Install the example units after checking the paths:
 sudo cp deploy/systemd/videosturbo-webui.service.example /etc/systemd/system/videosturbo-webui.service
 sudo cp deploy/systemd/videosturbo-music-batch-recovery.service.example /etc/systemd/system/videosturbo-music-batch-recovery.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now videosturbo-webui.service
 sudo systemctl enable videosturbo-music-batch-recovery.service
+sudo systemctl enable --now videosturbo-webui.service
 ```
 
-To run recovery immediately:
+When both units are enabled, recovery is ordered before the WebUI on future boots. The shared lock `/run/lock/videosturbo-music-batch.lock` prevents the two services from processing Music Batch work at the same time.
+
+To run recovery immediately while the WebUI is already active, stop the WebUI first, run recovery, then start it again:
 
 ```bash
+sudo systemctl stop videosturbo-webui.service
 sudo systemctl start videosturbo-music-batch-recovery.service
+sudo systemctl start videosturbo-webui.service
 ```
 
 To stop the WebUI safely:
@@ -49,6 +55,16 @@ sudo systemctl stop videosturbo-webui.service
 ```
 
 Because the unit uses `KillMode=control-group`, FFmpeg processes created by the service are terminated with the service. After `TimeoutStopSec`, systemd sends the final kill signal if descendants did not exit cleanly.
+
+## Access the WebUI safely
+
+The supplied WebUI service listens only on `127.0.0.1:8501`. From your local computer, create an SSH tunnel:
+
+```bash
+ssh -L 8501:127.0.0.1:8501 videosturbo@SERVER_IP
+```
+
+Then open `http://127.0.0.1:8501` on your local computer. If you later place VideosTurbo behind an authenticated reverse proxy, you may deliberately change the bind address, but do not expose an unauthenticated Streamlit control panel directly to the public Internet.
 
 ## Environment variables
 
