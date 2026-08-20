@@ -1,22 +1,16 @@
 name: Apply image source validation fix
 
 on:
-  push:
-    branches:
-      - feature/material-type-mixed
-    paths:
-      - .github/workflows/apply-image-source-validation-fix.yml
   pull_request:
     branches:
       - main
-    paths:
-      - .github/workflows/apply-image-source-validation-fix.yml
 
 permissions:
   contents: write
 
 jobs:
   patch-and-test:
+    if: github.head_ref == 'feature/material-type-mixed'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -64,8 +58,8 @@ jobs:
             st.stop()
 '''
           new = '''        # Image/Mixed modes keep a synthetic source (for example pexels_image)
-        # so the legacy material downloader can route to the new stock-image pipeline.
-        # Validation and API-key checks must use the real provider name instead.
+        # so the material downloader can route to the stock-image pipeline. Validation
+        # and API-key checks must use the real provider name instead.
         validated_video_source = stock_materials.base_source(params.video_source)
         if validated_video_source not in [
             "pexels",
@@ -99,8 +93,10 @@ jobs:
             st.error(tr("Please Enter the Coverr API Key"))
             st.stop()
 '''
-          if source.count(old) != 1:
-              raise SystemExit(f"expected one validation block, found {source.count(old)}")
+          if old not in source:
+              if "validated_video_source = stock_materials.base_source(params.video_source)" in source:
+                  raise SystemExit(0)
+              raise SystemExit("expected validation block was not found")
           path.write_text(source.replace(old, new, 1), encoding="utf-8")
 
       - name: Verify focused regression
@@ -113,10 +109,14 @@ jobs:
           uv run --no-sync pytest -q test/services/test_webui_material_type.py
           uv run --no-sync ruff check webui/Main.py test/services/test_webui_material_type.py
 
-      - name: Commit fix
+      - name: Commit fix when needed
         shell: bash
         run: |
           set -euo pipefail
+          if git diff --quiet -- webui/Main.py; then
+            echo "Validation fix already present"
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add webui/Main.py
