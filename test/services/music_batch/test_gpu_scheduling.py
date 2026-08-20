@@ -207,6 +207,11 @@ def test_nvenc_concat_command_targets_scheduled_gpu(monkeypatch, tmp_path):
     monkeypatch.setattr(gpu.subprocess, "run", fake_run)
     monkeypatch.setattr(
         gpu.video_service,
+        "_get_configured_video_codec",
+        lambda: "h264_nvenc",
+    )
+    monkeypatch.setattr(
+        gpu.video_service,
         "_get_effective_video_codec",
         lambda _codec=None: "h264_nvenc",
     )
@@ -239,6 +244,11 @@ def test_music_batch_nvenc_concat_fails_closed_without_libx264(monkeypatch, tmp_
 
     monkeypatch.setattr(gpu.utils, "get_ffmpeg_binary", lambda: "ffmpeg")
     monkeypatch.setattr(gpu.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        gpu.video_service,
+        "_get_configured_video_codec",
+        lambda: "h264_nvenc",
+    )
     monkeypatch.setattr(
         gpu.video_service,
         "_get_effective_video_codec",
