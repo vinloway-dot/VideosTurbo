@@ -47,6 +47,7 @@ from app.services import (
     cache_manager,
     llm,
     loomloom,
+    stock_materials,
     video,
     voice,
     webui_task,
@@ -1147,7 +1148,21 @@ def _apply_pending_task_restore():
 
     # 视频设置。素材上传控件不能由服务端写入，因此本地素材需要用户重新选择。
     video_source = params.get("video_source") or "pexels"
-    _set_stable_widget_value("video_source_select", video_source)
+    base_video_source = stock_materials.base_source(video_source)
+    restored_material_type = params.get("material_type") or "video"
+    _set_stable_widget_value("video_source_select", base_video_source)
+    _set_stable_widget_value(
+        f"material_type_for_{base_video_source}",
+        restored_material_type,
+    )
+    _set_stable_widget_value(
+        f"image_duration_for_{base_video_source}",
+        params.get("image_duration", 8),
+    )
+    _set_stable_widget_value(
+        f"image_motion_for_{base_video_source}",
+        params.get("image_motion") or "random",
+    )
     _set_stable_widget_value(
         "video_concat_mode_select", params.get("video_concat_mode") or "random"
     )
