@@ -104,6 +104,7 @@ class MusicBatchManager:
                 update={
                     "status": SongStatus.pending,
                     "attempts": 0,
+                    "progress": 0,
                     "output_path": None,
                     "latest_error": None,
                     "started_at": None,
@@ -125,7 +126,7 @@ class MusicBatchManager:
         self, song: SongItem, resolved: dict[str, object]
     ) -> dict[str, object]:
         sources = list(resolved.get("stock_sources") or ["pexels"])
-        return {
+        params = {
             "video_subject": Path(song.source_path).stem,
             "video_script": str(resolved.get("video_script") or ""),
             "video_terms": list(resolved.get("video_keywords") or []),
@@ -146,6 +147,16 @@ class MusicBatchManager:
             "stock_sources": sources,
             "avoid_reusing_clips": bool(resolved.get("avoid_reusing_clips", False)),
         }
+        progress_callback = resolved.get("_progress_callback")
+        if callable(progress_callback):
+            params["_progress_callback"] = progress_callback
+        return params
+
+    @staticmethod
+    def _notify_progress(render_params: dict[str, object], progress: int) -> None:
+        callback = render_params.get("_progress_callback")
+        if callable(callback):
+            callback(max(0, min(100, int(progress))))
 
     def render_song(
         self, song: SongItem, resolved: dict[str, object], output_path: Path
@@ -168,15 +179,18 @@ class MusicBatchManager:
             state=task_service.const.TASK_STATE_PROCESSING,
             progress=5,
         )
+        self._notify_progress(render_params, 8)
 
         script = params.video_script or task_service.generate_script(task_id, params)
         if not script:
             raise RuntimeError("video script generation failed")
+        self._notify_progress(render_params, 12)
 
         terms = task_service.generate_terms(task_id, params, script)
         if not terms:
             raise RuntimeError("video keyword generation failed")
         task_service.save_script_data(task_id, script, terms, params)
+        self._notify_progress(render_params, 16)
 
         audio_file, audio_duration, _sub_maker = task_service.generate_audio(
             task_id, params, script
@@ -184,13 +198,15 @@ class MusicBatchManager:
         if not audio_file or not audio_duration:
             task = task_service.sm.state.get_task(task_id) or {}
             raise RuntimeError(str(task.get("error") or "custom audio processing failed"))
+        self._notify_progress(render_params, 22)
 
         sources = list(render_params.get("stock_sources") or [params.video_source])
         source_plans = build_source_plan(sources, list(terms), float(audio_duration))
         downloaded: list[str] = []
         provider_errors: list[str] = []
         avoid_reuse = bool(render_params.get("avoid_reusing_clips", False))
-        for source_plan in source_plans:
+        plan_count = max(1, len(source_plans))
+        for plan_index, source_plan in enumerate(source_plans, start=1):
             provider_params = params.model_copy(
                 update={"video_source": source_plan.provider}
             )
@@ -202,25 +218,30 @@ class MusicBatchManager:
             )
             if not materials:
                 provider_errors.append(source_plan.provider)
-                continue
-            candidates = [
-                (Path(material_path).name, material_path)
-                for material_path in materials
-            ]
-            selected = self.used_clips.filter_candidates(
-                source_plan.provider,
-                candidates,
-                avoid_reuse=avoid_reuse,
+            else:
+                candidates = [
+                    (Path(material_path).name, material_path)
+                    for material_path in materials
+                ]
+                selected = self.used_clips.filter_candidates(
+                    source_plan.provider,
+                    candidates,
+                    avoid_reuse=avoid_reuse,
+                )
+                for clip_id, material_path in selected:
+                    downloaded.append(str(material_path))
+                    if avoid_reuse:
+                        self.used_clips.mark(source_plan.provider, clip_id)
+            self._notify_progress(
+                render_params,
+                22 + round((plan_index / plan_count) * 28),
             )
-            for clip_id, material_path in selected:
-                downloaded.append(str(material_path))
-                if avoid_reuse:
-                    self.used_clips.mark(source_plan.provider, clip_id)
 
         if not downloaded:
             providers = ", ".join(provider_errors or sources)
             raise RuntimeError(f"no usable stock videos were downloaded from: {providers}")
 
+        self._notify_progress(render_params, 55)
         final_paths, _combined_paths, warnings = task_service.generate_final_videos(
             task_id=task_id,
             params=params,
@@ -229,6 +250,7 @@ class MusicBatchManager:
             subtitle_path="",
             audio_duration=audio_duration,
         )
+        self._notify_progress(render_params, 95)
 
         requested_codec = str(render_params.get("video_encoder") or "libx264")
         disabled_codecs = getattr(
@@ -281,6 +303,18 @@ class MusicBatchManager:
                 return song
         raise KeyError(f"song with added_index={added_index} not found")
 
+    def _set_song_progress(
+        self, store: BatchStateStore, added_index: int, progress: int
+    ) -> None:
+        normalized = max(0, min(100, int(progress)))
+
+        def update(current: BatchState) -> BatchState:
+            target = self._song_by_added_index(current, added_index)
+            target.progress = normalized
+            return current
+
+        store.mutate(update)
+
     def _process_song(self, store: BatchStateStore, added_index: int) -> None:
         initial = store.load()
         settings = initial.settings
@@ -295,6 +329,7 @@ class MusicBatchManager:
                 song.status = (
                     SongStatus.processing if song.attempts == 1 else SongStatus.retrying
                 )
+                song.progress = 5
                 song.started_at = _utc_now()
                 song.latest_error = None
                 if not song.output_path:
@@ -314,6 +349,9 @@ class MusicBatchManager:
             )
             temp_path.unlink(missing_ok=True)
             resolved = resolve_song_settings(settings, song)
+            resolved["_progress_callback"] = lambda value: self._set_song_progress(
+                store, added_index, value
+            )
 
             try:
                 renderer = self.song_renderer or self.render_song
@@ -331,6 +369,7 @@ class MusicBatchManager:
                 def complete(current: BatchState) -> BatchState:
                     target = self._song_by_added_index(current, added_index)
                     target.status = SongStatus.completed
+                    target.progress = 100
                     target.output_path = str(final_path)
                     target.completed_at = _utc_now()
                     target.latest_error = None
@@ -354,6 +393,7 @@ class MusicBatchManager:
                         target.status = SongStatus.retrying
                     else:
                         target.status = SongStatus.failed
+                        target.progress = 100
                         target.completed_at = _utc_now()
                     return current
 
@@ -427,6 +467,7 @@ class MusicBatchManager:
                 for song in current.songs:
                     if song.status in {SongStatus.processing, SongStatus.retrying}:
                         song.status = SongStatus.pending
+                        song.progress = 0
                 return current
 
             failed = store.mutate(fail)
