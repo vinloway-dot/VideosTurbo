@@ -72,13 +72,21 @@ def test_download_mixed_materials_uses_both_sources_when_available(monkeypatch, 
     assert calls == [("video", 30.0), ("image", 30.0)]
 
 
-def test_download_mixed_materials_falls_back_to_images_when_video_search_is_empty(monkeypatch, tmp_path):
-    monkeypatch.setattr(stock_materials.material, "download_videos", lambda **kwargs: [])
-    monkeypatch.setattr(
-        stock_materials.stock_images,
-        "download_images",
-        lambda **kwargs: [tmp_path / "image-a.jpg"],
-    )
+def test_download_mixed_materials_falls_back_to_full_length_images_when_video_search_is_empty(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    def fake_download_videos(**kwargs):
+        calls.append(("video", kwargs["audio_duration"]))
+        return []
+
+    def fake_download_images(**kwargs):
+        calls.append(("image", kwargs["audio_duration"]))
+        return [tmp_path / "image-a.jpg"]
+
+    monkeypatch.setattr(stock_materials.material, "download_videos", fake_download_videos)
+    monkeypatch.setattr(stock_materials.stock_images, "download_images", fake_download_images)
     monkeypatch.setattr(
         stock_materials.image_materials,
         "prepare_image_clips",
@@ -100,3 +108,39 @@ def test_download_mixed_materials_falls_back_to_images_when_video_search_is_empt
     )
 
     assert paths == ["image-a.mp4"]
+    assert calls == [("video", 15.0), ("image", 30.0)]
+
+
+def test_download_mixed_materials_expands_video_pool_when_images_are_empty(monkeypatch):
+    calls = []
+
+    def fake_download_videos(**kwargs):
+        duration = kwargs["audio_duration"]
+        calls.append(("video", duration))
+        if duration < 30.0:
+            return ["video-a.mp4"]
+        return ["video-a.mp4", "video-b.mp4", "video-c.mp4"]
+
+    def fake_download_images(**kwargs):
+        calls.append(("image", kwargs["audio_duration"]))
+        return []
+
+    monkeypatch.setattr(stock_materials.material, "download_videos", fake_download_videos)
+    monkeypatch.setattr(stock_materials.stock_images, "download_images", fake_download_images)
+
+    paths = stock_materials.download_stock_materials(
+        task_id="task-3",
+        search_terms=["mountain"],
+        source="pexels",
+        material_type="mixed",
+        video_aspect="16:9",
+        video_concat_mode="random",
+        audio_duration=30.0,
+        max_clip_duration=8,
+        image_duration=8,
+        image_motion="random",
+        match_script_order=False,
+    )
+
+    assert paths == ["video-a.mp4", "video-b.mp4", "video-c.mp4"]
+    assert calls == [("video", 15.0), ("image", 15.0), ("video", 30.0)]
