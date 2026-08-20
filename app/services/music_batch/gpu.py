@@ -141,8 +141,8 @@ def _gpu_aware_write_videofile(clip, output_file: str, codec: str, **kwargs):
         return video_service._fallback_write_videofile(
             clip,
             output_file,
-            failed_codec=effective_codec,
-            reason=str(exc),
+            effective_codec,
+            str(exc),
             **kwargs,
         )
 
