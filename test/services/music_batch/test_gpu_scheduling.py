@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from app.services.music_batch import gpu
 from app.services.music_batch.gpu_manager import MusicBatchManager
 from app.services.music_batch.models import BatchSettings, BatchState, SongItem
@@ -129,34 +131,64 @@ def test_nvenc_writer_injects_scheduled_gpu(monkeypatch):
     assert calls[0][2]["ffmpeg_params"][-2:] == ["-gpu", "1"]
 
 
-def test_nvenc_writer_drops_gpu_parameter_on_cpu_fallback(monkeypatch):
-    fallback_kwargs = {}
+def test_music_batch_nvenc_writer_fails_closed_without_cpu_fallback(monkeypatch):
+    fallback_calls = []
 
     class Clip:
         def write_videofile(self, output_file, codec, **kwargs):
             raise RuntimeError("nvenc failed")
-
-    def fallback(_clip, _output_file, _failed_codec, _reason, **kwargs):
-        fallback_kwargs.update(kwargs)
-        return "libx264"
 
     monkeypatch.setattr(
         gpu.video_service,
         "_get_effective_video_codec",
         lambda _codec=None: "h264_nvenc",
     )
-    monkeypatch.setattr(gpu.video_service, "_fallback_write_videofile", fallback)
+    monkeypatch.setattr(
+        gpu.video_service,
+        "_fallback_write_videofile",
+        lambda *args, **kwargs: fallback_calls.append((args, kwargs)),
+    )
 
     with gpu.nvenc_gpu_context(1):
-        result = gpu._gpu_aware_write_videofile(
-            Clip(),
-            "out.mp4",
-            "h264_nvenc",
-            logger=None,
-        )
+        with pytest.raises(RuntimeError, match="nvenc failed"):
+            gpu._gpu_aware_write_videofile(
+                Clip(),
+                "out.mp4",
+                "h264_nvenc",
+                logger=None,
+            )
 
-    assert result == "libx264"
-    assert "ffmpeg_params" not in fallback_kwargs
+    assert fallback_calls == []
+
+
+def test_music_batch_nvenc_writer_fails_closed_even_without_detected_gpu(monkeypatch):
+    fallback_calls = []
+
+    class Clip:
+        def write_videofile(self, output_file, codec, **kwargs):
+            raise RuntimeError("nvenc failed")
+
+    monkeypatch.setattr(
+        gpu.video_service,
+        "_get_effective_video_codec",
+        lambda _codec=None: "h264_nvenc",
+    )
+    monkeypatch.setattr(
+        gpu.video_service,
+        "_fallback_write_videofile",
+        lambda *args, **kwargs: fallback_calls.append((args, kwargs)),
+    )
+
+    with gpu.nvenc_gpu_context(None):
+        with pytest.raises(RuntimeError, match="nvenc failed"):
+            gpu._gpu_aware_write_videofile(
+                Clip(),
+                "out.mp4",
+                "h264_nvenc",
+                logger=None,
+            )
+
+    assert fallback_calls == []
 
 
 def test_nvenc_concat_command_targets_scheduled_gpu(monkeypatch, tmp_path):
@@ -191,3 +223,36 @@ def test_nvenc_concat_command_targets_scheduled_gpu(monkeypatch, tmp_path):
     command = commands[0]
     gpu_pos = command.index("-gpu")
     assert command[gpu_pos + 1] == "1"
+
+
+def test_music_batch_nvenc_concat_fails_closed_without_libx264(monkeypatch, tmp_path):
+    commands = []
+
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = "nvenc session failed"
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return Result()
+
+    monkeypatch.setattr(gpu.utils, "get_ffmpeg_binary", lambda: "ffmpeg")
+    monkeypatch.setattr(gpu.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        gpu.video_service,
+        "_get_effective_video_codec",
+        lambda _codec=None: "h264_nvenc",
+    )
+
+    with gpu.nvenc_gpu_context(0):
+        with pytest.raises(RuntimeError, match="nvenc session failed"):
+            gpu._gpu_aware_concat(
+                [str(tmp_path / "a.mp4")],
+                str(tmp_path / "out.mp4"),
+                threads=2,
+                output_dir=str(tmp_path),
+            )
+
+    codecs = [command[command.index("-c:v") + 1] for command in commands]
+    assert codecs == ["h264_nvenc"]
