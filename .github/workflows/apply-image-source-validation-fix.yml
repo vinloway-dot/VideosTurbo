@@ -1,0 +1,124 @@
+name: Apply image source validation fix
+
+on:
+  push:
+    branches:
+      - feature/material-type-mixed
+    paths:
+      - .github/workflows/apply-image-source-validation-fix.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/apply-image-source-validation-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/material-type-mixed
+          fetch-depth: 0
+
+      - name: Apply exact validation patch
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("webui/Main.py")
+          source = path.read_text(encoding="utf-8")
+          old = '''        if params.video_source not in [
+            "pexels",
+            "pixabay",
+            "coverr",
+            "loomloom",
+            "local",
+        ]:
+            _remove_active_generation_task(task_id)
+            st.error(tr("Please Select a Valid Video Source"))
+            st.stop()
+
+        if params.video_source == "pexels" and not config.app.get(
+            "pexels_api_keys", ""
+        ):
+            _remove_active_generation_task(task_id)
+            st.error(tr("Please Enter the Pexels API Key"))
+            st.stop()
+
+        if params.video_source == "pixabay" and not config.app.get(
+            "pixabay_api_keys", ""
+        ):
+            _remove_active_generation_task(task_id)
+            st.error(tr("Please Enter the Pixabay API Key"))
+            st.stop()
+
+        if params.video_source == "coverr" and not config.app.get(
+            "coverr_api_keys", ""
+        ):
+            _remove_active_generation_task(task_id)
+            st.error(tr("Please Enter the Coverr API Key"))
+            st.stop()
+'''
+          new = '''        # Image/Mixed modes keep a synthetic source (for example pexels_image)
+        # so the legacy material downloader can route to the new stock-image pipeline.
+        # Validation and API-key checks must use the real provider name instead.
+        validated_video_source = stock_materials.base_source(params.video_source)
+        if validated_video_source not in [
+            "pexels",
+            "pixabay",
+            "coverr",
+            "loomloom",
+            "local",
+        ]:
+            _remove_active_generation_task(task_id)
+            st.error(tr("Please Select a Valid Video Source"))
+            st.stop()
+
+        if validated_video_source == "pexels" and not config.app.get(
+            "pexels_api_keys", ""
+        ):
+            _remove_active_generation_task(task_id)
+            st.error(tr("Please Enter the Pexels API Key"))
+            st.stop()
+
+        if validated_video_source == "pixabay" and not config.app.get(
+            "pixabay_api_keys", ""
+        ):
+            _remove_active_generation_task(task_id)
+            st.error(tr("Please Enter the Pixabay API Key"))
+            st.stop()
+
+        if validated_video_source == "coverr" and not config.app.get(
+            "coverr_api_keys", ""
+        ):
+            _remove_active_generation_task(task_id)
+            st.error(tr("Please Enter the Coverr API Key"))
+            st.stop()
+'''
+          if source.count(old) != 1:
+              raise SystemExit(f"expected one validation block, found {source.count(old)}")
+          path.write_text(source.replace(old, new, 1), encoding="utf-8")
+
+      - name: Verify focused regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile webui/Main.py
+          git diff --check
+          uv sync --frozen --python 3.11
+          uv run --no-sync pytest -q test/services/test_webui_material_type.py
+          uv run --no-sync ruff check webui/Main.py test/services/test_webui_material_type.py
+
+      - name: Commit fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add webui/Main.py
+          git commit -m "fix: validate image material sources by provider"
+          git push origin HEAD:feature/material-type-mixed
