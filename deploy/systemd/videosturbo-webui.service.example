@@ -8,6 +8,7 @@ Type=simple
 User=videosturbo
 Group=videosturbo
 WorkingDirectory=/opt/VideosTurbo
+Environment=PYTHONPATH=/opt/VideosTurbo
 Environment=MPT_WEBUI_HOST=0.0.0.0
 Environment=MPT_WEBUI_PORT=8501
 Environment=MPT_CLOUD_SAFE_MODE=1
