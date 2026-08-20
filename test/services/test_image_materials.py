@@ -58,9 +58,36 @@ def test_interpolate_motion_fraction_is_clamped():
 
 
 def test_prepared_image_clip_name_keeps_stable_source_identity():
-    source = Path("stock-image-12345.jpg")
+    source = Path("stock-image-pexels-12345.jpg")
 
     assert (
         image_materials.output_filename_for_image(source)
-        == "image-clip-stock-image-12345.mp4"
+        == "image-clip-stock-image-pexels-12345.mp4"
     )
+
+
+def test_prepare_stock_image_clip_reuses_existing_stable_clip_without_rerender(
+    monkeypatch, tmp_path
+):
+    image_path = tmp_path / "stock-image-pexels-12345.jpg"
+    image_path.write_bytes(b"image")
+    output_dir = tmp_path / "clips"
+    output_dir.mkdir()
+    existing = output_dir / image_materials.output_filename_for_image(image_path)
+    existing.write_bytes(b"video")
+
+    def unexpected_build(*args, **kwargs):
+        raise AssertionError("stable stock image clip should be reused")
+
+    monkeypatch.setattr(image_materials, "_build_motion_clip", unexpected_build)
+
+    result = image_materials.prepare_image_clips(
+        [image_path],
+        output_dir=output_dir,
+        duration=8,
+        motion="none",
+        aspect="16:9",
+        codec="libx264",
+    )
+
+    assert result == [str(existing)]
