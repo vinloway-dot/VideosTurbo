@@ -69,6 +69,7 @@ class SongItem(BaseModel):
     latest_error: str | None = None
     started_at: str | None = None
     completed_at: str | None = None
+    gpu_index: int | None = Field(default=None, ge=0)
 
 
 class BatchState(BaseModel):
