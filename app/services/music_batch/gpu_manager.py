@@ -23,21 +23,24 @@ from app.services.music_batch.models import (
     SongItem,
     SongStatus,
 )
+from app.services.music_batch.resource_guard import ResourceGuard
 from app.services.music_batch.state import BatchStateStore
 
 GpuDetector = Callable[[], list[int]]
 
 
 class MusicBatchManager(BaseMusicBatchManager):
-    """Music Batch manager with automatic single-/multi-NVIDIA-GPU scheduling."""
+    """Music Batch manager with automatic GPU scheduling and Cloud Safe admission."""
 
     def __init__(
         self,
         render_adapter=None,
         song_renderer=None,
         gpu_detector: GpuDetector | None = None,
+        resource_guard: ResourceGuard | None = None,
     ) -> None:
         self.gpu_detector = gpu_detector or detect_nvidia_gpu_indices
+        self.resource_guard = resource_guard or ResourceGuard.from_env()
         install_video_gpu_hooks()
 
         wrapped_renderer = None
@@ -65,8 +68,6 @@ class MusicBatchManager(BaseMusicBatchManager):
         try:
             return self.gpu_detector()
         except Exception as exc:
-            # Preflight remains responsible for deciding whether the encoder is usable.
-            # Detection failure here simply leaves FFmpeg on its default NVIDIA device.
             logger.warning(f"failed to detect NVIDIA GPUs for Music Batch: {exc}")
             return []
 
@@ -76,6 +77,12 @@ class MusicBatchManager(BaseMusicBatchManager):
         added_index: int,
         gpu_index: int | None,
     ) -> None:
+        current = store.load()
+        self.resource_guard.wait_until_safe(
+            Path(current.settings.output_root),
+            gpu_index,
+        )
+
         def record_assignment(state: BatchState) -> BatchState:
             song = self._song_by_added_index(state, added_index)
             song.gpu_index = gpu_index
