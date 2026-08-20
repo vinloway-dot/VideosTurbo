@@ -174,14 +174,28 @@ def prepare_image_clips(
         if not image_path.is_file():
             logger.warning(f"skip missing stock image: {image_path}")
             continue
-        selected_motion = choose_image_motion(image_motion, rng=rng)
         base_filename = output_filename_for_image(image_path)
         output_path = destination / base_filename
-        output_stem = Path(base_filename).stem
-        suffix = 2
-        while output_path.exists():
-            output_path = destination / f"{output_stem}-{suffix}.mp4"
-            suffix += 1
+        is_stable_stock_image = image_path.name.startswith("stock-image-")
+        if (
+            is_stable_stock_image
+            and output_path.is_file()
+            and output_path.stat().st_size > 0
+        ):
+            logger.info(f"prepared stock image clip already exists: {output_path}")
+            results.append(str(output_path))
+            continue
+
+        if is_stable_stock_image and output_path.exists():
+            output_path.unlink(missing_ok=True)
+        elif not is_stable_stock_image:
+            output_stem = Path(base_filename).stem
+            suffix = 2
+            while output_path.exists():
+                output_path = destination / f"{output_stem}-{suffix}.mp4"
+                suffix += 1
+
+        selected_motion = choose_image_motion(image_motion, rng=rng)
 
         composite = None
         child_clips = []

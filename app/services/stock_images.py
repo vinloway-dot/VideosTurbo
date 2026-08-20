@@ -213,6 +213,24 @@ def _extension_for_image(item: MaterialInfo, response: requests.Response) -> str
 
 
 def _download_image(item: MaterialInfo, directory: Path, index: int) -> Path:
+    source = item.source_info if isinstance(item.source_info, dict) else {}
+    raw_asset_id = source.get("asset_id")
+    asset_identity = _SAFE_FILENAME.sub(
+        "-",
+        str(raw_asset_id if raw_asset_id not in (None, "") else index),
+    ).strip("-_") or str(index)
+    provider_identity = _SAFE_FILENAME.sub(
+        "-",
+        str(item.provider or source.get("provider") or "unknown").strip().lower(),
+    ).strip("-_") or "unknown"
+    identity = f"{provider_identity}-{asset_identity}"
+
+    for extension in (".jpg", ".jpeg", ".png", ".webp"):
+        existing = directory / f"stock-image-{identity}{extension}"
+        if existing.is_file() and existing.stat().st_size > 0:
+            logger.info(f"stock image already exists: {existing}")
+            return existing
+
     response = requests.get(
         item.url,
         proxies=config.proxy,
@@ -230,18 +248,10 @@ def _download_image(item: MaterialInfo, directory: Path, index: int) -> Path:
     if not response.content:
         raise ValueError("downloaded image is empty")
 
-    source = item.source_info if isinstance(item.source_info, dict) else {}
-    raw_asset_id = source.get("asset_id")
-    identity = _SAFE_FILENAME.sub(
-        "-",
-        str(raw_asset_id if raw_asset_id not in (None, "") else index),
-    ).strip("-_") or str(index)
     extension = _extension_for_image(item, response)
     target = directory / f"stock-image-{identity}{extension}"
-    suffix = 2
-    while target.exists():
-        target = directory / f"stock-image-{identity}-{suffix}{extension}"
-        suffix += 1
+    if target.is_file() and target.stat().st_size > 0:
+        return target
     target.write_bytes(response.content)
     return target
 
