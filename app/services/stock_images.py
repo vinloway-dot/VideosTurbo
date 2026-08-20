@@ -19,7 +19,9 @@ _IMAGE_CONTENT_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp"}
 _SAFE_FILENAME = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
-def _matches_image_aspect(width: object, height: object, video_aspect: VideoAspect) -> bool:
+def _matches_image_aspect(
+    width: object, height: object, video_aspect: VideoAspect
+) -> bool:
     aspect = VideoAspect(video_aspect)
     # The existing local-image pipeline crops to the requested output ratio. Stock
     # sites rarely provide exact square originals, so square searches intentionally
@@ -88,7 +90,9 @@ def search_images_pexels(
         item.source_info = {
             "provider": "pexels",
             "search_term": str(search_term or "").strip(),
-            "asset_id": str(photo.get("id")) if photo.get("id") is not None else None,
+            "asset_id": str(photo.get("id"))
+            if photo.get("id") is not None
+            else None,
             "source_page": material._safe_public_url(photo.get("url")),
             "creator": material._creator_info(
                 {
@@ -97,7 +101,9 @@ def search_images_pexels(
                 }
             ),
             "rendition": {
-                "id": str(photo.get("id")) if photo.get("id") is not None else None,
+                "id": str(photo.get("id"))
+                if photo.get("id") is not None
+                else None,
                 "width": int(width or 0),
                 "height": int(height or 0),
             },
@@ -240,6 +246,11 @@ def _download_image(item: MaterialInfo, directory: Path, index: int) -> Path:
     return target
 
 
+def _image_candidate_key(item: MaterialInfo) -> tuple[str, str]:
+    info = item.source_info if isinstance(item.source_info, dict) else {}
+    return item.provider, str(info.get("asset_id") or item.url)
+
+
 def download_images(
     *,
     task_id: str,
@@ -274,39 +285,80 @@ def download_images(
     source_records: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
-    for term in terms:
-        items = search_fn(term, VideoAspect(video_aspect))
-        logger.info(f"found {len(items)} images for '{term}'")
-        for item in items:
-            info = item.source_info if isinstance(item.source_info, dict) else {}
-            dedupe_key = (item.provider, str(info.get("asset_id") or item.url))
-            if dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
-            try:
-                local_path = _download_image(
-                    item, material_directory, len(downloaded) + 1
+    def save_candidate(item: MaterialInfo) -> bool:
+        dedupe_key = _image_candidate_key(item)
+        if dedupe_key in seen:
+            return False
+        seen.add(dedupe_key)
+        try:
+            local_path = _download_image(
+                item,
+                material_directory,
+                len(downloaded) + 1,
+            )
+        except Exception as exc:
+            logger.warning(
+                "failed to download stock image: "
+                f"provider={item.provider}, error={type(exc).__name__}, detail={exc}"
+            )
+            return False
+
+        downloaded.append(local_path)
+        try:
+            source_records.append(
+                material._material_source_record(item, str(local_path))
+            )
+        except Exception as exc:
+            logger.warning(
+                "failed to prepare image source record: "
+                f"provider={item.provider}, error={type(exc).__name__}, detail={exc}"
+            )
+        return True
+
+    if match_script_order:
+        candidate_groups: list[tuple[str, list[MaterialInfo]]] = []
+        candidate_seen: set[tuple[str, str]] = set()
+        for term in terms:
+            items = search_fn(term, VideoAspect(video_aspect))
+            logger.info(f"found {len(items)} images for '{term}'")
+            term_items: list[MaterialInfo] = []
+            for item in items:
+                candidate_key = _image_candidate_key(item)
+                if candidate_key in candidate_seen:
+                    continue
+                candidate_seen.add(candidate_key)
+                term_items.append(item)
+            if term_items:
+                candidate_groups.append((term, term_items))
+
+        candidate_index = 0
+        while candidate_groups and len(downloaded) < needed:
+            has_candidate = False
+            for term, term_items in candidate_groups:
+                if candidate_index >= len(term_items):
+                    continue
+                has_candidate = True
+                item = term_items[candidate_index]
+                logger.info(
+                    "downloading ordered image material: "
+                    f"term={term!r}, provider={item.provider}"
                 )
-            except Exception as exc:
-                logger.warning(
-                    "failed to download stock image: "
-                    f"provider={item.provider}, error={type(exc).__name__}, detail={exc}"
-                )
-                continue
-            downloaded.append(local_path)
-            try:
-                source_records.append(
-                    material._material_source_record(item, str(local_path))
-                )
-            except Exception as exc:
-                logger.warning(
-                    "failed to prepare image source record: "
-                    f"provider={item.provider}, error={type(exc).__name__}, detail={exc}"
-                )
+                save_candidate(item)
+                if len(downloaded) >= needed:
+                    break
+            if not has_candidate:
+                break
+            candidate_index += 1
+    else:
+        for term in terms:
+            items = search_fn(term, VideoAspect(video_aspect))
+            logger.info(f"found {len(items)} images for '{term}'")
+            for item in items:
+                save_candidate(item)
+                if len(downloaded) >= needed:
+                    break
             if len(downloaded) >= needed:
                 break
-        if len(downloaded) >= needed:
-            break
 
     if persist_sources and source_records:
         material._persist_material_sources(task_id, source_records)
