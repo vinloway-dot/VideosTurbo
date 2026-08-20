@@ -1,4 +1,5 @@
 import random
+from pathlib import Path
 
 import pytest
 
@@ -54,3 +55,12 @@ def test_interpolate_motion_fraction_is_clamped():
     assert image_materials.motion_fraction(-1.0, 8.0) == 0.0
     assert image_materials.motion_fraction(4.0, 8.0) == pytest.approx(0.5)
     assert image_materials.motion_fraction(99.0, 8.0) == 1.0
+
+
+def test_prepared_image_clip_name_keeps_stable_source_identity():
+    source = Path("stock-image-12345.jpg")
+
+    assert (
+        image_materials.output_filename_for_image(source)
+        == "image-clip-stock-image-12345.mp4"
+    )
