@@ -135,6 +135,9 @@ class MusicBatchManager:
             "video_transition_mode": resolved.get("video_transition_mode"),
             "video_clip_duration": int(resolved.get("video_clip_duration") or 8),
             "video_clip_speed": float(resolved.get("video_clip_speed") or 1.0),
+            "material_type": resolved.get("material_type") or "video",
+            "image_duration": int(resolved.get("image_duration") or 8),
+            "image_motion": resolved.get("image_motion") or "random",
             "video_count": 1,
             "video_source": sources[0] if sources else "pexels",
             "custom_audio_file": str(Path(song.source_path).resolve()),
@@ -207,9 +210,10 @@ class MusicBatchManager:
         avoid_reuse = bool(render_params.get("avoid_reusing_clips", False))
         plan_count = max(1, len(source_plans))
         for plan_index, source_plan in enumerate(source_plans, start=1):
-            provider_params = params.model_copy(
-                update={"video_source": source_plan.provider}
-            )
+            provider_payload = params.model_dump(mode="python")
+            provider_payload["video_source"] = source_plan.provider
+            provider_payload["material_type"] = params.material_type
+            provider_params = VideoParams.model_validate(provider_payload)
             materials = task_service.get_video_materials(
                 task_id,
                 provider_params,
@@ -239,7 +243,7 @@ class MusicBatchManager:
 
         if not downloaded:
             providers = ", ".join(provider_errors or sources)
-            raise RuntimeError(f"no usable stock videos were downloaded from: {providers}")
+            raise RuntimeError(f"no usable stock materials were downloaded from: {providers}")
 
         self._notify_progress(render_params, 55)
         final_paths, _combined_paths, warnings = task_service.generate_final_videos(

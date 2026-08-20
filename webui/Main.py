@@ -47,6 +47,7 @@ from app.services import (
     cache_manager,
     llm,
     loomloom,
+    stock_materials,
     video,
     voice,
     webui_task,
@@ -1147,7 +1148,21 @@ def _apply_pending_task_restore():
 
     # 视频设置。素材上传控件不能由服务端写入，因此本地素材需要用户重新选择。
     video_source = params.get("video_source") or "pexels"
-    _set_stable_widget_value("video_source_select", video_source)
+    base_video_source = stock_materials.base_source(video_source)
+    restored_material_type = str(params.get("material_type") or "video")
+    _set_stable_widget_value("video_source_select", base_video_source)
+    _set_stable_widget_value(
+        f"material_type_for_{base_video_source}",
+        restored_material_type,
+    )
+    _set_stable_widget_value(
+        f"image_duration_for_{base_video_source}",
+        params.get("image_duration", 8),
+    )
+    _set_stable_widget_value(
+        f"image_motion_for_{base_video_source}",
+        params.get("image_motion") or "random",
+    )
     _set_stable_widget_value(
         "video_concat_mode_select", params.get("video_concat_mode") or "random"
     )
@@ -3246,7 +3261,7 @@ def _render_video_settings(panel, params):
 
             saved_video_source_name = config.app.get("video_source", "pexels")
 
-            params.video_source = stable_selectbox(
+            selected_video_source = stable_selectbox(
                 tr("Video Source"),
                 options=[value for _, value in video_sources],
                 default_value=saved_video_source_name,
@@ -3255,7 +3270,67 @@ def _render_video_settings(panel, params):
                     (v, label) for label, v in video_sources
                 )[value],
             )
-            _set_runtime_config("app", "video_source", params.video_source)
+            _set_runtime_config("app", "video_source", selected_video_source)
+
+            material_type_labels = {
+                "video": "Video",
+                "image": "Image",
+                "mixed": "Video + Image",
+            }
+            supported_material_types = (
+                ["video", "image", "mixed"]
+                if selected_video_source in {"pexels", "pixabay"}
+                else ["video"]
+            )
+            saved_material_type = str(config.ui.get("material_type", "video") or "video")
+            if saved_material_type not in supported_material_types:
+                saved_material_type = "video"
+            params.material_type = stable_selectbox(
+                "Material Type",
+                options=supported_material_types,
+                default_value=saved_material_type,
+                key=f"material_type_for_{selected_video_source}",
+                format_func=lambda value: material_type_labels[value],
+                disabled=len(supported_material_types) == 1,
+            )
+            _set_runtime_config("ui", "material_type", params.material_type)
+
+            params.image_duration = 8
+            params.image_motion = "random"
+            if params.material_type in {"image", "mixed"}:
+                params.image_duration = st.number_input(
+                    "Image Duration (seconds)",
+                    min_value=1,
+                    max_value=30,
+                    value=int(config.ui.get("image_duration", 8) or 8),
+                    step=1,
+                    key=f"image_duration_for_{selected_video_source}",
+                )
+                motion_labels = {
+                    "slow_zoom_in": "Slow Zoom In",
+                    "slow_zoom_out": "Slow Zoom Out",
+                    "pan_left_right": "Pan Left → Right",
+                    "pan_right_left": "Pan Right → Left",
+                    "random": "Random",
+                    "none": "None",
+                }
+                saved_image_motion = str(config.ui.get("image_motion", "random") or "random")
+                if saved_image_motion not in motion_labels:
+                    saved_image_motion = "random"
+                params.image_motion = stable_selectbox(
+                    "Ken Burns Effect",
+                    options=list(motion_labels),
+                    default_value=saved_image_motion,
+                    key=f"image_motion_for_{selected_video_source}",
+                    format_func=lambda value: motion_labels[value],
+                )
+                _set_runtime_config("ui", "image_duration", int(params.image_duration))
+                _set_runtime_config("ui", "image_motion", params.image_motion)
+
+            if selected_video_source in {"pexels", "pixabay"} and params.material_type != "video":
+                params.video_source = f"{selected_video_source}_{params.material_type}"
+            else:
+                params.video_source = selected_video_source
 
             if params.video_source == "local":
                 # Streamlit 的文件类型校验对扩展名大小写敏感，这里同时放行大小写两种形式。
@@ -5069,7 +5144,8 @@ def _render_generation_controls(
             st.error(tr("Video Script and Subject Cannot Both Be Empty"))
             st.stop()
 
-        if params.video_source not in [
+        validated_video_source = stock_materials.base_source(params.video_source)
+        if validated_video_source not in [
             "pexels",
             "pixabay",
             "coverr",
@@ -5080,21 +5156,21 @@ def _render_generation_controls(
             st.error(tr("Please Select a Valid Video Source"))
             st.stop()
 
-        if params.video_source == "pexels" and not config.app.get(
+        if validated_video_source == "pexels" and not config.app.get(
             "pexels_api_keys", ""
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the Pexels API Key"))
             st.stop()
 
-        if params.video_source == "pixabay" and not config.app.get(
+        if validated_video_source == "pixabay" and not config.app.get(
             "pixabay_api_keys", ""
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the Pixabay API Key"))
             st.stop()
 
-        if params.video_source == "coverr" and not config.app.get(
+        if validated_video_source == "coverr" and not config.app.get(
             "coverr_api_keys", ""
         ):
             _remove_active_generation_task(task_id)

@@ -675,6 +675,12 @@ def get_video_materials(
             audio_duration=audio_duration * params.video_count,
             max_clip_duration=params.video_clip_duration,
             match_script_order=params.match_materials_to_script,
+            image_duration=params.image_duration,
+            image_motion=(
+                params.image_motion.value
+                if hasattr(params.image_motion, "value")
+                else str(params.image_motion)
+            ),
         )
         if not downloaded_videos:
             _mark_task_failed(
@@ -732,6 +738,8 @@ def _record_loomloom_run_reference(
 def generate_final_videos(
     task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration
 ):
+    from app.services import stock_materials
+
     final_video_paths = []
     combined_video_paths = []
     warnings = []
@@ -741,13 +749,25 @@ def generate_final_videos(
         and bgm_service.should_use_bgm(params.bgm_type, params.bgm_volume)
     )
     # 多视频生成默认会打散素材以增加差异；但“按文案顺序匹配素材”追求的是
-    # 时间线稳定性和可解释性，所以开启后所有输出都使用顺序拼接。
+    # 时间线稳定性和可解释性，所以开启后所有输出都使用顺序拼接。Mixed 模式
+    # 会先在各自素材池内随机，再按 Video -> Image 交错，因此最终 compositor
+    # 必须顺序消费交错后的列表，不能再次全局打乱。
     if params.match_materials_to_script:
-        video_concat_mode = VideoConcatMode.sequential
+        requested_concat_mode = VideoConcatMode.sequential
     elif params.video_count == 1:
-        video_concat_mode = params.video_concat_mode
+        requested_concat_mode = params.video_concat_mode
     else:
-        video_concat_mode = VideoConcatMode.random
+        requested_concat_mode = VideoConcatMode.random
+    video_concat_mode = stock_materials.effective_concat_mode(
+        params.material_type,
+        requested_concat_mode,
+    )
+    clip_duration_overrides = stock_materials.build_clip_duration_overrides(
+        downloaded_videos,
+        material_type=params.material_type,
+        video_clip_duration=params.video_clip_duration,
+        image_duration=params.image_duration,
+    )
     video_transition_mode = params.video_transition_mode
 
     _progress = 50
@@ -767,6 +787,7 @@ def generate_final_videos(
             max_clip_duration=params.video_clip_duration,
             threads=params.n_threads,
             clip_speed=params.video_clip_speed,
+            clip_duration_overrides=clip_duration_overrides,
         )
 
         _progress += 50 / params.video_count / 2

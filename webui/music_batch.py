@@ -46,11 +46,28 @@ _TRANSITIONS = [
     "ZoomOut",
 ]
 _SOURCES = ["pexels", "pixabay", "coverr"]
+_MATERIAL_TYPES = ["video", "image", "mixed"]
+_MATERIAL_TYPE_LABELS = {
+    "video": "Video",
+    "image": "Image",
+    "mixed": "Video + Image",
+}
+_IMAGE_MOTIONS = {
+    "slow_zoom_in": "Slow Zoom In",
+    "slow_zoom_out": "Slow Zoom Out",
+    "pan_left_right": "Pan Left → Right",
+    "pan_right_left": "Pan Right → Left",
+    "random": "Random",
+    "none": "None",
+}
 _OVERRIDE_SUFFIXES = (
     "enabled",
     "script",
     "keywords",
     "sources",
+    "material_type",
+    "image_duration",
+    "image_motion",
     "clip_duration",
     "concat",
     "transition",
@@ -149,11 +166,36 @@ def _render_override(prefix: str) -> SongOverride | None:
     keywords_text = st.text_area(
         "Video Keywords override", key=f"{prefix}_keywords"
     )
+    material_type = st.selectbox(
+        "Material Type override",
+        _MATERIAL_TYPES,
+        key=f"{prefix}_material_type",
+        format_func=lambda value: _MATERIAL_TYPE_LABELS[value],
+    )
+    override_sources = _SOURCES if material_type == "video" else ["pexels", "pixabay"]
     sources = st.multiselect(
         "Stock Sources override",
-        _SOURCES,
+        override_sources,
         key=f"{prefix}_sources",
     )
+    image_duration = None
+    image_motion = None
+    if material_type in {"image", "mixed"}:
+        image_duration = st.number_input(
+            "Image Duration override (seconds)",
+            min_value=1,
+            max_value=30,
+            value=8,
+            step=1,
+            key=f"{prefix}_image_duration",
+        )
+        image_motion = st.selectbox(
+            "Ken Burns Effect override",
+            list(_IMAGE_MOTIONS),
+            index=list(_IMAGE_MOTIONS).index("random"),
+            key=f"{prefix}_image_motion",
+            format_func=lambda value: _IMAGE_MOTIONS[value],
+        )
     clip_duration = st.number_input(
         "Clip Duration override (seconds)",
         min_value=1,
@@ -184,6 +226,9 @@ def _render_override(prefix: str) -> SongOverride | None:
         video_script=script or None,
         video_keywords=_parse_keywords(keywords_text) or None,
         stock_sources=list(sources) or None,
+        material_type=material_type,
+        image_duration=int(image_duration) if image_duration is not None else None,
+        image_motion=image_motion,
         video_clip_duration=int(clip_duration),
         video_concat_mode=concat_mode,
         video_transition_mode=transition,
@@ -423,12 +468,41 @@ def render_music_batch_page() -> None:
         ),
         key="music_batch_keywords",
     )
+    global_material_type = st.selectbox(
+        "Material Type",
+        _MATERIAL_TYPES,
+        index=0,
+        key="music_batch_material_type",
+        format_func=lambda value: _MATERIAL_TYPE_LABELS[value],
+    )
+    global_source_options = (
+        _SOURCES if global_material_type == "video" else ["pexels", "pixabay"]
+    )
     global_sources = st.multiselect(
-        "Stock Video Sources",
-        _SOURCES,
+        "Stock Sources",
+        global_source_options,
         default=["pexels"],
         key="music_batch_sources",
     )
+    global_image_duration = 8
+    global_image_motion = "random"
+    if global_material_type in {"image", "mixed"}:
+        image_row = st.columns(2)
+        global_image_duration = image_row[0].number_input(
+            "Image Duration (seconds)",
+            min_value=1,
+            max_value=30,
+            value=8,
+            step=1,
+            key="music_batch_image_duration",
+        )
+        global_image_motion = image_row[1].selectbox(
+            "Ken Burns Effect",
+            list(_IMAGE_MOTIONS),
+            index=list(_IMAGE_MOTIONS).index("random"),
+            key="music_batch_image_motion",
+            format_func=lambda value: _IMAGE_MOTIONS[value],
+        )
 
     row1 = st.columns(4)
     aspect = row1[0].selectbox(
@@ -536,6 +610,9 @@ def render_music_batch_page() -> None:
             video_script=global_script,
             video_keywords=_parse_keywords(global_keywords_text),
             stock_sources=list(global_sources),
+            material_type=global_material_type,
+            image_duration=int(global_image_duration),
+            image_motion=global_image_motion,
             video_aspect=aspect,
             video_concat_mode=concat_mode,
             video_transition_mode=transition,
