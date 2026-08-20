@@ -193,7 +193,8 @@ def download_stock_materials(
             random.shuffle(images)
         return images
 
-    half_duration = max(0.0, float(audio_duration)) / 2.0
+    target_duration = max(0.0, float(audio_duration))
+    half_duration = target_duration / 2.0
     videos = material.download_videos(
         task_id=task_id,
         search_terms=search_terms,
@@ -204,12 +205,17 @@ def download_stock_materials(
         max_clip_duration=max_clip_duration,
         match_script_order=match_script_order,
     )
+
+    # If the video half is unavailable, ask the image provider for the whole target
+    # duration immediately. This avoids building only half a song of imagery and
+    # forcing the compositor to loop the same small pool for the remaining time.
+    image_target_duration = target_duration if not videos else half_duration
     images = _prepare_image_materials(
         task_id=task_id,
         search_terms=search_terms,
         source=provider,
         video_aspect=video_aspect,
-        audio_duration=half_duration,
+        audio_duration=image_target_duration,
         image_duration=image_duration,
         image_motion=image_motion,
         match_script_order=match_script_order,
@@ -219,5 +225,19 @@ def download_stock_materials(
     if not videos:
         return images
     if not images:
-        return videos
+        # The first half-duration request may have stopped after enough videos for
+        # half the song. Re-run with the full target so cached candidates can fill
+        # the rest. If that expansion cannot add anything, retain the usable first
+        # pool rather than turning a graceful fallback into a hard failure.
+        expanded_videos = material.download_videos(
+            task_id=task_id,
+            search_terms=search_terms,
+            source=provider,
+            video_aspect=VideoAspect(video_aspect),
+            video_concat_mode=requested_concat_mode,
+            audio_duration=target_duration,
+            max_clip_duration=max_clip_duration,
+            match_script_order=match_script_order,
+        )
+        return expanded_videos or videos
     return interleave_material_paths(videos, images)
