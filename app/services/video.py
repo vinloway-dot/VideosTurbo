@@ -583,12 +583,17 @@ def combine_videos(
         normalized_key = os.path.normcase(os.path.abspath(os.fspath(source_path)))
         normalized_duration_overrides[normalized_key] = normalized_limit
 
+    def normalized_source_key(source_path: str) -> str:
+        return os.path.normcase(os.path.abspath(os.fspath(source_path)))
+
     def output_duration_limit(source_path: str) -> float:
-        normalized_key = os.path.normcase(os.path.abspath(os.fspath(source_path)))
         return normalized_duration_overrides.get(
-            normalized_key,
+            normalized_source_key(source_path),
             float(max_clip_duration),
         )
+
+    def has_duration_override(source_path: str) -> bool:
+        return normalized_source_key(source_path) in normalized_duration_overrides
 
     # max_clip_duration 约束的是成片里的最终播放时长，而不是源视频读取时长。
     # MoviePy 以 0.5 倍速播放 1.5 秒源画面会得到 3 秒片段，以 2 倍速播放
@@ -602,7 +607,10 @@ def combine_videos(
     subclipped_items = []
     video_duration = 0
     for video_path in video_paths:
-        source_clip_duration = output_duration_limit(video_path) * normalized_clip_speed
+        duration_overridden = has_duration_override(video_path)
+        source_clip_duration = output_duration_limit(video_path)
+        if not duration_overridden:
+            source_clip_duration *= normalized_clip_speed
         clip = _open_video_clip_quietly(video_path)
         clip_duration = clip.duration
         clip_w, clip_h = clip.size
@@ -658,7 +666,10 @@ def combine_videos(
             # 播放速度属于素材本身属性，应在转场前应用。这样 Fade/Slide 等一秒转场
             # 不会跟随素材速度变成 0.5 秒或 2 秒；后续最大时长裁剪继续作为
             # 浮点误差或异常素材时长的安全兜底，保证最终片段不突破配置上限。
-            if normalized_clip_speed != 1.0:
+            duration_overridden = has_duration_override(
+                subclipped_item.source_file_path
+            )
+            if normalized_clip_speed != 1.0 and not duration_overridden:
                 clip = clip.with_speed_scaled(normalized_clip_speed)
             clip_duration = clip.duration
             # Not all videos are same size, so we need to resize them
