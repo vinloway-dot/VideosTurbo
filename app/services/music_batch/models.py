@@ -6,6 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.models.schema import ImageMotion, MaterialType
+
 
 class SongStatus(str, Enum):
     pending = "pending"
@@ -35,6 +37,9 @@ class SongOverride(BaseModel):
     video_script: str | None = None
     video_keywords: list[str] | None = None
     stock_sources: list[str] | None = None
+    material_type: MaterialType | None = None
+    image_duration: int | None = Field(default=None, ge=1, le=30)
+    image_motion: ImageMotion | None = None
     video_clip_duration: int | None = Field(default=None, ge=1)
     video_concat_mode: str | None = None
     video_transition_mode: str | None = None
@@ -46,6 +51,9 @@ class BatchSettings(BaseModel):
     video_script: str = ""
     video_keywords: list[str] = Field(default_factory=list)
     stock_sources: list[str] = Field(default_factory=lambda: ["pexels"])
+    material_type: MaterialType = MaterialType.video
+    image_duration: int = Field(default=8, ge=1, le=30)
+    image_motion: ImageMotion = ImageMotion.random
     video_aspect: str = "16:9"
     video_concat_mode: str = "random"
     video_transition_mode: str | None = None
@@ -124,6 +132,9 @@ def resolve_song_settings(
         "video_script": batch_settings.video_script,
         "video_keywords": list(batch_settings.video_keywords),
         "stock_sources": list(batch_settings.stock_sources),
+        "material_type": batch_settings.material_type,
+        "image_duration": batch_settings.image_duration,
+        "image_motion": batch_settings.image_motion,
         "video_aspect": batch_settings.video_aspect,
         "video_concat_mode": batch_settings.video_concat_mode,
         "video_transition_mode": batch_settings.video_transition_mode,
