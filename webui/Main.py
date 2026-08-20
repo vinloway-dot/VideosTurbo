@@ -5144,7 +5144,8 @@ def _render_generation_controls(
             st.error(tr("Video Script and Subject Cannot Both Be Empty"))
             st.stop()
 
-        if params.video_source not in [
+        validated_video_source = stock_materials.base_source(params.video_source)
+        if validated_video_source not in [
             "pexels",
             "pixabay",
             "coverr",
@@ -5155,21 +5156,21 @@ def _render_generation_controls(
             st.error(tr("Please Select a Valid Video Source"))
             st.stop()
 
-        if params.video_source == "pexels" and not config.app.get(
+        if validated_video_source == "pexels" and not config.app.get(
             "pexels_api_keys", ""
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the Pexels API Key"))
             st.stop()
 
-        if params.video_source == "pixabay" and not config.app.get(
+        if validated_video_source == "pixabay" and not config.app.get(
             "pixabay_api_keys", ""
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the Pixabay API Key"))
             st.stop()
 
-        if params.video_source == "coverr" and not config.app.get(
+        if validated_video_source == "coverr" and not config.app.get(
             "coverr_api_keys", ""
         ):
             _remove_active_generation_task(task_id)
