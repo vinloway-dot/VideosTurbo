@@ -231,16 +231,16 @@ def _download_image(item: MaterialInfo, directory: Path, index: int) -> Path:
         raise ValueError("downloaded image is empty")
 
     source = item.source_info if isinstance(item.source_info, dict) else {}
-    asset_id = _SAFE_FILENAME.sub(
-        "-", str(source.get("asset_id") or index)
-    ).strip("-_")
+    raw_asset_id = source.get("asset_id")
+    identity = _SAFE_FILENAME.sub(
+        "-",
+        str(raw_asset_id if raw_asset_id not in (None, "") else index),
+    ).strip("-_") or str(index)
     extension = _extension_for_image(item, response)
-    target = directory / f"stock-image-{index:03d}-{asset_id or index}{extension}"
+    target = directory / f"stock-image-{identity}{extension}"
     suffix = 2
     while target.exists():
-        target = directory / (
-            f"stock-image-{index:03d}-{asset_id or index}-{suffix}{extension}"
-        )
+        target = directory / f"stock-image-{identity}-{suffix}{extension}"
         suffix += 1
     target.write_bytes(response.content)
     return target
