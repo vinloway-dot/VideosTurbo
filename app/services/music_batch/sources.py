@@ -74,6 +74,36 @@ class UsedClipRegistry:
                 for provider, clip_ids in (snapshot or {}).items()
             }
 
+    def reserve_candidates(
+        self,
+        provider: str,
+        candidates: Sequence[tuple[object, T]],
+        *,
+        avoid_reuse: bool,
+    ) -> list[tuple[object, T]]:
+        """Select and reserve unseen clips atomically for parallel batch workers.
+
+        When duplicate avoidance is enabled, selecting candidates and recording their
+        IDs must happen under one lock. Otherwise two workers can both observe the
+        same clip as unseen before either worker records it. If the provider has no
+        unseen candidates, preserve the approved best-effort behavior and return the
+        original candidates instead of failing the batch solely because the pool was
+        exhausted.
+        """
+
+        items = list(candidates)
+        if not avoid_reuse or not items:
+            return items
+
+        normalized_provider = self._provider(provider)
+        with self._lock:
+            used = self._used.setdefault(normalized_provider, set())
+            unseen = [item for item in items if self._clip_id(item[0]) not in used]
+            if not unseen:
+                return items
+            used.update(self._clip_id(item[0]) for item in unseen)
+            return unseen
+
     def filter_candidates(
         self,
         provider: str,
@@ -81,15 +111,8 @@ class UsedClipRegistry:
         *,
         avoid_reuse: bool,
     ) -> list[tuple[object, T]]:
-        items = list(candidates)
-        if not avoid_reuse or not items:
-            return items
-
-        with self._lock:
-            used = self._used.get(self._provider(provider), set())
-            unseen = [
-                item for item in items if self._clip_id(item[0]) not in used
-            ]
-        # Best effort: if every result has been seen, keep the provider results rather
-        # than failing the whole batch solely because the search pool is exhausted.
-        return unseen or items
+        return self.reserve_candidates(
+            provider,
+            candidates,
+            avoid_reuse=avoid_reuse,
+        )
