@@ -1,4 +1,4 @@
-from app.models.schema import VideoAspect
+from app.models.schema import MaterialInfo, VideoAspect
 from app.services import stock_images
 
 
@@ -16,6 +16,14 @@ class _Response:
     def raise_for_status(self):
         if self.status_code >= 400:
             raise RuntimeError(f"http {self.status_code}")
+
+
+def _material_item(provider: str, asset_id: str, term: str) -> MaterialInfo:
+    return MaterialInfo(
+        provider=provider,
+        url=f"https://example.test/{asset_id}.jpg",
+        source_info={"asset_id": asset_id, "search_term": term},
+    )
 
 
 def test_search_images_pexels_filters_orientation_and_keeps_source_metadata(monkeypatch):
@@ -112,3 +120,95 @@ def test_square_image_search_accepts_crop_friendly_non_square_assets(monkeypatch
     items = stock_images.search_images_pexels("nature", VideoAspect.square)
 
     assert len(items) == 1
+
+
+def test_download_images_match_script_order_round_robins_keywords(monkeypatch, tmp_path):
+    candidates = {
+        "ocean": [
+            _material_item("pexels", "ocean-1", "ocean"),
+            _material_item("pexels", "ocean-2", "ocean"),
+        ],
+        "forest": [
+            _material_item("pexels", "forest-1", "forest"),
+            _material_item("pexels", "forest-2", "forest"),
+        ],
+        "mountain": [
+            _material_item("pexels", "mountain-1", "mountain"),
+            _material_item("pexels", "mountain-2", "mountain"),
+        ],
+    }
+    monkeypatch.setattr(
+        stock_images,
+        "search_images_pexels",
+        lambda term, _aspect: list(candidates[term]),
+    )
+    monkeypatch.setattr(stock_images.utils, "task_dir", lambda _task_id: str(tmp_path))
+    download_order: list[str] = []
+
+    def fake_download(item, directory, _index):
+        asset_id = item.source_info["asset_id"]
+        download_order.append(asset_id)
+        target = directory / f"{asset_id}.jpg"
+        target.write_bytes(b"image")
+        return target
+
+    monkeypatch.setattr(stock_images, "_download_image", fake_download)
+    monkeypatch.setattr(
+        stock_images.material,
+        "_material_source_record",
+        lambda item, local_path: {"asset_id": item.source_info["asset_id"], "path": local_path},
+    )
+    monkeypatch.setattr(stock_images.material, "_persist_material_sources", lambda *_args, **_kwargs: None)
+
+    paths = stock_images.download_images(
+        task_id="task-ordered",
+        search_terms=["ocean", "forest", "mountain"],
+        source="pexels",
+        video_aspect=VideoAspect.landscape,
+        audio_duration=12,
+        image_duration=4,
+        match_script_order=True,
+    )
+
+    assert [path.name for path in paths] == ["ocean-1.jpg", "forest-1.jpg", "mountain-1.jpg"]
+    assert download_order == ["ocean-1", "forest-1", "mountain-1"]
+
+
+def test_download_images_legacy_mode_can_fill_from_first_keyword(monkeypatch, tmp_path):
+    candidates = {
+        "ocean": [
+            _material_item("pexels", "ocean-1", "ocean"),
+            _material_item("pexels", "ocean-2", "ocean"),
+        ],
+        "forest": [_material_item("pexels", "forest-1", "forest")],
+    }
+    monkeypatch.setattr(
+        stock_images,
+        "search_images_pexels",
+        lambda term, _aspect: list(candidates[term]),
+    )
+    monkeypatch.setattr(stock_images.utils, "task_dir", lambda _task_id: str(tmp_path))
+    download_order: list[str] = []
+
+    def fake_download(item, directory, _index):
+        asset_id = item.source_info["asset_id"]
+        download_order.append(asset_id)
+        target = directory / f"{asset_id}.jpg"
+        target.write_bytes(b"image")
+        return target
+
+    monkeypatch.setattr(stock_images, "_download_image", fake_download)
+    monkeypatch.setattr(stock_images.material, "_material_source_record", lambda *_args: {})
+    monkeypatch.setattr(stock_images.material, "_persist_material_sources", lambda *_args, **_kwargs: None)
+
+    stock_images.download_images(
+        task_id="task-legacy",
+        search_terms=["ocean", "forest"],
+        source="pexels",
+        video_aspect=VideoAspect.landscape,
+        audio_duration=8,
+        image_duration=4,
+        match_script_order=False,
+    )
+
+    assert download_order == ["ocean-1", "ocean-2"]
