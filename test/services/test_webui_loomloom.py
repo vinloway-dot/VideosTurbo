@@ -26,6 +26,10 @@ def _widget_by_key(elements, key):
     return next(item for item in elements if str(getattr(item, "key", "")) == key)
 
 
+def _has_widget(elements, key):
+    return any(str(getattr(item, "key", "")) == key for item in elements)
+
+
 def test_loomloom_execution_requires_confirmation_and_quoted_version():
     tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
     function = _function(tree, "_render_loomloom_script_generation")
@@ -207,66 +211,33 @@ def test_loomloom_webui_quotes_then_requires_confirmation_before_execute():
         assert [str(item.value) for item in app.exception] == []
 
 
-def test_loomloom_video_source_quotes_then_passes_secret_in_confirmed_request():
+def test_six_clip_main_does_not_render_loomloom_video_source_or_quote_controls():
     test_config = dict(
         config.app,
         llm_provider="openai",
         script_generation_backend="local",
-        video_source="pexels",
+        video_source="loomloom",
         loomloom_base_url="https://example.test/loom/v1",
-        loomloom_api_token="",
-    )
-    quote_result = loomloom.LoomLoomQuote(
-        quote_id="video-quote-1",
-        listing_version_id="video-version-1",
-        currency="CNY",
-        task_count=1,
-        estimated_buyer_payable_t=1230000,
-        estimated_buyer_payable_amount="0.123",
-        input_rows=(),
+        loomloom_api_token="session-user-token",
     )
 
     with (
         patch.object(config, "app", test_config),
         patch.object(config, "try_save_config", return_value=True),
-        patch.object(
-            loomloom.LoomLoomVideoBackend,
-            "quote",
-            return_value=quote_result,
-        ) as quote_call,
-        patch("app.services.webui_task.submit_generation") as submit_generation,
+        patch.object(loomloom.LoomLoomVideoBackend, "quote") as quote_call,
     ):
         app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
         app.session_state["ui_language"] = "en"
         app.run()
 
-        _widget_by_key(app.text_area, "video_subject").set_value("AI office").run()
-        _widget_by_key(app.text_area, "video_script").set_value(
-            "AI helps people work faster."
-        ).run()
-        _widget_by_key(app.text_area, "video_terms").set_value(
-            "office worker, AI assistant, productive team"
-        ).run()
-        _widget_by_key(app.selectbox, "video_source_select_en").select("loomloom").run()
-        _widget_by_key(app.text_input, "loomloom_user_api_token").set_value(
-            "session-user-token"
-        ).run()
-        assert _widget_by_key(app.number_input, "loomloom_video_scene_count").value == 1
-        _widget_by_key(app.button, "loomloom_quote_videos").click().run()
-        assert quote_call.call_count == 1
-        _widget_by_key(app.checkbox, "loomloom_video_confirm_charge").check().run()
-        _widget_by_key(app.button, "generate_video_button").click().run()
-
-        assert submit_generation.call_count == 1
-        submitted_params = submit_generation.call_args.kwargs["params"]
-        video_request = submit_generation.call_args.kwargs["loomloom_video_request"]
-        assert "session-user-token" not in submitted_params.model_dump_json()
-        assert video_request.settings.api_token == "session-user-token"
-        assert "session-user-token" not in repr(video_request)
-        assert video_request.listing_version_id == "video-version-1"
-        assert video_request.client_request_id.startswith("mpt-video-")
-        assert app.session_state["loomloom_video_quote"] is None
-        assert [str(item.value) for item in app.exception] == []
+    assert not _has_widget(app.selectbox, "video_source_select")
+    assert not _has_widget(app.selectbox, "video_source_select_en")
+    assert not _has_widget(app.number_input, "loomloom_video_scene_count")
+    assert not _has_widget(app.button, "loomloom_quote_videos")
+    assert not _has_widget(app.checkbox, "loomloom_video_confirm_charge")
+    assert _has_widget(app.selectbox, "six_clip_video_aspect_select")
+    assert quote_call.call_count == 0
+    assert [str(item.value) for item in app.exception] == []
 
 
 def test_selected_shengsuanyun_provider_hides_duplicate_loomloom_key_input():
