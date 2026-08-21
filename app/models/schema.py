@@ -6,6 +6,7 @@ import pydantic
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.config import config
+from app.models.six_clip import SixClipPlan
 
 # 忽略 Pydantic 的特定警告
 warnings.filterwarnings(
@@ -94,6 +95,9 @@ class VideoParams(BaseModel):
     video_subject: str
     video_script: str = ""  # Script used to generate the video
     video_terms: Optional[str | list] = None  # Keywords used to generate the video
+    target_words: int = Field(default=130, ge=40, le=400)
+    six_clip_mode: bool = False
+    six_clip_plan: Optional[SixClipPlan] = None
     video_aspect: Optional[VideoAspect] = VideoAspect.portrait.value
     video_concat_mode: Optional[VideoConcatMode] = VideoConcatMode.random.value
     video_transition_mode: Optional[VideoTransitionMode] = None

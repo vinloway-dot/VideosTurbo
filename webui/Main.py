@@ -47,6 +47,8 @@ from app.services import (
     cache_manager,
     llm,
     loomloom,
+    six_clip_media,
+    six_clip_plan,
     stock_materials,
     video,
     voice,
@@ -59,6 +61,7 @@ from app.services import task as tm
 from app.services import version_checker
 from app.utils.logging_utils import configure_terminal_logger
 from app.utils import utils
+from webui import six_clip_timeline
 
 st.set_page_config(
     page_title="MoneyPrinterTurbo",
@@ -2745,25 +2748,35 @@ def _render_local_script_generation(params):
     with st.spinner(tr("Generating Video Script and Keywords")):
 
         def generate_script_and_terms(app_config_snapshot):
+            script_requirements = six_clip_plan.build_script_generation_requirements(
+                params.target_words,
+                params.video_script_prompt,
+            )
             script = llm.generate_script(
                 video_subject=params.video_subject,
                 language=params.video_language,
                 paragraph_number=params.paragraph_number,
-                video_script_prompt=params.video_script_prompt,
+                video_script_prompt=script_requirements,
                 custom_system_prompt=params.custom_system_prompt,
                 app_config=app_config_snapshot,
             )
             terms = llm.generate_terms(
                 params.video_subject,
                 script,
-                amount=8 if params.match_materials_to_script else 5,
-                match_script_order=params.match_materials_to_script,
+                amount=5,
+                match_script_order=False,
                 app_config=app_config_snapshot,
             )
-            return script, terms
+            clip_plan = six_clip_plan.generate_six_clip_plan(
+                script,
+                language=params.video_language,
+                target_words=params.target_words,
+                app_config=app_config_snapshot,
+            )
+            return script, terms, clip_plan
 
-        script, terms = _run_llm_read_operation(
-            "generate_script_and_terms",
+        script, terms, clip_plan = _run_llm_read_operation(
+            "generate_script_terms_and_six_clip_plan",
             generate_script_and_terms,
         )
         if "Error: " in script:
@@ -2773,6 +2786,7 @@ def _render_local_script_generation(params):
         else:
             st.session_state["video_script"] = script
             st.session_state["video_terms"] = ", ".join(terms)
+            six_clip_timeline.set_session_plan(clip_plan, sync_widgets=True)
 
 
 def _render_loomloom_candidates():
@@ -3107,6 +3121,17 @@ def _render_script_settings(panel, params):
             )
             params.video_language = selected_language_code
             _set_runtime_config("ui", "video_language", params.video_language)
+
+            params.target_words = st.number_input(
+                "Target Words",
+                min_value=40,
+                max_value=400,
+                value=int(config.ui.get("target_words", 130) or 130),
+                step=5,
+                key="target_words_input",
+                help="Approximate narration word count for the 60-second script.",
+            )
+            _set_runtime_config("ui", "target_words", int(params.target_words))
 
             # 使用带 key 的局部容器限定折叠入口样式，保持 expander 的原生交互，
             # 同时避免样式误伤页面顶部的“基础设置”等其他折叠区域。
@@ -3526,6 +3551,90 @@ def _render_video_settings(panel, params):
             if params.video_source == "loomloom":
                 _render_loomloom_video_settings(params)
     return uploaded_files
+
+
+def _render_six_clip_video_settings(panel, params):
+    """Render only settings that still apply to the fixed six-clip timeline."""
+    with panel:
+        with st.container(border=True):
+            st.write("Video Settings")
+            st.caption("Visual Source: six fixed user media clips (6 × 10 seconds).")
+            params.six_clip_mode = True
+            params.video_source = "six_clip"
+            params.video_concat_mode = VideoConcatMode.sequential
+            params.video_transition_mode = VideoTransitionMode.none
+            params.video_clip_duration = 10
+            params.video_clip_speed = 1.0
+            params.video_count = 1
+            params.match_materials_to_script = False
+            params.image_duration = 10
+
+            video_aspect_ratios = [
+                (tr("Portrait"), VideoAspect.portrait.value),
+                (tr("Landscape"), VideoAspect.landscape.value),
+            ]
+            aspect_values = [value for _, value in video_aspect_ratios]
+            selected_aspect = stable_selectbox(
+                tr("Video Ratio"),
+                options=aspect_values,
+                default_value=_saved_ui_choice(
+                    "six_clip_video_aspect", aspect_values, VideoAspect.portrait.value
+                ),
+                key="six_clip_video_aspect_select",
+                format_func=lambda value: dict(
+                    (v, label) for label, v in video_aspect_ratios
+                )[value],
+            )
+            params.video_aspect = VideoAspect(selected_aspect)
+            _set_runtime_config("ui", "six_clip_video_aspect", params.video_aspect.value)
+
+            motion_labels = {
+                "slow_zoom_in": "Slow Zoom In",
+                "slow_zoom_out": "Slow Zoom Out",
+                "pan_left_right": "Pan Left → Right",
+                "pan_right_left": "Pan Right → Left",
+                "random": "Random",
+                "none": "None",
+            }
+            params.image_motion = stable_selectbox(
+                "Image Ken Burns Effect",
+                options=list(motion_labels),
+                default_value=_saved_ui_choice(
+                    "six_clip_image_motion", list(motion_labels), "random"
+                ),
+                key="six_clip_image_motion_select",
+                format_func=lambda value: motion_labels[value],
+            )
+            _set_runtime_config("ui", "six_clip_image_motion", params.image_motion)
+
+            video_codec_options = [
+                (tr("Default Video Encoder"), DEFAULT_VIDEO_CODEC_OPTION),
+                ("libx264 (CPU)", "libx264"),
+                ("NVIDIA NVENC (h264_nvenc)", "h264_nvenc"),
+                ("AMD AMF (h264_amf)", "h264_amf"),
+                ("Intel QSV (h264_qsv)", "h264_qsv"),
+                ("Windows MediaFoundation (h264_mf)", "h264_mf"),
+                ("macOS VideoToolbox (h264_videotoolbox)", "h264_videotoolbox"),
+            ]
+            codec_values = [item[1] for item in video_codec_options]
+            saved_codec = config.app.get("video_codec", DEFAULT_VIDEO_CODEC_OPTION)
+            if saved_codec not in codec_values:
+                saved_codec = DEFAULT_VIDEO_CODEC_OPTION
+            selected_codec = stable_selectbox(
+                tr("Video Encoder"),
+                options=codec_values,
+                default_value=saved_codec,
+                key="six_clip_video_encoder_select",
+                format_func=lambda value: dict(
+                    (v, label) for label, v in video_codec_options
+                )[value],
+                help=tr("Video Encoder Help"),
+            )
+            if selected_codec == DEFAULT_VIDEO_CODEC_OPTION:
+                _delete_runtime_config("app", "video_codec")
+            else:
+                _set_runtime_config("app", "video_codec", selected_codec)
+    return []
 
 
 def _estimate_voiceover_duration_range(
@@ -5144,38 +5253,52 @@ def _render_generation_controls(
             st.error(tr("Video Script and Subject Cannot Both Be Empty"))
             st.stop()
 
-        validated_video_source = stock_materials.base_source(params.video_source)
-        if validated_video_source not in [
-            "pexels",
-            "pixabay",
-            "coverr",
-            "loomloom",
-            "local",
-        ]:
-            _remove_active_generation_task(task_id)
-            st.error(tr("Please Select a Valid Video Source"))
-            st.stop()
+        if params.six_clip_mode:
+            if params.six_clip_plan is None:
+                _remove_active_generation_task(task_id)
+                st.error("Six-clip plan is missing.")
+                st.stop()
+            try:
+                params.six_clip_plan = six_clip_media.materialize_plan_for_task(
+                    params.six_clip_plan, utils.task_dir(task_id)
+                )
+            except six_clip_media.SixClipMediaError as exc:
+                _remove_active_generation_task(task_id)
+                st.error(f"Cannot generate video. {exc}")
+                st.stop()
+        else:
+            validated_video_source = stock_materials.base_source(params.video_source)
+            if validated_video_source not in [
+                "pexels",
+                "pixabay",
+                "coverr",
+                "loomloom",
+                "local",
+            ]:
+                _remove_active_generation_task(task_id)
+                st.error(tr("Please Select a Valid Video Source"))
+                st.stop()
 
-        if validated_video_source == "pexels" and not config.app.get(
-            "pexels_api_keys", ""
-        ):
-            _remove_active_generation_task(task_id)
-            st.error(tr("Please Enter the Pexels API Key"))
-            st.stop()
+            if validated_video_source == "pexels" and not config.app.get(
+                "pexels_api_keys", ""
+            ):
+                _remove_active_generation_task(task_id)
+                st.error(tr("Please Enter the Pexels API Key"))
+                st.stop()
 
-        if validated_video_source == "pixabay" and not config.app.get(
-            "pixabay_api_keys", ""
-        ):
-            _remove_active_generation_task(task_id)
-            st.error(tr("Please Enter the Pixabay API Key"))
-            st.stop()
+            if validated_video_source == "pixabay" and not config.app.get(
+                "pixabay_api_keys", ""
+            ):
+                _remove_active_generation_task(task_id)
+                st.error(tr("Please Enter the Pixabay API Key"))
+                st.stop()
 
-        if validated_video_source == "coverr" and not config.app.get(
-            "coverr_api_keys", ""
-        ):
-            _remove_active_generation_task(task_id)
-            st.error(tr("Please Enter the Coverr API Key"))
-            st.stop()
+            if validated_video_source == "coverr" and not config.app.get(
+                "coverr_api_keys", ""
+            ):
+                _remove_active_generation_task(task_id)
+                st.error(tr("Please Enter the Coverr API Key"))
+                st.stop()
 
         loomloom_video_request = None
         if params.video_source == "loomloom":
@@ -5233,7 +5356,11 @@ def _render_generation_controls(
             st.error(tr("ElevenLabs API Key Required"))
             st.stop()
 
-        if params.video_source == "local" and not has_local_materials:
+        if (
+            not params.six_clip_mode
+            and params.video_source == "local"
+            and not has_local_materials
+        ):
             # 本地素材为空时继续执行会先产生 TTS/字幕，最后才在素材预处理阶段失败。
             # 在任务启动前拦截，可以避免无意义的 API 调用和中间文件。
             _remove_active_generation_task(task_id)
@@ -5419,12 +5546,31 @@ def _render_application():
     )
     _render_script_settings(left_panel, params)
 
-    uploaded_files = _render_video_settings(middle_panel, params)
+    uploaded_files = _render_six_clip_video_settings(middle_panel, params)
     uploaded_audio_file, uploaded_bgm_file, voice_mode = _render_audio_settings(
         audio_panel, params
     )
 
     _render_subtitle_settings(right_panel, params)
+
+    def refresh_six_clip_plan():
+        current_script = str(params.video_script or "").strip()
+        if not current_script:
+            raise ValueError("Generate or enter the Video Script first.")
+        return _run_llm_read_operation(
+            "generate_six_clip_plan",
+            lambda app_config_snapshot: six_clip_plan.generate_six_clip_plan(
+                current_script,
+                language=params.video_language,
+                target_words=params.target_words,
+                app_config=app_config_snapshot,
+            ),
+        )
+
+    params.six_clip_plan = six_clip_timeline.render_six_clip_sections(
+        params.target_words, refresh_plan=refresh_six_clip_plan
+    )
+    params.six_clip_mode = True
 
     generation_submitted = _render_generation_controls(
         params,
