@@ -7,7 +7,9 @@ from app.services import six_clip_render
 def _plan(tmp_path: Path) -> SixClipPlan:
     segments = []
     for index in range(1, 7):
-        source = tmp_path / (f"source-{index}.jpg" if index == 2 else f"source-{index}.mp4")
+        source = tmp_path / (
+            f"source-{index}.jpg" if index == 2 else f"source-{index}.mp4"
+        )
         if source.suffix == ".jpg":
             source.write_bytes(b"\xff\xd8\xff" + b"x" * 32)
             media_kind = "image"
@@ -58,7 +60,11 @@ def test_prepare_timeline_keeps_fixed_order_and_uses_ten_second_video_loop(
         "prepare_image_clips",
         fake_prepare_images,
     )
-    monkeypatch.setattr(six_clip_render.video, "_get_configured_video_codec", lambda: "libx264")
+    monkeypatch.setattr(
+        six_clip_render.video,
+        "_get_configured_video_codec",
+        lambda: "libx264",
+    )
 
     prepared = six_clip_render.prepare_six_clip_timeline(
         "task-1",
@@ -70,11 +76,20 @@ def test_prepare_timeline_keeps_fixed_order_and_uses_ten_second_video_loop(
     )
 
     assert len(prepared) == 6
-    assert Path(prepared[1]).name == "prepared-image.mp4"
+    assert [Path(value).name for value in prepared] == [
+        "six-clip-01.mp4",
+        "six-clip-02.mp4",
+        "six-clip-03.mp4",
+        "six-clip-04.mp4",
+        "six-clip-05.mp4",
+        "six-clip-06.mp4",
+    ]
     video_commands = [command for command in commands if "-stream_loop" in command]
     assert len(video_commands) == 5
-    assert all(command[command.index("-t") + 1] == "10.000" for command in video_commands)
-    assert all(command[command.index("-an") : command.index("-an") + 1] == ["-an"] for command in video_commands)
+    assert all(
+        command[command.index("-t") + 1] == "10.000" for command in video_commands
+    )
+    assert all("-an" in command for command in video_commands)
 
 
 def test_concat_timeline_passes_all_six_clips_in_order_and_caps_at_sixty(
