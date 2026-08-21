@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -139,7 +140,12 @@ def import_media_url(
         temp_path = output_path.with_suffix(output_path.suffix + ".part")
         total = 0
         with open(temp_path, "wb") as handle:
-            for chunk in (first_chunk, *iterator):
+            for chunk in (first_chunk,):
+                total += len(chunk)
+                if total > max_bytes:
+                    raise SixClipMediaError("media URL exceeds the maximum allowed size")
+                handle.write(chunk)
+            for chunk in iterator:
                 if not chunk:
                     continue
                 total += len(chunk)
@@ -235,3 +241,27 @@ def missing_media_message(plan: SixClipPlan) -> str:
         if segment.index in missing
     ]
     return ", ".join(ranges)
+
+
+def materialize_plan_for_task(
+    plan: SixClipPlan,
+    task_dir: str | os.PathLike,
+) -> SixClipPlan:
+    """Copy all ready media into the task directory and return task-local paths."""
+    missing = validate_ready_media(plan)
+    if missing:
+        raise SixClipMediaError(
+            "missing media: " + missing_media_message(plan)
+        )
+
+    destination = Path(task_dir) / "six-clip-sources"
+    destination.mkdir(parents=True, exist_ok=True)
+    segments = []
+    for segment in plan.segments:
+        source = Path(segment.media_path)
+        suffix = source.suffix.lower()
+        target = destination / f"clip-{segment.index:02d}{suffix}"
+        if source.resolve() != target.resolve():
+            shutil.copy2(source, target)
+        segments.append(segment.model_copy(update={"media_path": str(target)}))
+    return plan.model_copy(update={"segments": segments})
