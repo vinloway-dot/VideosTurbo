@@ -24,6 +24,22 @@ class FakeResponse:
         return None
 
 
+class OversizeHeaderResponse:
+    def __init__(self):
+        self.headers = {"Content-Type": "video/mp4", "Content-Length": "1000"}
+        self.iterated = False
+
+    def raise_for_status(self):
+        return None
+
+    def iter_content(self, chunk_size=1024):
+        self.iterated = True
+        raise AssertionError("oversized response body must not be read")
+
+    def close(self):
+        return None
+
+
 @pytest.fixture
 def mp4_bytes():
     # ISO-BMFF/MP4 files identify themselves with an ftyp box near the beginning.
@@ -64,6 +80,44 @@ def test_import_rejects_html_even_when_url_looks_like_media(monkeypatch, tmp_pat
             tmp_path,
             clip_index=1,
         )
+
+
+def test_import_rejects_html_body_even_when_content_type_claims_mp4(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        six_clip_media.requests,
+        "get",
+        lambda *args, **kwargs: FakeResponse(b"<html>login</html>", "video/mp4"),
+    )
+
+    with pytest.raises(six_clip_media.SixClipMediaError, match="supported media"):
+        six_clip_media.import_media_url(
+            "https://example.com/download?Signature=secret",
+            tmp_path,
+            clip_index=1,
+        )
+
+
+def test_import_rejects_oversize_content_length_before_reading_body(
+    monkeypatch, tmp_path
+):
+    response = OversizeHeaderResponse()
+    monkeypatch.setattr(
+        six_clip_media.requests,
+        "get",
+        lambda *args, **kwargs: response,
+    )
+
+    with pytest.raises(six_clip_media.SixClipMediaError, match="maximum allowed size"):
+        six_clip_media.import_media_url(
+            "https://example.com/large-video",
+            tmp_path,
+            clip_index=1,
+            max_bytes=10,
+        )
+
+    assert response.iterated is False
 
 
 def test_import_rejects_non_http_scheme(tmp_path):
