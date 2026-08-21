@@ -49,8 +49,8 @@ def test_plan_rejects_missing_or_shifted_segments():
 
     shifted = [_segment(i) for i in range(1, 7)]
     shifted[2] = shifted[2].model_copy(update={"start_sec": 21})
-    with pytest.raises(ValueError, match="fixed six-clip timeline"):
-        validate_six_clip_plan(SixClipPlan(target_words=130, segments=shifted))
+    with pytest.raises(ValueError, match="fixed range 20-30 seconds"):
+        SixClipPlan(target_words=130, segments=shifted)
 
 
 def test_master_prompt_contains_global_rules_and_all_current_clip_values():
@@ -92,6 +92,10 @@ def test_parse_ai_clip_plan_accepts_fenced_json_and_normalizes_timeline():
 
 
 def test_parse_ai_clip_plan_rejects_wrong_clip_count():
-    payload = {"clips": [{"title": "only one", "narration_context": "x", "video_prompt": "y"}]}
+    payload = {
+        "clips": [
+            {"title": "only one", "narration_context": "x", "video_prompt": "y"}
+        ]
+    }
     with pytest.raises(ValueError, match="exactly six"):
         parse_ai_clip_plan(json.dumps(payload), target_words=130)
