@@ -245,7 +245,6 @@ def render_six_clip_sections(
                         else:
                             current_kind = imported.media_kind
                             current_path = imported.local_path
-                            st.session_state[_widget_key(index, "url")] = ""
                             plan = _replace_segment(
                                 plan,
                                 index,
