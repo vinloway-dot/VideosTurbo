@@ -1,0 +1,29 @@
+name: Six clip main regression TDD
+
+on:
+  pull_request:
+    paths:
+      - webui/Main.py
+      - test/services/test_webui_generation_defaults.py
+      - test/services/test_webui_loomloom.py
+      - test/services/test_six_clip_webui.py
+      - .github/workflows/six-clip-main-regression-tdd.yml
+
+jobs:
+  focused-main-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --python 3.11
+      - run: >-
+          uv run --no-sync pytest -q
+          test/services/test_webui_generation_defaults.py
+          test/services/test_webui_loomloom.py
+          test/services/test_six_clip_webui.py
