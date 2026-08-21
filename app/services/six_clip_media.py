@@ -63,6 +63,10 @@ def _validate_remote_url(url: str) -> str:
 
 def _detect_magic(header: bytes) -> tuple[str, str] | None:
     if len(header) >= 12 and header[4:8] == b"ftyp":
+        # QuickTime MOV files use the ``qt  `` major brand; other ISO-BMFF
+        # variants used by the supported URL flow are stored as MP4.
+        if header[8:12] == b"qt  ":
+            return "video", ".mov"
         return "video", ".mp4"
     if header.startswith(b"\x1aE\xdf\xa3"):
         return "video", ".webm"
@@ -76,14 +80,18 @@ def _detect_magic(header: bytes) -> tuple[str, str] | None:
 
 
 def _detect_media_type(content_type: str, header: bytes) -> tuple[str, str]:
+    # The HTTP Content-Type is advisory only. Signed/CDN responses can omit it,
+    # while an error page can incorrectly claim video/mp4. Require supported
+    # file signatures first so HTML/JSON cannot enter the render pipeline.
+    detected = _detect_magic(header)
+    if detected is None:
+        raise SixClipMediaError("URL did not return supported media content")
+
     normalized = str(content_type or "").split(";", 1)[0].strip().lower()
     mapped = _CONTENT_TYPE_MAP.get(normalized)
-    if mapped:
-        return mapped
-    detected = _detect_magic(header)
-    if detected:
-        return detected
-    raise SixClipMediaError("URL did not return supported media content")
+    if mapped is not None and mapped[0] != detected[0]:
+        raise SixClipMediaError("URL did not return supported media content")
+    return detected
 
 
 def _destination_path(destination_dir: str | os.PathLike, clip_index: int, suffix: str) -> Path:
@@ -123,10 +131,11 @@ def import_media_url(
         content_length = response.headers.get("Content-Length")
         if content_length:
             try:
-                if int(content_length) > int(max_bytes):
-                    raise SixClipMediaError("media URL exceeds the maximum allowed size")
-            except ValueError:
-                pass
+                declared_size = int(content_length)
+            except (TypeError, ValueError):
+                declared_size = None
+            if declared_size is not None and declared_size > int(max_bytes):
+                raise SixClipMediaError("media URL exceeds the maximum allowed size")
 
         iterator = response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE)
         first_chunk = next(iterator, b"")
@@ -250,9 +259,7 @@ def materialize_plan_for_task(
     """Copy all ready media into the task directory and return task-local paths."""
     missing = validate_ready_media(plan)
     if missing:
-        raise SixClipMediaError(
-            "missing media: " + missing_media_message(plan)
-        )
+        raise SixClipMediaError("missing media: " + missing_media_message(plan))
 
     destination = Path(task_dir) / "six-clip-sources"
     destination.mkdir(parents=True, exist_ok=True)
