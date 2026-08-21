@@ -169,7 +169,15 @@ def import_media_url(
     except SixClipMediaError:
         raise
     except requests.RequestException as exc:
-        raise SixClipMediaError(f"failed to download media URL: {exc}") from exc
+        # requests exceptions often include the full request URL. Never copy the
+        # exception text into UI/task errors because signed CDN query values can
+        # contain reusable credentials. Keep only a safe URL and exception type
+        # in server logs, and return a generic user-facing failure.
+        logger.warning(
+            "failed to download six-clip media: "
+            f"clip={clip_index}, url={safe_url}, error_type={type(exc).__name__}"
+        )
+        raise SixClipMediaError("failed to download media URL") from exc
     except Exception as exc:
         if isinstance(exc, RuntimeError) and str(exc).startswith("HTTP "):
             raise SixClipMediaError(f"failed to download media URL: {exc}") from exc
