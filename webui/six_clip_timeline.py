@@ -47,6 +47,24 @@ def set_session_plan(plan: SixClipPlan, *, sync_widgets: bool = True) -> None:
         st.session_state[_widget_key(segment.index, "prompt")] = segment.video_prompt
 
 
+def restore_session_plan(raw_plan, target_words: int | None = None) -> bool:
+    """Restore a persisted task plan without silently replacing missing media."""
+    if not raw_plan:
+        return False
+    try:
+        plan = (
+            raw_plan
+            if isinstance(raw_plan, SixClipPlan)
+            else SixClipPlan.model_validate(raw_plan)
+        )
+    except Exception:
+        return False
+    if target_words is not None:
+        plan.target_words = int(target_words)
+    set_session_plan(plan, sync_widgets=True)
+    return True
+
+
 def _media_session_dir() -> Path:
     session_id = st.session_state.get(MEDIA_SESSION_ID_KEY)
     if not session_id:
@@ -97,6 +115,13 @@ def render_six_clip_sections(
     session_dir = _media_session_dir()
     for segment in plan.segments:
         index = segment.index
+        title_key = _widget_key(index, "title")
+        narration_key = _widget_key(index, "narration")
+        prompt_key = _widget_key(index, "prompt")
+        st.session_state.setdefault(title_key, segment.title)
+        st.session_state.setdefault(narration_key, segment.narration_context)
+        st.session_state.setdefault(prompt_key, segment.video_prompt)
+
         with st.container(border=True):
             ready = bool(
                 segment.media_path
@@ -111,20 +136,17 @@ def render_six_clip_sections(
 
             title = st.text_input(
                 "Clip Title",
-                value=segment.title,
-                key=_widget_key(index, "title"),
+                key=title_key,
             ).strip()
             narration = st.text_area(
                 "Narration Context",
-                value=segment.narration_context,
                 height=120,
-                key=_widget_key(index, "narration"),
+                key=narration_key,
             ).strip()
             prompt = st.text_area(
                 "Video Prompt (English)",
-                value=segment.video_prompt,
                 height=260,
-                key=_widget_key(index, "prompt"),
+                key=prompt_key,
             ).strip()
 
             media_mode = st.radio(
