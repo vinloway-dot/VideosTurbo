@@ -33,6 +33,11 @@ def test_timeline_ui_has_editable_prompt_and_exactly_one_media_source_per_clip()
     assert "six_clip_media.save_uploaded_media(" in TIMELINE_SOURCE
 
 
+def test_url_import_does_not_mutate_instantiated_text_input_state():
+    unsafe_mutation = 'st.session_state[_widget_key(index, "url")] = ""'
+    assert unsafe_mutation not in TIMELINE_SOURCE
+
+
 def test_timeline_ui_previews_readiness_and_builds_live_master_prompt():
     assert "st.video(current_path)" in TIMELINE_SOURCE
     assert "st.image(current_path, use_container_width=True)" in TIMELINE_SOURCE
