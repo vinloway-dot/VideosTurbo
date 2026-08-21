@@ -94,6 +94,31 @@ def build_master_prompt(plan: SixClipPlan) -> str:
     return "\n\n".join(blocks).strip()
 
 
+def build_script_generation_requirements(
+    target_words: int,
+    user_requirements: str = "",
+) -> str:
+    try:
+        target = int(target_words)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("target_words must be an integer") from exc
+    if target < 40 or target > 400:
+        raise ValueError("target_words must be between 40 and 400")
+
+    requirements = [
+        f"Write approximately {target} words so the narration is suitable for about 60 seconds.",
+        (
+            "The first 0–3 seconds must function as a strong hook that immediately "
+            "creates curiosity or communicates the most compelling point."
+        ),
+        "Keep the hook as part of the natural narration; do not label it as a hook.",
+    ]
+    custom = str(user_requirements or "").strip()
+    if custom:
+        requirements.append(custom)
+    return "\n".join(requirements)
+
+
 def build_six_clip_analysis_prompt(video_script: str, language: str = "") -> str:
     script = str(video_script or "").strip()
     if not script:
@@ -141,3 +166,22 @@ Analyze the narration below and divide it into exactly six chronological visual 
 ## Full narration
 {script}
 """.strip()
+
+
+def generate_six_clip_plan(
+    video_script: str,
+    language: str = "",
+    target_words: int = 130,
+    app_config=None,
+) -> SixClipPlan:
+    # Keep provider selection/retry behavior centralized in the existing LLM service.
+    # This helper only defines the strict structured output contract for the six-clip UI.
+    from app.services import llm
+
+    prompt = build_six_clip_analysis_prompt(video_script, language)
+    response = (
+        llm._generate_response(prompt)
+        if app_config is None
+        else llm._generate_response(prompt, app_config=app_config)
+    )
+    return parse_ai_clip_plan(response, target_words=target_words)
