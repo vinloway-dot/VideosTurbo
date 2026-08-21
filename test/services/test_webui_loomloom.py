@@ -27,7 +27,11 @@ def _widget_by_key(elements, key):
 
 
 def _has_widget(elements, key):
-    return any(str(getattr(item, "key", "")) == key for item in elements)
+    return any(
+        str(getattr(item, "key", "")) == key
+        or str(getattr(item, "key", "")).startswith(f"{key}_")
+        for item in elements
+    )
 
 
 def test_loomloom_execution_requires_confirmation_and_quoted_version():

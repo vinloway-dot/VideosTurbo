@@ -3144,7 +3144,7 @@ def _render_script_settings(panel, params):
                 "Target Words",
                 min_value=40,
                 max_value=400,
-                value=int(config.ui.get("target_words", 130) or 130),
+                value=_saved_ui_number("target_words", 130, 40, 400, int),
                 step=5,
                 key="target_words_input",
                 help="Approximate narration word count for the 60-second script.",
