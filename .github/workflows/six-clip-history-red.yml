@@ -1,4 +1,4 @@
-name: Six clip history RED
+name: Apply six clip history restore
 
 on:
   pull_request:
@@ -6,18 +6,45 @@ on:
       - test/services/test_six_clip_history.py
       - webui/Main.py
       - webui/six_clip_timeline.py
+      - scripts/apply_six_clip_history_restore.py
       - .github/workflows/six-clip-history-red.yml
 
+permissions:
+  contents: write
+
 jobs:
-  history-red:
+  history-restore:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: feature/six-clip-media-timeline
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv sync --frozen --python 3.11
-      - run: uv run --no-sync pytest -q test/services/test_six_clip_history.py
+      - name: Apply Main history restore patch
+        run: python scripts/apply_six_clip_history_restore.py
+      - name: Install dependencies
+        run: uv sync --frozen --python 3.11
+      - name: Run focused history tests
+        run: uv run --no-sync pytest -q test/services/test_six_clip_history.py
+      - name: Compile and lint changed Python
+        run: |
+          uv run --no-sync python -m py_compile webui/Main.py webui/six_clip_timeline.py
+          uv run --no-sync ruff check webui/Main.py webui/six_clip_timeline.py test/services/test_six_clip_history.py
+          git diff --check
+      - name: Commit history restore
+        run: |
+          if git diff --quiet; then
+            echo "History restore already applied"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add webui/Main.py
+          git commit -m "feat: restore six clip task history"
+          git push origin HEAD:feature/six-clip-media-timeline
