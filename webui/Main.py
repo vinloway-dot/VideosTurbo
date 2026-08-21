@@ -1148,6 +1148,24 @@ def _apply_pending_task_restore():
     st.session_state["custom_system_prompt"] = (
         params.get("custom_system_prompt") or llm.DEFAULT_SCRIPT_SYSTEM_PROMPT
     )
+    st.session_state["target_words_input"] = int(
+        params.get("target_words") or 130
+    )
+
+    restored_six_clip_plan = six_clip_timeline.restore_plan_from_task_params(params)
+    if restored_six_clip_plan is not None:
+        six_clip_timeline.set_session_plan(
+            restored_six_clip_plan,
+            sync_widgets=True,
+        )
+    _set_stable_widget_value(
+        "six_clip_video_aspect_select",
+        params.get("video_aspect") or VideoAspect.portrait.value,
+    )
+    _set_stable_widget_value(
+        "six_clip_image_motion_select",
+        params.get("image_motion") or "random",
+    )
 
     # 视频设置。素材上传控件不能由服务端写入，因此本地素材需要用户重新选择。
     video_source = params.get("video_source") or "pexels"
