@@ -20,6 +20,10 @@ def _widget_by_key(elements, key):
     )
 
 
+def _has_widget(elements, key):
+    return any(str(getattr(item, "key", "")) == key for item in elements)
+
+
 def _new_app():
     # A cold Python 3.11 environment can spend over 30 seconds importing the
     # full Streamlit entrypoint and optional media stack. Keep the assertion
@@ -32,11 +36,11 @@ def _new_app():
 
 
 def test_reusable_generation_settings_survive_a_new_webui_session():
-    """Reusable controls should persist while per-video content stays session-only."""
+    """Reusable six-clip controls persist while per-video content stays session-only."""
     test_app_config = dict(
         config.app,
         video_source="pexels",
-        match_materials_to_script=False,
+        match_materials_to_script=True,
     )
     test_ui_config = dict(
         config.ui,
@@ -76,20 +80,13 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
         _widget_by_key(first_session.text_area, "custom_system_prompt").set_value(
             "Write a factual short-video script."
         )
-        _widget_by_key(first_session.selectbox, "video_concat_mode_select").set_value(
-            "sequential"
-        )
+        _widget_by_key(first_session.number_input, "target_words_input").set_value(145)
         _widget_by_key(
-            first_session.selectbox, "video_transition_mode_select"
-        ).set_value("FadeIn")
-        _widget_by_key(first_session.selectbox, "video_aspect_for_pexels").set_value(
-            "16:9"
-        )
-        _widget_by_key(first_session.selectbox, "video_clip_duration_select").set_value(
-            7
-        )
-        _widget_by_key(first_session.slider, "video_clip_speed_slider").set_value(1.5)
-        _widget_by_key(first_session.selectbox, "video_count_select").set_value(3)
+            first_session.selectbox, "six_clip_video_aspect_select"
+        ).set_value("16:9")
+        _widget_by_key(
+            first_session.selectbox, "six_clip_image_motion_select"
+        ).set_value("slow_zoom_in")
         _widget_by_key(first_session.selectbox, "voice_volume_select").set_value(1.5)
         _widget_by_key(first_session.selectbox, "voice_rate_select").set_value(1.2)
         _widget_by_key(first_session.selectbox, "bgm_type_select").set_value("custom")
@@ -101,18 +98,6 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
         )
         _widget_by_key(first_session.slider, "stroke_width_slider").set_value(2.5)
         first_session.run()
-
-        # Aspect is a per-source preference: Coverr's common landscape default
-        # must not replace an explicit portrait choice or the Pexels preference.
-        _widget_by_key(first_session.selectbox, "video_source_select").set_value(
-            "coverr"
-        ).run()
-        _widget_by_key(first_session.selectbox, "video_aspect_for_coverr").set_value(
-            "9:16"
-        ).run()
-        _widget_by_key(first_session.selectbox, "video_source_select").set_value(
-            "pexels"
-        ).run()
 
         _widget_by_key(first_session.selectbox, "bgm_volume_select").set_value(0.4)
         _widget_by_key(first_session.text_input, "custom_bgm_file_input").set_value(
@@ -141,13 +126,9 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
             "paragraph_number": 3,
             "video_script_prompt": "Keep the hook concise.",
             "custom_system_prompt": "Write a factual short-video script.",
-            "video_concat_mode": "sequential",
-            "video_transition_mode": "FadeIn",
-            "video_aspect_pexels": "16:9",
-            "video_aspect_coverr": "9:16",
-            "video_clip_duration": 7,
-            "video_clip_speed": 1.5,
-            "video_count": 3,
+            "target_words": 145,
+            "six_clip_video_aspect": "16:9",
+            "six_clip_image_motion": "slow_zoom_in",
             "voice_volume": 1.5,
             "voice_rate": 1.2,
             "bgm_type": "custom",
@@ -183,30 +164,14 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
             second_session.text_area, "custom_system_prompt"
         ).value == "Write a factual short-video script."
         assert _widget_by_key(
-            second_session.selectbox, "video_concat_mode_select"
-        ).value == "sequential"
+            second_session.number_input, "target_words_input"
+        ).value == 145
         assert _widget_by_key(
-            second_session.selectbox, "video_transition_mode_select"
-        ).value == "FadeIn"
-        assert _widget_by_key(
-            second_session.selectbox, "video_aspect_for_pexels"
+            second_session.selectbox, "six_clip_video_aspect_select"
         ).value == "16:9"
-        _widget_by_key(second_session.selectbox, "video_source_select").set_value(
-            "coverr"
-        ).run()
         assert _widget_by_key(
-            second_session.selectbox, "video_aspect_for_coverr"
-        ).value == "9:16"
-        _widget_by_key(second_session.selectbox, "video_source_select").set_value(
-            "pexels"
-        ).run()
-        assert _widget_by_key(
-            second_session.selectbox, "video_clip_duration_select"
-        ).value == 7
-        assert _widget_by_key(
-            second_session.slider, "video_clip_speed_slider"
-        ).value == 1.5
-        assert _widget_by_key(second_session.selectbox, "video_count_select").value == 3
+            second_session.selectbox, "six_clip_image_motion_select"
+        ).value == "slow_zoom_in"
         assert _widget_by_key(
             second_session.selectbox, "voice_volume_select"
         ).value == 1.5
@@ -242,6 +207,12 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
         ).value == "#123456"
         assert _widget_by_key(second_session.slider, "stroke_width_slider").value == 2.5
 
+        # Legacy stock-material controls are deliberately absent from the fixed
+        # six-clip Main Generator even if old config values still exist.
+        assert not _has_widget(second_session.selectbox, "video_source_select")
+        assert not _has_widget(second_session.selectbox, "video_concat_mode_select")
+        assert not _has_widget(second_session.selectbox, "video_transition_mode_select")
+
         # Per-video content must not leak into a new session.
         assert second_session.session_state["video_subject"] == ""
         assert second_session.session_state["video_script"] == ""
@@ -266,11 +237,11 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
 
 
 def test_invalid_saved_generation_settings_fall_back_without_breaking_webui():
-    """Stale or manually edited TOML values must not poison Streamlit widgets."""
+    """Stale or manually edited TOML values must not poison six-clip widgets."""
     test_app_config = dict(
         config.app,
-        video_source="pexels",
-        match_materials_to_script=False,
+        video_source="loomloom",
+        match_materials_to_script=True,
     )
     test_ui_config = dict(
         config.ui,
@@ -280,12 +251,9 @@ def test_invalid_saved_generation_settings_fall_back_without_breaking_webui():
         voice_name="en-US-JennyNeural-Female",
         video_language="not-a-language",
         paragraph_number=999,
-        video_concat_mode="not-a-mode",
-        video_transition_mode="not-a-transition",
-        video_aspect_pexels="4:3",
-        video_clip_duration=999,
-        video_clip_speed="nan",
-        video_count=True,
+        target_words="not-a-number",
+        six_clip_video_aspect="4:3",
+        six_clip_image_motion="spin",
         voice_volume=999,
         voice_rate=-1,
         bgm_type="not-a-source",
@@ -295,7 +263,6 @@ def test_invalid_saved_generation_settings_fall_back_without_breaking_webui():
         stroke_width="inf",
         loomloom_candidate_count=0,
         loomloom_script_duration_seconds=9999,
-        loomloom_video_scene_count="nan",
     )
 
     with (
@@ -312,16 +279,9 @@ def test_invalid_saved_generation_settings_fall_back_without_breaking_webui():
 
     assert _widget_by_key(app.selectbox, "script_language_select").value == ""
     assert _widget_by_key(app.slider, "paragraph_number_input").value == 10
-    assert _widget_by_key(app.selectbox, "video_concat_mode_select").value == "random"
-    assert _widget_by_key(app.selectbox, "video_transition_mode_select").value == (
-        "None"
-    )
-    assert _widget_by_key(app.selectbox, "video_aspect_for_pexels").value == "9:16"
-    assert _widget_by_key(app.selectbox, "video_clip_duration_select").value == 3
-    assert _widget_by_key(app.slider, "video_clip_speed_slider").value == 1.0
-    assert _widget_by_key(app.selectbox, "video_count_select").value == 1
-    assert isinstance(test_ui_config["video_count"], int)
-    assert not isinstance(test_ui_config["video_count"], bool)
+    assert _widget_by_key(app.number_input, "target_words_input").value == 130
+    assert _widget_by_key(app.selectbox, "six_clip_video_aspect_select").value == "9:16"
+    assert _widget_by_key(app.selectbox, "six_clip_image_motion_select").value == "random"
     assert _widget_by_key(app.selectbox, "voice_volume_select").value == 1.0
     assert _widget_by_key(app.selectbox, "voice_rate_select").value == 1.0
     assert _widget_by_key(app.selectbox, "bgm_type_select").value == "random"
@@ -331,11 +291,12 @@ def test_invalid_saved_generation_settings_fall_back_without_breaking_webui():
     assert _widget_by_key(app.slider, "stroke_width_slider").value == 1.5
     assert app.session_state["loomloom_candidate_count"] == 1
     assert app.session_state["loomloom_script_duration_seconds"] == 600
-    assert app.session_state["loomloom_video_scene_count"] == 1
+    assert not _has_widget(app.selectbox, "video_source_select")
+    assert not _has_widget(app.selectbox, "video_concat_mode_select")
 
 
-def test_loomloom_tuning_survives_restart_without_persisting_payment_state():
-    """Paid-provider tuning is reusable; quotes and confirmations are not."""
+def test_loomloom_script_tuning_survives_restart_without_video_source_controls():
+    """Script-provider tuning persists; removed LoomLoom video controls do not return."""
     test_app_config = dict(
         config.app,
         video_source="loomloom",
@@ -368,9 +329,6 @@ def test_loomloom_tuning_survives_restart_without_persisting_payment_state():
         _widget_by_key(
             first_session.number_input, "loomloom_script_duration_seconds"
         ).set_value(120)
-        _widget_by_key(
-            first_session.number_input, "loomloom_video_scene_count"
-        ).set_value(3)
         first_session.run()
 
         assert {
@@ -378,15 +336,15 @@ def test_loomloom_tuning_survives_restart_without_persisting_payment_state():
             for key in (
                 "loomloom_candidate_count",
                 "loomloom_script_duration_seconds",
-                "loomloom_video_scene_count",
             )
         } == {
             "loomloom_candidate_count": 4,
             "loomloom_script_duration_seconds": 120,
-            "loomloom_video_scene_count": 3,
         }
         assert "loomloom_confirm_charge" not in test_ui_config
         assert "loomloom_video_confirm_charge" not in test_ui_config
+        assert not _has_widget(first_session.number_input, "loomloom_video_scene_count")
+        assert not _has_widget(first_session.button, "loomloom_quote_videos")
 
         second_session = _new_app()
         assert _widget_by_key(
@@ -395,23 +353,24 @@ def test_loomloom_tuning_survives_restart_without_persisting_payment_state():
         assert _widget_by_key(
             second_session.number_input, "loomloom_script_duration_seconds"
         ).value == 120
-        assert _widget_by_key(
-            second_session.number_input, "loomloom_video_scene_count"
-        ).value == 3
-        assert second_session.session_state["loomloom_video_confirm_charge"] is False
+        assert not _has_widget(second_session.number_input, "loomloom_video_scene_count")
+        assert not _has_widget(second_session.button, "loomloom_quote_videos")
 
 
-def test_script_order_constraint_does_not_replace_saved_concat_preference():
-    """A derived sequential mode must not become the user's reusable default."""
+def test_legacy_stock_preferences_do_not_override_fixed_six_clip_main():
+    """Old stock-material preferences remain inert in the six-clip Main Generator."""
     test_app_config = dict(
         config.app,
-        video_source="pexels",
+        video_source="loomloom",
         match_materials_to_script=True,
     )
     test_ui_config = dict(
         config.ui,
         language="en",
         video_concat_mode="random",
+        video_transition_mode="FadeIn",
+        six_clip_video_aspect="16:9",
+        six_clip_image_motion="pan_left_right",
         voice_mode="tts",
         tts_server="azure-tts-v1",
         voice_name="en-US-JennyNeural-Female",
@@ -427,18 +386,14 @@ def test_script_order_constraint_does_not_replace_saved_concat_preference():
             return_value=["en-US-JennyNeural-Female"],
         ),
     ):
-        constrained_session = _new_app()
-        constrained_concat = _widget_by_key(
-            constrained_session.selectbox, "video_concat_mode_select"
-        )
-        assert constrained_concat.value == "sequential"
-        assert constrained_concat.disabled is True
-        assert test_ui_config["video_concat_mode"] == "random"
+        app = _new_app()
 
-        # A later session without the constraint should recover the user's actual
-        # preference, not the derived value shown while script-order matching ran.
-        test_app_config["match_materials_to_script"] = False
-        unconstrained_session = _new_app()
-        assert _widget_by_key(
-            unconstrained_session.selectbox, "video_concat_mode_select"
-        ).value == "random"
+    assert _widget_by_key(app.selectbox, "six_clip_video_aspect_select").value == "16:9"
+    assert _widget_by_key(app.selectbox, "six_clip_image_motion_select").value == (
+        "pan_left_right"
+    )
+    assert not _has_widget(app.selectbox, "video_source_select")
+    assert not _has_widget(app.selectbox, "video_concat_mode_select")
+    assert not _has_widget(app.selectbox, "video_transition_mode_select")
+    assert test_ui_config["video_concat_mode"] == "random"
+    assert test_ui_config["video_transition_mode"] == "FadeIn"
