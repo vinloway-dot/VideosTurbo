@@ -47,10 +47,22 @@ def set_session_plan(plan: SixClipPlan, *, sync_widgets: bool = True) -> None:
         st.session_state[_widget_key(segment.index, "prompt")] = segment.video_prompt
 
 
-def restore_session_plan(raw_plan, target_words: int | None = None) -> bool:
-    """Restore a persisted task plan without silently replacing missing media."""
-    if not raw_plan:
+def _has_restorable_local_media(segment: SixClipSegment) -> bool:
+    if segment.media_kind not in {"video", "image"} or not segment.media_path:
         return False
+    try:
+        media_path = Path(segment.media_path)
+        return media_path.is_file() and media_path.stat().st_size > 0
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _normalize_restored_plan(
+    raw_plan,
+    target_words: int | None = None,
+) -> SixClipPlan | None:
+    if not raw_plan:
+        return None
     try:
         plan = (
             raw_plan
@@ -58,9 +70,56 @@ def restore_session_plan(raw_plan, target_words: int | None = None) -> bool:
             else SixClipPlan.model_validate(raw_plan)
         )
     except Exception:
-        return False
+        return None
+
+    normalized_segments: list[SixClipSegment] = []
+    for segment in plan.segments:
+        if _has_restorable_local_media(segment):
+            normalized_segments.append(segment)
+        else:
+            # Task History may outlive imported/uploaded files. Preserve the user's
+            # narration and prompt, but clear stale media so the UI visibly returns
+            # to Missing and the fail-closed preflight cannot fall back to stock.
+            normalized_segments.append(
+                segment.model_copy(update={"media_kind": "", "media_path": ""})
+            )
+
+    restored_target_words = plan.target_words
     if target_words is not None:
-        plan.target_words = int(target_words)
+        try:
+            restored_target_words = int(target_words)
+        except (TypeError, ValueError):
+            restored_target_words = plan.target_words
+
+    try:
+        return SixClipPlan(
+            target_words=restored_target_words,
+            segments=normalized_segments,
+        )
+    except Exception:
+        return None
+
+
+def restore_plan_from_task_params(params) -> SixClipPlan | None:
+    """Build a safe six-clip plan from persisted task parameters.
+
+    Task manifests contain only local media references. A reference is restored
+    only while that local file still exists and is non-empty; missing files are
+    deliberately cleared instead of being replaced by stock material.
+    """
+    if not isinstance(params, dict):
+        return None
+    return _normalize_restored_plan(
+        params.get("six_clip_plan"),
+        target_words=params.get("target_words"),
+    )
+
+
+def restore_session_plan(raw_plan, target_words: int | None = None) -> bool:
+    """Restore a persisted task plan without silently replacing missing media."""
+    plan = _normalize_restored_plan(raw_plan, target_words=target_words)
+    if plan is None:
+        return False
     set_session_plan(plan, sync_widgets=True)
     return True
 
