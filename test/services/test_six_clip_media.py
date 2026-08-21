@@ -40,6 +40,20 @@ class OversizeHeaderResponse:
         return None
 
 
+class SignedUrlErrorResponse:
+    def __init__(self):
+        self.headers = {}
+
+    def raise_for_status(self):
+        raise six_clip_media.requests.RequestException(
+            "403 Client Error for url: "
+            "https://flow-content.google/video/id?Signature=secret&Expires=1"
+        )
+
+    def close(self):
+        return None
+
+
 @pytest.fixture
 def mp4_bytes():
     # ISO-BMFF/MP4 files identify themselves with an ftyp box near the beginning.
@@ -118,6 +132,26 @@ def test_import_rejects_oversize_content_length_before_reading_body(
         )
 
     assert response.iterated is False
+
+
+def test_request_failure_does_not_expose_signed_url_query(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        six_clip_media.requests,
+        "get",
+        lambda *args, **kwargs: SignedUrlErrorResponse(),
+    )
+
+    with pytest.raises(six_clip_media.SixClipMediaError) as exc_info:
+        six_clip_media.import_media_url(
+            "https://flow-content.google/video/id?Signature=secret&Expires=1",
+            tmp_path,
+            clip_index=1,
+        )
+
+    message = str(exc_info.value)
+    assert "secret" not in message
+    assert "Signature=" not in message
+    assert "Expires=" not in message
 
 
 def test_import_rejects_non_http_scheme(tmp_path):
