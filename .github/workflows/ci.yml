@@ -6,7 +6,68 @@ on:
     branches:
       - main
 
+permissions:
+  contents: write
+  pull-requests: read
+
 jobs:
+  apply-six-clip-integration:
+    name: Apply six clip integration
+    if: github.event_name == 'pull_request' && github.head_ref == 'feature/six-clip-media-timeline'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/six-clip-media-timeline
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Apply integration patch
+        run: python scripts/apply_six_clip_integration.py
+
+      - name: Install dependencies
+        run: uv sync --frozen --python 3.11
+
+      - name: Verify focused six clip tests
+        run: >-
+          uv run --no-sync pytest -q
+          test/services/test_six_clip_plan.py
+          test/services/test_six_clip_ai.py
+          test/services/test_six_clip_media.py
+          test/services/test_six_clip_render.py
+          test/services/test_six_clip_task_pipeline.py
+
+      - name: Compile and lint integration
+        run: |
+          uv run --no-sync python -m py_compile app/models/schema.py app/models/six_clip.py app/services/six_clip_plan.py app/services/six_clip_media.py app/services/six_clip_render.py app/services/task.py webui/Main.py webui/six_clip_timeline.py
+          uv run --no-sync ruff check app/models/schema.py app/models/six_clip.py app/services/six_clip_plan.py app/services/six_clip_media.py app/services/six_clip_render.py app/services/task.py webui/Main.py webui/six_clip_timeline.py test/services/test_six_clip_plan.py test/services/test_six_clip_ai.py test/services/test_six_clip_media.py test/services/test_six_clip_render.py test/services/test_six_clip_task_pipeline.py
+          git diff --check
+
+      - name: Commit integration
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "Integration already applied"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/models/schema.py app/services/task.py webui/Main.py
+          git commit -m "feat: integrate six clip timeline into main generator"
+          git push origin HEAD:feature/six-clip-media-timeline
+
   tests:
     name: Python ${{ matrix.python-version }} tests
     runs-on: ubuntu-latest
