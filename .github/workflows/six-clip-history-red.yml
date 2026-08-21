@@ -1,0 +1,23 @@
+name: Six clip history RED
+
+on:
+  pull_request:
+    paths:
+      - test/services/test_six_clip_history.py
+      - webui/Main.py
+      - webui/six_clip_timeline.py
+      - .github/workflows/six-clip-history-red.yml
+
+jobs:
+  history-red:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --python 3.11
+      - run: uv run --no-sync pytest -q test/services/test_six_clip_history.py
