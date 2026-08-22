@@ -45,6 +45,18 @@ def test_create_job_persists_defaults_and_six_clip_plan_across_reopen(tmp_path):
     assert loaded.clip_plan.model_dump() == created.clip_plan.model_dump()
 
 
+def test_list_jobs_is_newest_first_and_supports_pagination(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    first = store.create_job(_request(subject="first"))
+    second = store.create_job(_request(subject="second"))
+
+    first_page = store.list_jobs(limit=1, offset=0)
+    second_page = store.list_jobs(limit=1, offset=1)
+
+    assert [job.id for job in first_page] == [second.id]
+    assert [job.id for job in second_page] == [first.id]
+
+
 def test_patch_job_updates_status_checkpoint_and_progress(tmp_path):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     created = store.create_job(_request())
