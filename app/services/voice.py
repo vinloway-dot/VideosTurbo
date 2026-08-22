@@ -178,7 +178,7 @@ def get_elevenlabs_voices(api_key: str) -> list[str]:
         return []
     try:
         url = "https://api.elevenlabs.io/v2/voices"
-        params = {"is_favorite": "true", "page_size": 100}
+        params = {"page_size": 100}
         headers = {"xi-api-key": api_key}
         response = requests.get(url, params=params, headers=headers, timeout=10)
         if response.status_code != 200:
