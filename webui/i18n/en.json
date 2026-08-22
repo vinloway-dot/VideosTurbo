@@ -226,6 +226,7 @@
     "Voice Example": "This is an example text for testing speech synthesis",
     "Synthesizing Voice": "Synthesizing voice, please wait...",
     "Generate Full Voiceover Preview": "Full Preview",
+    "Confirm Script & Build Timeline": "Confirm Script & Build Timeline",
     "Estimated Voiceover Duration": "Estimated full voiceover: about {min}–{max} sec (local estimate, no API call)",
     "Voiceover Script Required": "Add a video script to estimate and preview the full voiceover.",
     "Full Voiceover Preview Cost Hint": "A full preview calls the selected TTS service and may use API credits.",

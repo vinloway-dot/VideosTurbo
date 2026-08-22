@@ -35,6 +35,7 @@ from app.models.llm_provider import (
     get_llm_provider,
     normalize_provider_override,
 )
+from app.models.six_clip import SixClipPlan
 from app.models.schema import (
     MaterialInfo,
     VideoAspect,
@@ -47,6 +48,8 @@ from app.services import (
     cache_manager,
     llm,
     loomloom,
+    six_clip_media,
+    six_clip_plan,
     stock_materials,
     video,
     voice,
@@ -59,6 +62,7 @@ from app.services import task as tm
 from app.services import version_checker
 from app.utils.logging_utils import configure_terminal_logger
 from app.utils import utils
+from webui import six_clip_timeline
 
 st.set_page_config(
     page_title="MoneyPrinterTurbo",
@@ -1128,6 +1132,13 @@ def _apply_pending_task_restore():
     if not payload:
         return False
 
+    # History persists timeline metadata, not the in-memory authoritative audio
+    # bytes or SubMaker timing object. Clear previews from the previously open
+    # task so a matching-looking historical fingerprint can never become
+    # Current without an explicit confirmation in this restored task.
+    st.session_state.pop("voice_preview_audio", None)
+    st.session_state.pop("voice_sample_preview_audio", None)
+
     params = payload["params"]
     video_terms = params.get("video_terms") or ""
     if isinstance(video_terms, list):
@@ -1144,6 +1155,24 @@ def _apply_pending_task_restore():
     st.session_state["video_script_prompt"] = params.get("video_script_prompt") or ""
     st.session_state["custom_system_prompt"] = (
         params.get("custom_system_prompt") or llm.DEFAULT_SCRIPT_SYSTEM_PROMPT
+    )
+    st.session_state["target_words_input"] = int(
+        params.get("target_words") or 130
+    )
+
+    restored_six_clip_plan = six_clip_timeline.restore_plan_from_task_params(params)
+    if restored_six_clip_plan is not None:
+        six_clip_timeline.set_session_plan(
+            restored_six_clip_plan,
+            sync_widgets=True,
+        )
+    _set_stable_widget_value(
+        "six_clip_video_aspect_select",
+        params.get("video_aspect") or VideoAspect.portrait.value,
+    )
+    _set_stable_widget_value(
+        "six_clip_image_motion_select",
+        params.get("image_motion") or "random",
     )
 
     # 视频设置。素材上传控件不能由服务端写入，因此本地素材需要用户重新选择。
@@ -2745,19 +2774,23 @@ def _render_local_script_generation(params):
     with st.spinner(tr("Generating Video Script and Keywords")):
 
         def generate_script_and_terms(app_config_snapshot):
+            script_requirements = six_clip_plan.build_script_generation_requirements(
+                params.target_words,
+                params.video_script_prompt,
+            )
             script = llm.generate_script(
                 video_subject=params.video_subject,
                 language=params.video_language,
                 paragraph_number=params.paragraph_number,
-                video_script_prompt=params.video_script_prompt,
+                video_script_prompt=script_requirements,
                 custom_system_prompt=params.custom_system_prompt,
                 app_config=app_config_snapshot,
             )
             terms = llm.generate_terms(
                 params.video_subject,
                 script,
-                amount=8 if params.match_materials_to_script else 5,
-                match_script_order=params.match_materials_to_script,
+                amount=5,
+                match_script_order=False,
                 app_config=app_config_snapshot,
             )
             return script, terms
@@ -3107,6 +3140,17 @@ def _render_script_settings(panel, params):
             )
             params.video_language = selected_language_code
             _set_runtime_config("ui", "video_language", params.video_language)
+
+            params.target_words = st.number_input(
+                "Target Words",
+                min_value=40,
+                max_value=400,
+                value=_saved_ui_number("target_words", 130, 40, 400, int),
+                step=5,
+                key="target_words_input",
+                help="Approximate narration word count for the 60-second script.",
+            )
+            _set_runtime_config("ui", "target_words", int(params.target_words))
 
             # 使用带 key 的局部容器限定折叠入口样式，保持 expander 的原生交互，
             # 同时避免样式误伤页面顶部的“基础设置”等其他折叠区域。
@@ -3528,6 +3572,90 @@ def _render_video_settings(panel, params):
     return uploaded_files
 
 
+def _render_six_clip_video_settings(panel, params):
+    """Render only settings that still apply to the fixed six-clip timeline."""
+    with panel:
+        with st.container(border=True):
+            st.write("Video Settings")
+            st.caption("Visual Source: six fixed user media clips (6 × 10 seconds).")
+            params.six_clip_mode = True
+            params.video_source = "six_clip"
+            params.video_concat_mode = VideoConcatMode.sequential
+            params.video_transition_mode = VideoTransitionMode.none
+            params.video_clip_duration = 10
+            params.video_clip_speed = 1.0
+            params.video_count = 1
+            params.match_materials_to_script = False
+            params.image_duration = 10
+
+            video_aspect_ratios = [
+                (tr("Portrait"), VideoAspect.portrait.value),
+                (tr("Landscape"), VideoAspect.landscape.value),
+            ]
+            aspect_values = [value for _, value in video_aspect_ratios]
+            selected_aspect = stable_selectbox(
+                tr("Video Ratio"),
+                options=aspect_values,
+                default_value=_saved_ui_choice(
+                    "six_clip_video_aspect", aspect_values, VideoAspect.portrait.value
+                ),
+                key="six_clip_video_aspect_select",
+                format_func=lambda value: dict(
+                    (v, label) for label, v in video_aspect_ratios
+                )[value],
+            )
+            params.video_aspect = VideoAspect(selected_aspect)
+            _set_runtime_config("ui", "six_clip_video_aspect", params.video_aspect.value)
+
+            motion_labels = {
+                "slow_zoom_in": "Slow Zoom In",
+                "slow_zoom_out": "Slow Zoom Out",
+                "pan_left_right": "Pan Left → Right",
+                "pan_right_left": "Pan Right → Left",
+                "random": "Random",
+                "none": "None",
+            }
+            params.image_motion = stable_selectbox(
+                "Image Ken Burns Effect",
+                options=list(motion_labels),
+                default_value=_saved_ui_choice(
+                    "six_clip_image_motion", list(motion_labels), "random"
+                ),
+                key="six_clip_image_motion_select",
+                format_func=lambda value: motion_labels[value],
+            )
+            _set_runtime_config("ui", "six_clip_image_motion", params.image_motion)
+
+            video_codec_options = [
+                (tr("Default Video Encoder"), DEFAULT_VIDEO_CODEC_OPTION),
+                ("libx264 (CPU)", "libx264"),
+                ("NVIDIA NVENC (h264_nvenc)", "h264_nvenc"),
+                ("AMD AMF (h264_amf)", "h264_amf"),
+                ("Intel QSV (h264_qsv)", "h264_qsv"),
+                ("Windows MediaFoundation (h264_mf)", "h264_mf"),
+                ("macOS VideoToolbox (h264_videotoolbox)", "h264_videotoolbox"),
+            ]
+            codec_values = [item[1] for item in video_codec_options]
+            saved_codec = config.app.get("video_codec", DEFAULT_VIDEO_CODEC_OPTION)
+            if saved_codec not in codec_values:
+                saved_codec = DEFAULT_VIDEO_CODEC_OPTION
+            selected_codec = stable_selectbox(
+                tr("Video Encoder"),
+                options=codec_values,
+                default_value=saved_codec,
+                key="six_clip_video_encoder_select",
+                format_func=lambda value: dict(
+                    (v, label) for label, v in video_codec_options
+                )[value],
+                help=tr("Video Encoder Help"),
+            )
+            if selected_codec == DEFAULT_VIDEO_CODEC_OPTION:
+                _delete_runtime_config("app", "video_codec")
+            else:
+                _set_runtime_config("app", "video_codec", selected_codec)
+    return []
+
+
 def _estimate_voiceover_duration_range(
     text: str, voice_rate: float
 ) -> tuple[float, float] | None:
@@ -3693,7 +3821,10 @@ def _synthesize_voice_preview(
                 voice_name=voice_name,
                 voice_rate=voice_rate,
                 voice_file=audio_file,
-                voice_volume=voice_volume,
+                # Full narration is canonical source audio. The final MoviePy
+                # mixer applies the selected gain once, so baking it in here
+                # would make non-default volume play twice as loud or quiet.
+                voice_volume=1.0 if preview_type == "full" else voice_volume,
             )
         if not sub_maker or not os.path.exists(audio_file):
             logger.error(f"{preview_type} voice preview did not produce an audio file")
@@ -3738,6 +3869,92 @@ def _synthesize_voice_preview(
             )
 
 
+def get_current_narration_fingerprint(params, voice_mode: str) -> str:
+    """Return the full narration identity for the current editable settings."""
+    if voice_mode != VOICE_MODE_TTS:
+        return ""
+    script_content = str(params.video_script or "").strip()
+    if not script_content or not params.voice_name:
+        return ""
+    selected_tts_server = config.ui.get("tts_server", "azure-tts-v1")
+    return _voice_preview_fingerprint(
+        preview_type="full",
+        content=script_content,
+        tts_server=selected_tts_server,
+        voice_name=params.voice_name,
+        voice_rate=params.voice_rate,
+        voice_volume=params.voice_volume,
+        provider_signature=_get_voice_preview_provider_signature(selected_tts_server),
+    )
+
+
+def confirm_script_and_build_timeline(
+    params,
+    voice_mode: str,
+    app_config_snapshot,
+):
+    """Confirm exact narration audio, then build its authoritative timeline."""
+    script_content = str(params.video_script or "").strip()
+    if not script_content:
+        st.warning(tr("Voiceover Script Required"))
+        return None
+    if voice_mode != VOICE_MODE_TTS:
+        st.warning("Timeline confirmation currently requires TTS voice mode.")
+        return None
+
+    narration_fingerprint = get_current_narration_fingerprint(params, voice_mode)
+    preview = _get_reusable_full_voice_preview(params, voice_mode)
+    if preview is None:
+        selected_tts_server = config.ui.get("tts_server", "azure-tts-v1")
+        preview = _synthesize_voice_preview(
+            content=script_content,
+            preview_type="full",
+            selected_tts_server=selected_tts_server,
+            voice_name=params.voice_name,
+            voice_rate=params.voice_rate,
+            voice_volume=params.voice_volume,
+        )
+        if preview and preview.get("busy"):
+            st.warning(tr("Voice Preview Busy"))
+            return None
+        if not preview:
+            st.error(tr("Voice Preview No Audio"))
+            return None
+        preview["fingerprint"] = narration_fingerprint
+        st.session_state["voice_preview_audio"] = preview
+
+    duration = preview.get("duration")
+    if (
+        not isinstance(duration, (int, float))
+        or not math.isfinite(duration)
+        or duration <= 0
+    ):
+        st.warning(tr("Voice Preview Duration Unavailable"))
+        return None
+
+    try:
+        maximum_clip_count = int(
+            app_config_snapshot.get("max_dynamic_clip_count", 0) or 0
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("app.max_dynamic_clip_count must be an integer") from exc
+    ranges = six_clip_plan.build_timeline_ranges(
+        float(duration),
+        maximum_clip_count=maximum_clip_count,
+    )
+    subtitle_cues = voice.extract_timed_text_cues(preview["sub_maker"])
+    return six_clip_plan.generate_six_clip_plan(
+        script_content,
+        language=params.video_language,
+        target_words=params.target_words,
+        app_config=app_config_snapshot,
+        timeline_ranges=ranges,
+        narration_duration_sec=float(duration),
+        narration_fingerprint=narration_fingerprint,
+        subtitle_cues=subtitle_cues,
+    )
+
+
 def _render_voice_preview(params, friendly_names, selected_tts_server, voice_name):
     """渲染低成本短试听、完整文案时长估算和按需完整配音预览。"""
     if not friendly_names:
@@ -3767,9 +3984,9 @@ def _render_voice_preview(params, friendly_names, selected_tts_server, voice_nam
         icon=":material/graphic_eq:",
         use_container_width=True,
     )
-    full_preview_requested = preview_columns[1].button(
-        tr("Generate Full Voiceover Preview"),
-        key="generate_full_voiceover_preview_button",
+    confirmation_requested = preview_columns[1].button(
+        tr("Confirm Script & Build Timeline"),
+        key="confirm_script_build_timeline_button",
         icon=":material/article:",
         help=tr("Full Voiceover Preview Cost Hint"),
         use_container_width=True,
@@ -3781,9 +3998,6 @@ def _render_voice_preview(params, friendly_names, selected_tts_server, voice_nam
     if short_preview_requested:
         preview_type = "sample"
         preview_content = sample_content
-    elif full_preview_requested:
-        preview_type = "full"
-        preview_content = script_content
 
     sample_fingerprint = _voice_preview_fingerprint(
         preview_type="sample",
@@ -3809,10 +4023,8 @@ def _render_voice_preview(params, friendly_names, selected_tts_server, voice_nam
     )
 
     if preview_type:
-        requested_fingerprint = (
-            sample_fingerprint if preview_type == "sample" else full_fingerprint
-        )
-        cached_preview = st.session_state.get("voice_preview_audio")
+        requested_fingerprint = sample_fingerprint
+        cached_preview = st.session_state.get("voice_sample_preview_audio")
         if (
             not cached_preview
             or cached_preview.get("fingerprint") != requested_fingerprint
@@ -3835,17 +4047,68 @@ def _render_voice_preview(params, friendly_names, selected_tts_server, voice_nam
                     st.warning(tr("Voice Preview Busy"))
                 elif preview_result:
                     preview_result["fingerprint"] = requested_fingerprint
-                    st.session_state["voice_preview_audio"] = preview_result
+                    st.session_state["voice_sample_preview_audio"] = preview_result
                 else:
                     st.error(tr("Voice Preview No Audio"))
 
-    cached_preview = st.session_state.get("voice_preview_audio")
-    valid_fingerprints = {sample_fingerprint, full_fingerprint}
-    if (
-        cached_preview
-        and cached_preview.get("fingerprint") in valid_fingerprints
-        and cached_preview.get("audio_bytes")
-    ):
+    if confirmation_requested:
+        try:
+            with st.spinner(tr("Synthesizing Voice")):
+                app_config_snapshot = config.snapshot_config_with_pending(config.app)
+                confirmed_plan = confirm_script_and_build_timeline(
+                    params,
+                    VOICE_MODE_TTS,
+                    app_config_snapshot,
+                )
+        except Exception as exc:
+            logger.exception("failed to confirm narration and build timeline")
+            st.error(f"Failed to build timeline: {exc}")
+        else:
+            if confirmed_plan is not None:
+                previous_raw_plan = st.session_state.get(
+                    six_clip_timeline.PLAN_SESSION_KEY
+                )
+                try:
+                    previous_plan = (
+                        previous_raw_plan
+                        if isinstance(previous_raw_plan, SixClipPlan)
+                        else SixClipPlan.model_validate(previous_raw_plan)
+                        if previous_raw_plan
+                        else None
+                    )
+                except Exception:
+                    previous_plan = None
+                confirmed_plan = six_clip_timeline.merge_media_for_unchanged_ranges(
+                    previous_plan,
+                    confirmed_plan,
+                )
+                six_clip_timeline.set_session_plan(
+                    confirmed_plan,
+                    sync_widgets=True,
+                )
+                st.success(
+                    f"Timeline confirmed: {confirmed_plan.narration_duration_sec:.1f} "
+                    f"seconds / {len(confirmed_plan.segments)} clips."
+                )
+
+    sample_preview = st.session_state.get("voice_sample_preview_audio")
+    full_preview = st.session_state.get("voice_preview_audio")
+    valid_sample = bool(
+        sample_preview
+        and sample_preview.get("fingerprint") == sample_fingerprint
+        and sample_preview.get("audio_bytes")
+    )
+    valid_full = bool(
+        full_preview
+        and full_preview.get("fingerprint") == full_fingerprint
+        and full_preview.get("audio_bytes")
+    )
+    cached_preview = (
+        sample_preview
+        if short_preview_requested and valid_sample
+        else full_preview if valid_full else sample_preview if valid_sample else None
+    )
+    if cached_preview:
         # 只在用户本次明确点击“试听音色”时自动播放。Streamlit 的其它控件
         # 也会触发页面 rerun；如果对缓存音频永久开启 autoplay，修改任意设置
         # 都可能让旧试听从头播放。完整试听继续保留手动播放，避免较长音频在
@@ -3869,6 +4132,35 @@ def _render_voice_preview(params, friendly_names, selected_tts_server, voice_nam
             else:
                 st.warning(tr("Voice Preview Duration Unavailable"))
 
+    raw_plan = st.session_state.get(six_clip_timeline.PLAN_SESSION_KEY)
+    if raw_plan:
+        try:
+            current_plan = (
+                raw_plan
+                if isinstance(raw_plan, SixClipPlan)
+                else SixClipPlan.model_validate(raw_plan)
+            )
+        except Exception:
+            current_plan = None
+        current_fingerprint = get_current_narration_fingerprint(
+            params,
+            VOICE_MODE_TTS,
+        )
+        if (
+            current_plan is not None
+            and six_clip_plan.is_timeline_current(
+                current_plan,
+                current_fingerprint,
+            )
+            and _get_reusable_full_voice_preview(params, VOICE_MODE_TTS) is not None
+        ):
+            st.caption(
+                f"Current timeline: {current_plan.narration_duration_sec:.1f} "
+                f"seconds / {len(current_plan.segments)} clips."
+            )
+        else:
+            st.warning("Timeline is stale—reconfirm before rendering.")
+
 
 def _get_reusable_full_voice_preview(params, voice_mode: str) -> dict | None:
     """
@@ -3883,26 +4175,10 @@ def _get_reusable_full_voice_preview(params, voice_mode: str) -> dict | None:
         return None
 
     script_content = str(params.video_script or "").strip()
-    selected_tts_server = config.ui.get("tts_server", "azure-tts-v1")
-    if (
-        not script_content
-        or not params.voice_name
-        # 正式视频会在 MoviePy 合成阶段统一应用配音音量；部分 Provider 又会
-        # 在 TTS 阶段直接写入音量增益。非默认音量下复用试听可能造成二次增益，
-        # 因此先保守回退原流程，避免为少量场景引入 Provider 特判。
-        or not math.isclose(float(params.voice_volume), 1.0)
-    ):
+    if not script_content or not params.voice_name:
         return None
 
-    expected_fingerprint = _voice_preview_fingerprint(
-        preview_type="full",
-        content=script_content,
-        tts_server=selected_tts_server,
-        voice_name=params.voice_name,
-        voice_rate=params.voice_rate,
-        voice_volume=params.voice_volume,
-        provider_signature=_get_voice_preview_provider_signature(selected_tts_server),
-    )
+    expected_fingerprint = get_current_narration_fingerprint(params, voice_mode)
     cached_preview = st.session_state.get("voice_preview_audio")
     if (
         not cached_preview
@@ -3925,6 +4201,7 @@ def _get_reusable_full_voice_preview(params, voice_mode: str) -> dict | None:
         "audio_bytes": bytes(cached_preview["audio_bytes"]),
         "duration": float(duration),
         "sub_maker": cached_preview["sub_maker"],
+        "fingerprint": expected_fingerprint,
         "script": script_content,
         "voice_name": params.voice_name,
         "voice_rate": float(params.voice_rate),
@@ -5144,38 +5421,73 @@ def _render_generation_controls(
             st.error(tr("Video Script and Subject Cannot Both Be Empty"))
             st.stop()
 
-        validated_video_source = stock_materials.base_source(params.video_source)
-        if validated_video_source not in [
-            "pexels",
-            "pixabay",
-            "coverr",
-            "loomloom",
-            "local",
-        ]:
-            _remove_active_generation_task(task_id)
-            st.error(tr("Please Select a Valid Video Source"))
-            st.stop()
+        reusable_voice_preview = None
+        if params.six_clip_mode:
+            if params.six_clip_plan is None:
+                _remove_active_generation_task(task_id)
+                st.error("Six-clip plan is missing.")
+                st.stop()
+            current_fingerprint = get_current_narration_fingerprint(
+                params,
+                voice_mode,
+            )
+            reusable_voice_preview = _get_reusable_full_voice_preview(
+                params,
+                voice_mode,
+            )
+            if (
+                not six_clip_plan.is_timeline_current(
+                    params.six_clip_plan,
+                    current_fingerprint,
+                )
+                or reusable_voice_preview is None
+                or reusable_voice_preview.get("fingerprint")
+                != params.six_clip_plan.narration_fingerprint
+            ):
+                _remove_active_generation_task(task_id)
+                st.error("Confirm/Rebuild Timeline before generating video.")
+                st.stop()
+            try:
+                params.six_clip_plan = six_clip_media.materialize_plan_for_task(
+                    params.six_clip_plan, utils.task_dir(task_id)
+                )
+            except six_clip_media.SixClipMediaError as exc:
+                _remove_active_generation_task(task_id)
+                st.error(f"Cannot generate video. {exc}")
+                st.stop()
+        else:
+            validated_video_source = stock_materials.base_source(params.video_source)
+            if validated_video_source not in [
+                "pexels",
+                "pixabay",
+                "coverr",
+                "loomloom",
+                "local",
+            ]:
+                _remove_active_generation_task(task_id)
+                st.error(tr("Please Select a Valid Video Source"))
+                st.stop()
 
-        if validated_video_source == "pexels" and not config.app.get(
-            "pexels_api_keys", ""
-        ):
-            _remove_active_generation_task(task_id)
-            st.error(tr("Please Enter the Pexels API Key"))
-            st.stop()
+            if validated_video_source == "pexels" and not config.app.get(
+                "pexels_api_keys", ""
+            ):
+                _remove_active_generation_task(task_id)
+                st.error(tr("Please Enter the Pexels API Key"))
+                st.stop()
 
-        if validated_video_source == "pixabay" and not config.app.get(
-            "pixabay_api_keys", ""
-        ):
-            _remove_active_generation_task(task_id)
-            st.error(tr("Please Enter the Pixabay API Key"))
-            st.stop()
+            if validated_video_source == "pixabay" and not config.app.get(
+                "pixabay_api_keys", ""
+            ):
+                _remove_active_generation_task(task_id)
+                st.error(tr("Please Enter the Pixabay API Key"))
+                st.stop()
 
-        if validated_video_source == "coverr" and not config.app.get(
-            "coverr_api_keys", ""
-        ):
-            _remove_active_generation_task(task_id)
-            st.error(tr("Please Enter the Coverr API Key"))
-            st.stop()
+            if validated_video_source == "coverr" and not config.app.get(
+                "coverr_api_keys", ""
+            ):
+                _remove_active_generation_task(task_id)
+                st.error(tr("Please Enter the Coverr API Key"))
+                st.stop()
 
         loomloom_video_request = None
         if params.video_source == "loomloom":
@@ -5233,7 +5545,11 @@ def _render_generation_controls(
             st.error(tr("ElevenLabs API Key Required"))
             st.stop()
 
-        if params.video_source == "local" and not has_local_materials:
+        if (
+            not params.six_clip_mode
+            and params.video_source == "local"
+            and not has_local_materials
+        ):
             # 本地素材为空时继续执行会先产生 TTS/字幕，最后才在素材预处理阶段失败。
             # 在任务启动前拦截，可以避免无意义的 API 调用和中间文件。
             _remove_active_generation_task(task_id)
@@ -5341,10 +5657,11 @@ def _render_generation_controls(
                 if m.url:
                     params.video_materials.append(m)
 
-        reusable_voice_preview = _get_reusable_full_voice_preview(
-            params,
-            voice_mode,
-        )
+        if reusable_voice_preview is None:
+            reusable_voice_preview = _get_reusable_full_voice_preview(
+                params,
+                voice_mode,
+            )
         if reusable_voice_preview:
             # 试听缓存只存在当前 Streamlit 会话。提交前把音频写入目标任务目录，
             # 后台线程随后只读取任务自己的文件；即使页面 rerun、浏览器关闭或
@@ -5419,12 +5736,17 @@ def _render_application():
     )
     _render_script_settings(left_panel, params)
 
-    uploaded_files = _render_video_settings(middle_panel, params)
+    uploaded_files = _render_six_clip_video_settings(middle_panel, params)
     uploaded_audio_file, uploaded_bgm_file, voice_mode = _render_audio_settings(
         audio_panel, params
     )
 
     _render_subtitle_settings(right_panel, params)
+
+    params.six_clip_plan = six_clip_timeline.render_six_clip_sections(
+        params.target_words
+    )
+    params.six_clip_mode = True
 
     generation_submitted = _render_generation_controls(
         params,

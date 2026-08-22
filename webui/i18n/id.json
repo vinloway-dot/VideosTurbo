@@ -215,6 +215,7 @@
     "Voice Example": "Ini adalah teks contoh untuk menguji sintesis suara",
     "Synthesizing Voice": "Mensintesis suara, harap tunggu...",
     "Generate Full Voiceover Preview": "Pratinjau Penuh",
+    "Confirm Script & Build Timeline": "Konfirmasi Skrip dan Buat Linimasa",
     "Estimated Voiceover Duration": "Perkiraan durasi penuh: {min}–{max} dtk (lokal, tanpa panggilan API)",
     "Voiceover Script Required": "Tambahkan skrip video untuk memperkirakan dan meninjau sulih suara penuh.",
     "Full Voiceover Preview Cost Hint": "Pratinjau penuh memanggil layanan TTS dan dapat memakai kredit API.",

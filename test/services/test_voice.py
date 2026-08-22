@@ -146,6 +146,48 @@ class TestVoiceService(unittest.TestCase):
         with patch.object(vs.os.path, "exists", return_value=False):
             self.assertEqual(vs.get_audio_duration("does-not-exist.m4a"), 0.0)
 
+    def test_extract_timed_text_cues_supports_legacy_offsets(self):
+        """旧 Provider 的 100ns offset 必须转换为精确秒数。"""
+        sub_maker = SimpleNamespace(
+            subs=["First.", "Second."],
+            offset=[(0, 100_000_000), (100_000_000, 205_000_000)],
+        )
+
+        self.assertEqual(
+            vs.extract_timed_text_cues(sub_maker),
+            (
+                (0.0, 10.0, "First."),
+                (10.0, 20.5, "Second."),
+            ),
+        )
+
+    def test_extract_timed_text_cues_prefers_edge_cues(self):
+        """Edge cue 的 timedelta 时间和转义文本应直接成为规范时间轴。"""
+        sub_maker = SimpleNamespace(
+            cues=[
+                SimpleNamespace(
+                    start=timedelta(seconds=0),
+                    end=timedelta(seconds=3.25),
+                    content="One &amp; two",
+                ),
+                SimpleNamespace(
+                    start=timedelta(seconds=3.25),
+                    end=timedelta(seconds=7),
+                    content="Three",
+                ),
+            ],
+            subs=["legacy must not be mixed in"],
+            offset=[(0, 10_000_000)],
+        )
+
+        self.assertEqual(
+            vs.extract_timed_text_cues(sub_maker),
+            (
+                (0.0, 3.25, "One & two"),
+                (3.25, 7.0, "Three"),
+            ),
+        )
+
     def test_no_voice_alias_none_is_supported_temporarily(self):
         """
         兼容 PR #981 曾使用过的 none sentinel，避免少量直接调用 API 的用户

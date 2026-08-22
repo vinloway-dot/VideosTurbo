@@ -1,5 +1,6 @@
 import ast
 import hashlib
+import json
 import re
 import shutil
 from contextlib import nullcontext
@@ -11,7 +12,9 @@ from streamlit.testing.v1 import AppTest
 
 from app.config import config
 from app.models.schema import VideoParams
+from app.models.six_clip import SixClipPlan, SixClipSegment
 from app.services import task as tm
+from app.services import llm, six_clip_media, six_clip_plan
 from app.services import voice
 from app.services import webui_task
 from app.utils import utils
@@ -61,6 +64,190 @@ def _button_by_key(app, key):
         for button in app.button
         if str(getattr(button, "key", "")).startswith(key)
     )
+
+
+def _timeline_response(duration: float) -> str:
+    ranges = six_clip_plan.build_timeline_ranges(duration)
+    return json.dumps(
+        {
+            "clips": [
+                {
+                    "index": index,
+                    "start_sec": start,
+                    "end_sec": end,
+                    "title": f"Clip {index}",
+                    "narration_context": f"Narration {index}",
+                    "video_prompt": f"Prompt {index}",
+                }
+                for index, (start, end) in enumerate(ranges, start=1)
+            ]
+        }
+    )
+
+
+def test_generate_script_is_text_only_and_never_calls_tts_or_timeline_ai():
+    test_ui = dict(
+        config.ui,
+        voice_mode="tts",
+        tts_server="azure-tts-v1",
+        voice_name="zh-CN-XiaoxiaoNeural-Female",
+    )
+    with (
+        patch.object(config, "ui", test_ui),
+        patch.object(config, "save_config"),
+        patch.object(llm, "generate_script", return_value="Generated narration."),
+        patch.object(llm, "generate_terms", return_value=["term one"]),
+        patch.object(voice, "tts") as synthesize,
+        patch.object(six_clip_plan, "generate_six_clip_plan") as analyze,
+    ):
+        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
+        app.session_state["ui_language"] = "en"
+        app.session_state["video_subject"] = "A useful subject"
+        app.run()
+        _button_by_key(app, "auto_generate_script").click().run()
+
+    assert app.session_state["video_script"] == "Generated narration."
+    synthesize.assert_not_called()
+    analyze.assert_not_called()
+    assert [str(item.value) for item in app.exception] == []
+
+
+def test_confirm_builds_dynamic_timeline_once_and_reuses_canonical_audio():
+    script = "Narration long enough to produce a measured 63-second voiceover."
+    test_ui = dict(
+        config.ui,
+        voice_mode="tts",
+        tts_server="azure-tts-v1",
+        voice_name="en-US-JennyNeural-Female",
+        voice_volume=1.5,
+    )
+    sub_maker = SimpleNamespace(
+        subs=["Opening", "Ending"],
+        offset=[(0, 100_000_000), (600_000_000, 630_000_000)],
+    )
+
+    def fake_tts(**kwargs):
+        Path(kwargs["voice_file"]).write_bytes(
+            b"RIFF\x24\x00\x00\x00WAVEfmt " + b"\x00" * 32
+        )
+        return sub_maker
+
+    with (
+        patch.object(config, "ui", test_ui),
+        patch.object(config, "save_config"),
+        patch.object(voice, "tts", side_effect=fake_tts) as synthesize,
+        patch.object(voice, "get_audio_duration", return_value=63.0),
+        patch.object(llm, "_generate_response", return_value=_timeline_response(63.0)),
+    ):
+        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
+        app.session_state["ui_language"] = "en"
+        app.session_state["video_script"] = script
+        app.session_state["voice_volume_select"] = 1.5
+        app.run()
+
+        _button_by_key(app, "confirm_script_build_timeline_button").click().run()
+        _button_by_key(app, "confirm_script_build_timeline_button").click().run()
+
+        app.session_state["video_script"] = "Edited narration makes the plan stale."
+        app.run()
+
+    plan = app.session_state["six_clip_plan"]
+    assert plan["narration_duration_sec"] == 63.0
+    assert plan["timeline_duration_sec"] == 63.0
+    assert len(plan["segments"]) == 7
+    synthesize.assert_called_once()
+    assert synthesize.call_args.kwargs["voice_volume"] == 1.0
+    assert any(
+        "Timeline is stale" in str(item.value) for item in app.warning
+    )
+    assert [str(item.value) for item in app.exception] == []
+
+
+def test_short_sample_does_not_replace_confirmed_full_narration_cache():
+    script = "Confirmed narration must survive a later short voice sample."
+    test_ui = dict(
+        config.ui,
+        voice_mode="tts",
+        tts_server="azure-tts-v1",
+        voice_name="en-US-JennyNeural-Female",
+    )
+    sub_maker = SimpleNamespace(
+        subs=[script],
+        offset=[(0, 630_000_000)],
+    )
+
+    def fake_tts(**kwargs):
+        Path(kwargs["voice_file"]).write_bytes(
+            b"RIFF\x24\x00\x00\x00WAVEfmt " + b"\x00" * 32
+        )
+        return sub_maker
+
+    with (
+        patch.object(config, "ui", test_ui),
+        patch.object(config, "save_config"),
+        patch.object(voice, "tts", side_effect=fake_tts) as synthesize,
+        patch.object(voice, "get_audio_duration", return_value=63.0),
+        patch.object(llm, "_generate_response", return_value=_timeline_response(63.0)),
+    ):
+        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
+        app.session_state["ui_language"] = "en"
+        app.session_state["video_script"] = script
+        app.run()
+
+        _button_by_key(app, "confirm_script_build_timeline_button").click().run()
+        confirmed_fingerprint = app.session_state["voice_preview_audio"][
+            "fingerprint"
+        ]
+        _button_by_key(app, "play_voice_button").click().run()
+        _button_by_key(app, "confirm_script_build_timeline_button").click().run()
+
+    assert synthesize.call_count == 2
+    assert (
+        app.session_state["voice_preview_audio"]["fingerprint"]
+        == confirmed_fingerprint
+    )
+
+
+def test_stale_timeline_blocks_webui_submission_before_media_copy(tmp_path):
+    media_file = tmp_path / "clip.mp4"
+    media_file.write_bytes(b"media")
+    plan = SixClipPlan(
+        target_words=130,
+        narration_fingerprint="stale-fingerprint",
+        segments=[
+            SixClipSegment(
+                index=index,
+                start_sec=(index - 1) * 10,
+                end_sec=index * 10,
+                media_kind="video",
+                media_path=str(media_file),
+            )
+            for index in range(1, 7)
+        ],
+    )
+    test_ui = dict(
+        config.ui,
+        voice_mode="tts",
+        tts_server="azure-tts-v1",
+        voice_name="en-US-JennyNeural-Female",
+    )
+
+    with (
+        patch.object(config, "ui", test_ui),
+        patch.object(config, "save_config"),
+        patch.object(six_clip_media, "materialize_plan_for_task") as materialize,
+        patch.object(webui_task, "submit_generation") as submit,
+    ):
+        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
+        app.session_state["ui_language"] = "en"
+        app.session_state["video_script"] = "Edited narration."
+        app.session_state["six_clip_plan"] = plan.model_dump(mode="json")
+        app.run()
+        _button_by_key(app, "generate_video_button").click().run()
+
+    materialize.assert_not_called()
+    submit.assert_not_called()
+    assert any("Confirm/Rebuild Timeline" in item.value for item in app.error)
 
 
 def test_duration_estimator_is_local_and_respects_voice_rate():
@@ -121,7 +308,7 @@ def test_full_voiceover_preview_is_disabled_until_script_exists():
 
     full_preview = _button_by_key(
         app,
-        "generate_full_voiceover_preview_button",
+        "confirm_script_build_timeline_button",
     )
     assert full_preview.disabled
     assert any("填写视频文案后" in item.value for item in app.caption)
@@ -148,7 +335,7 @@ def test_script_shows_estimate_and_enables_full_voiceover_preview():
 
     full_preview = _button_by_key(
         app,
-        "generate_full_voiceover_preview_button",
+        "confirm_script_build_timeline_button",
     )
     assert not full_preview.disabled
     assert any("本地估算，不调用 API" in item.value for item in app.caption)
@@ -227,11 +414,11 @@ def test_full_preview_uses_script_and_reuses_identical_cached_audio():
 
         _button_by_key(
             app,
-            "generate_full_voiceover_preview_button",
+            "confirm_script_build_timeline_button",
         ).click().run()
         _button_by_key(
             app,
-            "generate_full_voiceover_preview_button",
+            "confirm_script_build_timeline_button",
         ).click().run()
 
     synthesize.assert_called_once()
@@ -261,7 +448,7 @@ def test_full_preview_reports_when_tts_returns_no_audio():
         app.run()
         _button_by_key(
             app,
-            "generate_full_voiceover_preview_button",
+            "confirm_script_build_timeline_button",
         ).click().run()
 
     assert [item.value for item in app.error] == [
@@ -294,7 +481,7 @@ def test_full_preview_returns_immediately_when_runtime_config_is_busy():
         app.run()
         _button_by_key(
             app,
-            "generate_full_voiceover_preview_button",
+            "confirm_script_build_timeline_button",
         ).click().run()
 
     synthesize.assert_not_called()
@@ -329,7 +516,7 @@ def test_full_preview_warns_when_audio_duration_is_unavailable():
         app.run()
         _button_by_key(
             app,
-            "generate_full_voiceover_preview_button",
+            "confirm_script_build_timeline_button",
         ).click().run()
 
     assert len(app.get("audio")) == 1
@@ -373,7 +560,7 @@ def test_task_reuses_matching_full_preview_without_calling_tts():
     finally:
         shutil.rmtree(task_dir, ignore_errors=True)
 
-    assert result == (str(audio_file.resolve()), 9, sub_maker)
+    assert result == (str(audio_file.resolve()), 8.2, sub_maker)
     synthesize.assert_not_called()
 
 
@@ -425,13 +612,13 @@ def test_task_regenerates_audio_when_preview_parameters_changed():
     assert synthesize.call_args.kwargs["voice_rate"] == 1.5
 
 
-def test_non_default_volume_regenerates_audio_without_double_gain():
-    """非默认音量必须回退原流程，避免 TTS 与视频合成阶段重复应用增益。"""
+def test_non_default_volume_reuses_canonical_audio_without_double_gain():
+    """规范化完整配音可复用，音量仅由最终视频合成阶段应用一次。"""
     task_id = "voice-volume-forwarding"
     task_dir = Path(utils.task_dir(task_id))
     audio_file = task_dir / "audio.mp3"
-    audio_file.write_bytes(b"preview with provider-side volume")
-    script = "非默认音量需要按原流程生成配音。"
+    audio_file.write_bytes(b"canonical preview audio")
+    script = "非默认音量复用规范化配音。"
     params = VideoParams(
         video_subject="voice volume",
         video_script=script,
@@ -443,7 +630,7 @@ def test_non_default_volume_regenerates_audio_without_double_gain():
     preview = {
         "audio_file": str(audio_file),
         "duration": 5.0,
-        "sub_maker": object(),
+        "sub_maker": sub_maker,
         "script": script,
         "voice_name": params.voice_name,
         "voice_rate": params.voice_rate,
@@ -452,8 +639,7 @@ def test_non_default_volume_regenerates_audio_without_double_gain():
 
     try:
         with (
-            patch.object(tm.voice, "tts", return_value=sub_maker) as synthesize,
-            patch.object(tm.voice, "get_audio_duration", return_value=5),
+            patch.object(tm.voice, "tts") as synthesize,
         ):
             result = tm.generate_audio(
                 task_id,
@@ -464,9 +650,8 @@ def test_non_default_volume_regenerates_audio_without_double_gain():
     finally:
         shutil.rmtree(task_dir, ignore_errors=True)
 
-    assert result[1:] == (5, sub_maker)
-    synthesize.assert_called_once()
-    assert "voice_volume" not in synthesize.call_args.kwargs
+    assert result == (str(audio_file.resolve()), 5, sub_maker)
+    synthesize.assert_not_called()
 
 
 def test_webui_worker_forwards_voice_preview_to_pipeline():

@@ -2007,6 +2007,53 @@ def _get_audio_duration_from_submaker(sub_maker: SubMaker):
         return 0.0
     return legacy_offsets[-1][1] / 10000000
 
+
+def extract_timed_text_cues(
+    sub_maker: SubMaker,
+) -> tuple[tuple[float, float, str], ...]:
+    """Return provider-independent narration cues in seconds.
+
+    edge_tts 7.x exposes ``cues`` with ``timedelta`` values, while the other
+    providers still populate the legacy ``subs``/``offset`` fields whose time
+    unit is 100 nanoseconds.  Prefer the richer Edge timeline and never mix
+    both representations.
+    """
+    normalized: list[tuple[float, float, str]] = []
+    edge_cues = getattr(sub_maker, "cues", None)
+
+    if edge_cues:
+        candidates = (
+            (
+                cue.start.total_seconds(),
+                cue.end.total_seconds(),
+                getattr(cue, "content", ""),
+            )
+            for cue in edge_cues
+        )
+    else:
+        candidates = (
+            (start / 10_000_000, end / 10_000_000, text)
+            for text, (start, end) in zip(
+                getattr(sub_maker, "subs", []),
+                getattr(sub_maker, "offset", []),
+            )
+        )
+
+    for start, end, text in candidates:
+        start_sec = float(start)
+        end_sec = float(end)
+        cue_text = unescape(str(text or "")).strip()
+        if (
+            cue_text
+            and math.isfinite(start_sec)
+            and math.isfinite(end_sec)
+            and start_sec >= 0
+            and end_sec > start_sec
+        ):
+            normalized.append((start_sec, end_sec, cue_text))
+
+    return tuple(normalized)
+
 def _get_audio_duration_from_file(audio_file: str) -> float:
     """
     获取音频文件时长（支持 mp3/m4a/wav/aac 等 ffmpeg 可解码的格式）

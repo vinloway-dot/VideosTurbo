@@ -20,6 +20,9 @@ from app.services import (
     llm,
     loomloom,
     material,
+    six_clip_media,
+    six_clip_plan,
+    six_clip_render,
     sonilo,
     subtitle,
     task_artifacts,
@@ -411,7 +414,9 @@ def _resolve_reusable_voice_preview(
         "voice_rate": float(params.voice_rate),
         "voice_volume": float(params.voice_volume),
     }
-    if not math.isclose(float(params.voice_volume), 1.0) or any(
+    if params.six_clip_mode and params.six_clip_plan is not None:
+        expected_values["fingerprint"] = params.six_clip_plan.narration_fingerprint
+    if any(
         voice_preview.get(key) != value for key, value in expected_values.items()
     ):
         logger.info(
@@ -446,7 +451,67 @@ def _resolve_reusable_voice_preview(
     logger.info(
         f"using full voice preview audio, task_id: {task_id}, duration: {duration:.2f}s"
     )
-    return preview_file, math.ceil(duration), sub_maker
+    return preview_file, float(duration), sub_maker
+
+
+def measure_timeline_audio_duration(
+    audio_file: str,
+    voice_preview: dict | None,
+) -> float:
+    """Measure narration exactly, preferring only the audio file's own preview."""
+    preview_duration = None
+    if voice_preview:
+        preview_path = path.realpath(str(voice_preview.get("audio_file") or ""))
+        actual_path = path.realpath(str(audio_file or ""))
+        if preview_path and preview_path == actual_path:
+            preview_duration = voice_preview.get("duration")
+
+    duration = (
+        float(preview_duration)
+        if isinstance(preview_duration, (int, float))
+        else float(voice.get_audio_duration(audio_file))
+    )
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError("narration audio duration must be a finite positive number")
+    return duration
+
+
+def validate_audio_matches_plan(
+    plan,
+    measured_duration_sec: float,
+) -> None:
+    """Fail when confirmed ranges no longer describe the narration audio."""
+    measured = float(measured_duration_sec)
+    expected_ranges = six_clip_plan.build_timeline_ranges(
+        measured,
+        slot_duration_sec=plan.slot_duration_sec,
+    )
+    actual_ranges = tuple(
+        (segment.start_sec, segment.end_sec) for segment in plan.segments
+    )
+    expected_timeline = max(60.0, measured)
+    matches = (
+        math.isclose(plan.narration_duration_sec, measured, abs_tol=1e-6)
+        and math.isclose(
+            plan.timeline_duration_sec,
+            expected_timeline,
+            abs_tol=1e-6,
+        )
+        and len(actual_ranges) == len(expected_ranges)
+        and all(
+            math.isclose(actual_start, expected_start, abs_tol=1e-6)
+            and math.isclose(actual_end, expected_end, abs_tol=1e-6)
+            for (actual_start, actual_end), (expected_start, expected_end) in zip(
+                actual_ranges,
+                expected_ranges,
+            )
+        )
+    )
+    if not matches:
+        raise ValueError(
+            "Narration audio does not match the submitted clip ranges; "
+            "confirm/rebuild timeline before rendering."
+        )
 
 
 def generate_audio(task_id, params, video_script, voice_preview=None):
@@ -736,7 +801,13 @@ def _record_loomloom_run_reference(
 
 
 def generate_final_videos(
-    task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration
+    task_id,
+    params,
+    downloaded_videos,
+    audio_file,
+    subtitle_path,
+    audio_duration,
+    combined_video_override=None,
 ):
     from app.services import stock_materials
 
@@ -773,22 +844,27 @@ def generate_final_videos(
     _progress = 50
     for i in range(params.video_count):
         index = i + 1
-        combined_video_path = path.join(
+        combined_video_path = combined_video_override or path.join(
             utils.task_dir(task_id), f"combined-{index}.mp4"
         )
-        logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
-        video.combine_videos(
-            combined_video_path=combined_video_path,
-            video_paths=downloaded_videos,
-            audio_file=audio_file,
-            video_aspect=params.video_aspect,
-            video_concat_mode=video_concat_mode,
-            video_transition_mode=video_transition_mode,
-            max_clip_duration=params.video_clip_duration,
-            threads=params.n_threads,
-            clip_speed=params.video_clip_speed,
-            clip_duration_overrides=clip_duration_overrides,
-        )
+        if combined_video_override:
+            logger.info(
+                f"\n\n## using fixed six-clip timeline: {index} => {combined_video_path}"
+            )
+        else:
+            logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
+            video.combine_videos(
+                combined_video_path=combined_video_path,
+                video_paths=downloaded_videos,
+                audio_file=audio_file,
+                video_aspect=params.video_aspect,
+                video_concat_mode=video_concat_mode,
+                video_transition_mode=video_transition_mode,
+                max_clip_duration=params.video_clip_duration,
+                threads=params.n_threads,
+                clip_speed=params.video_clip_speed,
+                clip_duration_overrides=clip_duration_overrides,
+            )
 
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)
@@ -1193,6 +1269,22 @@ def _run_pipeline(
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
 
+    if params.six_clip_mode:
+        if params.six_clip_plan is None:
+            return _mark_task_failed(
+                task_id,
+                "preflight",
+                "Cannot generate video. Six-clip plan is missing.",
+            )
+        missing_media = six_clip_media.validate_ready_media(params.six_clip_plan)
+        if missing_media:
+            return _mark_task_failed(
+                task_id,
+                "preflight",
+                "Cannot generate video. Missing media: "
+                + six_clip_media.missing_media_message(params.six_clip_plan),
+            )
+
     # 只有完整成片流程需要视频配乐供应商。尽早阻止缺少 Key 的完整任务，避免
     # 先消耗 LLM、TTS 和素材服务额度；中间产物接口仍可独立使用。
     video_music_provider = _VIDEO_MUSIC_PROVIDERS.get(params.bgm_type)
@@ -1252,7 +1344,7 @@ def _run_pipeline(
 
     # 2. Generate terms
     video_terms = ""
-    if params.video_source != "local":
+    if not params.six_clip_mode and params.video_source != "local":
         video_terms = generate_terms(task_id, params, video_script)
         if not video_terms:
             return _mark_task_failed(
@@ -1284,6 +1376,26 @@ def _run_pipeline(
             "audio",
             "failed to prepare narration audio",
         )
+    if params.six_clip_mode:
+        try:
+            measured_duration = measure_timeline_audio_duration(
+                audio_file,
+                voice_preview,
+            )
+            maximum_clip_count = int(
+                config.app.get("max_dynamic_clip_count", 0) or 0
+            )
+            six_clip_plan.build_timeline_ranges(
+                measured_duration,
+                maximum_clip_count=maximum_clip_count,
+            )
+            validate_audio_matches_plan(
+                params.six_clip_plan,
+                measured_duration,
+            )
+        except (TypeError, ValueError) as exc:
+            return _mark_task_failed(task_id, "audio", str(exc))
+        audio_duration = measured_duration
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=30)
 
@@ -1313,13 +1425,32 @@ def _run_pipeline(
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
     # 5. Get video materials
-    downloaded_videos = get_video_materials(
-        task_id,
-        params,
-        video_terms,
-        audio_duration,
-        loomloom_video_request=loomloom_video_request,
-    )
+    six_clip_combined_video = None
+    if params.six_clip_mode:
+        try:
+            downloaded_videos = six_clip_render.prepare_six_clip_timeline(
+                task_id,
+                params.six_clip_plan,
+                video_aspect=params.video_aspect,
+                image_motion=params.image_motion,
+                threads=params.n_threads or 2,
+            )
+            six_clip_combined_video = six_clip_render.concat_six_clip_timeline(
+                downloaded_videos,
+                path.join(utils.task_dir(task_id), "combined-six-clip.mp4"),
+                timeline_duration_sec=params.six_clip_plan.timeline_duration_sec,
+                threads=params.n_threads or 2,
+            )
+        except six_clip_render.SixClipRenderError as exc:
+            return _mark_task_failed(task_id, "materials", str(exc))
+    else:
+        downloaded_videos = get_video_materials(
+            task_id,
+            params,
+            video_terms,
+            audio_duration,
+            loomloom_video_request=loomloom_video_request,
+        )
     if not downloaded_videos:
         return _mark_task_failed(
             task_id,
@@ -1352,6 +1483,7 @@ def _run_pipeline(
             audio_file,
             subtitle_path,
             audio_duration,
+            combined_video_override=six_clip_combined_video,
         )
     )
 
