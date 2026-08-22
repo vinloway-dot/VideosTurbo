@@ -58,10 +58,12 @@ def _request_payload() -> dict:
 
 def _client(tmp_path):
     cloud_agent = _cloud_agent_controller()
+    asgi = importlib.import_module("app.asgi")
     store = CloudJobStore(str(tmp_path / "cloud-agent.sqlite3"))
     storage = CloudJobStorage(tmp_path / "jobs")
     app = FastAPI()
     app.include_router(cloud_agent.router)
+    app.add_exception_handler(HttpException, asgi.exception_handler)
     app.dependency_overrides[cloud_agent.get_cloud_job_store] = lambda: store
     app.dependency_overrides[cloud_agent.get_cloud_job_storage] = lambda: storage
     return TestClient(app, raise_server_exceptions=False), store
