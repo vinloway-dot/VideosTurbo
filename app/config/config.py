@@ -25,6 +25,28 @@ _MISSING = object()
 _DELETE = object()
 _UTF8_BOM = "\ufeff"
 
+CLOUD_AGENT_DEFAULTS = {
+    "cloud_agent_enabled": False,
+    "cloud_agent_db_path": "storage/cloud-agent.sqlite3",
+    "cloud_agent_worker_poll_seconds": 2,
+    "cloud_agent_worker_lease_seconds": 120,
+    "cloud_agent_worker_heartbeat_seconds": 10,
+    "cloud_agent_max_retries": 3,
+    "cloud_agent_min_free_disk_gb": 10,
+    "cloud_agent_tts_min_duration_seconds": 58,
+    "cloud_agent_tts_max_duration_seconds": 62,
+    "cloud_agent_final_min_size_bytes": 1048576,
+    "cloud_agent_expected_width": 1080,
+    "cloud_agent_expected_height": 1920,
+    "cloud_agent_browser_headless": True,
+    "cloud_agent_google_profile_dir": "storage/browser-profiles/google-flow",
+    "cloud_agent_canva_profile_dir": "storage/browser-profiles/canva",
+    "cloud_agent_browser_lock_dir": "storage/browser-locks",
+    "cloud_agent_remote_browser_url": "http://127.0.0.1:6080/vnc.html",
+    "cloud_agent_flow_url": "",
+    "cloud_agent_canva_template_url": "",
+}
+
 
 class _SynchronizedConfig(dict):
     """保持 dict 使用方式不变，同时让运行期配置写操作服从同一把锁。"""
@@ -81,6 +103,13 @@ class _SynchronizedConfig(dict):
             return
         with _config_save_lock:
             super().update(changes)
+
+
+def _apply_cloud_agent_defaults(app_config):
+    """Apply Cloud Agent defaults without replacing existing user settings."""
+    for key, value in CLOUD_AGENT_DEFAULTS.items():
+        app_config.setdefault(key, copy.deepcopy(value))
+    return app_config
 
 
 def _pending_update_key(config_section, key):
@@ -545,6 +574,7 @@ def save_config():
 
 _cfg = load_config()
 app = _SynchronizedConfig(_cfg.get("app", {}))
+_apply_cloud_agent_defaults(app)
 whisper = _cfg.get("whisper", {})
 proxy = _cfg.get("proxy", {})
 azure = _SynchronizedConfig(_cfg.get("azure", {}))
