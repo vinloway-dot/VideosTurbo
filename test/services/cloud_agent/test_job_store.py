@@ -1,3 +1,7 @@
+import sqlite3
+
+import pytest
+
 from app.models.cloud_agent import (
     CloudControlRequest,
     CloudJobCheckpoint,
@@ -22,6 +26,89 @@ def _request(subject: str = "Why Saturn Has a Hexagon") -> CloudJobCreate:
     )
 
 
+def _create_pre_v22_database(db_path) -> None:
+    plan_json = empty_six_clip_plan(target_words=130).model_dump_json()
+    now = "2026-08-22T06:30:00+00:00"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE cloud_agent_jobs (
+                id TEXT PRIMARY KEY,
+                subject TEXT NOT NULL,
+                script TEXT NOT NULL,
+                master_prompt TEXT NOT NULL,
+                clip_plan_json TEXT NOT NULL,
+                language TEXT NOT NULL,
+                target_words INTEGER NOT NULL,
+                tts_provider TEXT NOT NULL,
+                voice_id TEXT NOT NULL,
+                voice_speed REAL NOT NULL,
+                status TEXT NOT NULL,
+                checkpoint TEXT NOT NULL,
+                control_request TEXT NOT NULL,
+                current_step TEXT NOT NULL,
+                progress INTEGER NOT NULL,
+                flow_status TEXT NOT NULL,
+                canva_status TEXT NOT NULL,
+                voice_file TEXT NOT NULL,
+                final_video TEXT NOT NULL,
+                error_code TEXT NOT NULL,
+                error_message TEXT NOT NULL,
+                worker_id TEXT NOT NULL,
+                lease_until TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO cloud_agent_jobs (
+                id, subject, script, master_prompt, clip_plan_json, language,
+                target_words, tts_provider, voice_id, voice_speed, status,
+                checkpoint, control_request, current_step, progress,
+                flow_status, canva_status, voice_file, final_video,
+                error_code, error_message, worker_id, lease_until, created_at,
+                started_at, completed_at, updated_at
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            """,
+            (
+                "legacy-job",
+                "Legacy subject",
+                "Legacy narration.",
+                "Legacy master prompt.",
+                plan_json,
+                "English",
+                130,
+                "azure-tts-v1",
+                "en-US-JennyNeural-Female",
+                1.0,
+                CloudJobStatus.TTS_READY.value,
+                CloudJobCheckpoint.TTS_READY.value,
+                CloudControlRequest.NONE.value,
+                "tts_ready",
+                30,
+                "",
+                "",
+                "storage/jobs/legacy-job/audio/voice.mp3",
+                "",
+                "",
+                "",
+                "",
+                "",
+                now,
+                now,
+                "",
+                now,
+            ),
+        )
+
+
 def test_create_job_persists_defaults_and_six_clip_plan_across_reopen(tmp_path):
     db_path = tmp_path / "agent.sqlite3"
     store = CloudJobStore(str(db_path))
@@ -43,6 +130,38 @@ def test_create_job_persists_defaults_and_six_clip_plan_across_reopen(tmp_path):
     assert loaded.script == created.script
     assert loaded.master_prompt == created.master_prompt
     assert loaded.clip_plan.model_dump() == created.clip_plan.model_dump()
+
+
+def test_pre_v22_database_is_migrated_without_losing_job(tmp_path):
+    db_path = tmp_path / "legacy-agent.sqlite3"
+    _create_pre_v22_database(db_path)
+
+    store = CloudJobStore(str(db_path))
+    migrated = store.get_job("legacy-job")
+
+    assert migrated is not None
+    assert migrated.script == "Legacy narration."
+    assert migrated.checkpoint is CloudJobCheckpoint.TTS_READY
+    assert migrated.audio_duration_seconds == 0.0
+    assert migrated.canva_playback_speed == 1.0
+    assert migrated.target_final_duration_seconds == 60.0
+
+    updated = store.patch_job(
+        migrated.id,
+        audio_duration_seconds=63.25,
+        canva_playback_speed=60.0 / 63.25,
+        target_final_duration_seconds=63.25,
+    )
+
+    assert updated.audio_duration_seconds == pytest.approx(63.25)
+    assert updated.canva_playback_speed == pytest.approx(60.0 / 63.25)
+    assert updated.target_final_duration_seconds == pytest.approx(63.25)
+
+    reopened = CloudJobStore(str(db_path)).get_job("legacy-job")
+    assert reopened is not None
+    assert reopened.audio_duration_seconds == pytest.approx(63.25)
+    assert reopened.canva_playback_speed == pytest.approx(60.0 / 63.25)
+    assert reopened.target_final_duration_seconds == pytest.approx(63.25)
 
 
 def test_list_jobs_is_newest_first_and_supports_pagination(tmp_path):
