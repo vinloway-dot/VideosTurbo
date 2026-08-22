@@ -4058,6 +4058,23 @@ def _render_voice_preview(params, friendly_names, selected_tts_server, voice_nam
             st.error(f"Failed to build timeline: {exc}")
         else:
             if confirmed_plan is not None:
+                previous_raw_plan = st.session_state.get(
+                    six_clip_timeline.PLAN_SESSION_KEY
+                )
+                try:
+                    previous_plan = (
+                        previous_raw_plan
+                        if isinstance(previous_raw_plan, SixClipPlan)
+                        else SixClipPlan.model_validate(previous_raw_plan)
+                        if previous_raw_plan
+                        else None
+                    )
+                except Exception:
+                    previous_plan = None
+                confirmed_plan = six_clip_timeline.merge_media_for_unchanged_ranges(
+                    previous_plan,
+                    confirmed_plan,
+                )
                 six_clip_timeline.set_session_plan(
                     confirmed_plan,
                     sync_widgets=True,
@@ -5696,22 +5713,8 @@ def _render_application():
 
     _render_subtitle_settings(right_panel, params)
 
-    def refresh_six_clip_plan():
-        current_script = str(params.video_script or "").strip()
-        if not current_script:
-            raise ValueError("Generate or enter the Video Script first.")
-        return _run_llm_read_operation(
-            "generate_six_clip_plan",
-            lambda app_config_snapshot: six_clip_plan.generate_six_clip_plan(
-                current_script,
-                language=params.video_language,
-                target_words=params.target_words,
-                app_config=app_config_snapshot,
-            ),
-        )
-
     params.six_clip_plan = six_clip_timeline.render_six_clip_sections(
-        params.target_words, refresh_plan=refresh_six_clip_plan
+        params.target_words
     )
     params.six_clip_mode = True
 

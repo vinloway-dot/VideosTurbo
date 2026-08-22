@@ -7,7 +7,7 @@ import streamlit as st
 
 from app.models.six_clip import SixClipPlan, SixClipSegment, empty_six_clip_plan
 from app.services import six_clip_media
-from app.services.six_clip_plan import build_master_prompt
+from app.services.six_clip_plan import build_master_prompt_batches
 from app.utils import utils
 
 
@@ -55,6 +55,51 @@ def _has_restorable_local_media(segment: SixClipSegment) -> bool:
         return media_path.is_file() and media_path.stat().st_size > 0
     except (OSError, TypeError, ValueError):
         return False
+
+
+def merge_media_for_unchanged_ranges(
+    previous: SixClipPlan | None,
+    rebuilt: SixClipPlan,
+) -> SixClipPlan:
+    """Keep media only when its absolute clip identity is unchanged."""
+    if previous is None:
+        return rebuilt
+
+    previous_by_range = {
+        (segment.index, segment.start_sec, segment.end_sec): segment
+        for segment in previous.segments
+        if _has_restorable_local_media(segment)
+    }
+    merged_segments = []
+    for segment in rebuilt.segments:
+        old_segment = previous_by_range.get(
+            (segment.index, segment.start_sec, segment.end_sec)
+        )
+        if old_segment is None:
+            merged_segments.append(segment)
+        else:
+            merged_segments.append(
+                segment.model_copy(
+                    update={
+                        "media_kind": old_segment.media_kind,
+                        "media_path": old_segment.media_path,
+                    }
+                )
+            )
+    return rebuilt.model_copy(update={"segments": merged_segments})
+
+
+def timeline_page(
+    plan: SixClipPlan,
+    page: int,
+    page_size: int = 6,
+) -> tuple[list[SixClipSegment], int]:
+    if page_size < 1:
+        raise ValueError("page_size must be positive")
+    page_count = max(1, (len(plan.segments) + page_size - 1) // page_size)
+    selected_page = min(max(int(page), 1), page_count)
+    start = (selected_page - 1) * page_size
+    return list(plan.segments[start : start + page_size]), page_count
 
 
 def _normalize_restored_plan(
@@ -143,36 +188,38 @@ def _replace_segment(plan: SixClipPlan, index: int, **updates) -> SixClipPlan:
 
 def render_six_clip_sections(
     target_words: int,
-    *,
-    refresh_plan=None,
 ) -> SixClipPlan:
     plan = get_session_plan(target_words)
 
-    st.subheader("Section 2 — Six Video Clips")
+    st.subheader("Section 2 — Timeline Clips")
     st.caption(
-        "Each clip owns exactly one 10-second visual slot. Add a direct media URL "
-        "or upload an image/video for every clip before rendering."
+        f"{len(plan.segments)} clips / {plan.timeline_duration_sec:g} seconds. "
+        "Each card owns its displayed range. Add a direct media URL or upload "
+        "an image/video for every clip before rendering."
     )
 
-    if refresh_plan is not None:
-        if st.button(
-            "Generate / Refresh 6 Clip Prompts with AI",
-            key="six_clip_refresh_prompts",
-            use_container_width=True,
-            icon=":material/auto_awesome:",
-        ):
-            try:
-                with st.spinner("Analyzing the script into six visual clips..."):
-                    refreshed = refresh_plan()
-            except Exception as exc:
-                st.error(f"Failed to generate six clip prompts: {exc}")
-            else:
-                set_session_plan(refreshed, sync_widgets=True)
-                st.rerun()
+    _, page_count = timeline_page(plan, page=1)
+    selected_page = 1
+    if page_count > 1:
+        selected_page = int(
+            st.number_input(
+                "Timeline Page",
+                min_value=1,
+                max_value=page_count,
+                value=min(
+                    int(st.session_state.get("six_clip_timeline_page", 1)),
+                    page_count,
+                ),
+                step=1,
+                key="six_clip_timeline_page",
+            )
+        )
+        st.caption(f"Page {selected_page} of {page_count}")
+    visible_segments, _ = timeline_page(plan, page=selected_page)
 
-    updated_segments: list[SixClipSegment] = []
+    updated_segments: dict[int, SixClipSegment] = {}
     session_dir = _media_session_dir()
-    for segment in plan.segments:
+    for segment in visible_segments:
         index = segment.index
         title_key = _widget_key(index, "title")
         narration_key = _widget_key(index, "narration")
@@ -318,7 +365,7 @@ def render_six_clip_sections(
                     st.rerun()
                 info_col.caption(f"Local imported copy: {Path(current_path).name}")
 
-            updated_segments.append(
+            updated_segments[index] = (
                 SixClipSegment(
                     index=index,
                     start_sec=segment.start_sec,
@@ -337,7 +384,10 @@ def render_six_clip_sections(
         timeline_duration_sec=plan.timeline_duration_sec,
         slot_duration_sec=plan.slot_duration_sec,
         narration_fingerprint=plan.narration_fingerprint,
-        segments=updated_segments,
+        segments=[
+            updated_segments.get(segment.index, segment)
+            for segment in plan.segments
+        ],
     )
     set_session_plan(plan, sync_widgets=False)
 
@@ -348,12 +398,19 @@ def render_six_clip_sections(
             + six_clip_media.missing_media_message(plan)
         )
     else:
-        st.success("All six clips have media and are ready for final rendering.")
+        st.success(
+            f"All {len(plan.segments)} clips have media and are ready for final rendering."
+        )
 
     st.subheader("Section 3 — Master Prompt")
     st.caption(
         "This is rebuilt from the current Section 2 narration and video prompts. "
-        "Use the copy button in the code block to send all six prompts to an AI video tool."
+        "Each copyable batch contains at most six absolute timeline clips."
     )
-    st.code(build_master_prompt(plan), language=None, wrap_lines=True)
+    for batch_index, prompt in enumerate(
+        build_master_prompt_batches(plan),
+        start=1,
+    ):
+        st.caption(f"Prompt batch {batch_index}")
+        st.code(prompt, language=None, wrap_lines=True)
     return plan
