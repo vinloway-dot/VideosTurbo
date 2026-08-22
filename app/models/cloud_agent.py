@@ -82,3 +82,41 @@ class CloudJobCreate(BaseModel):
         if self.target_words != self.clip_plan.target_words:
             raise ValueError("target_words must match clip_plan.target_words")
         return self
+
+
+class CloudJobRecord(CloudJobCreate):
+    id: str
+    status: CloudJobStatus
+    checkpoint: CloudJobCheckpoint
+    control_request: CloudControlRequest
+    current_step: str
+    progress: int = Field(ge=0, le=100)
+    flow_status: str
+    canva_status: str
+    voice_file: str
+    final_video: str
+    error_code: str
+    error_message: str
+    worker_id: str
+    lease_until: str
+    created_at: str
+    started_at: str
+    completed_at: str
+    updated_at: str
+
+
+class SessionCheckResult(BaseModel):
+    service: str
+    status: ServiceSessionStatus
+    message: str = ""
+    checked_at: str
+    evidence_path: str = ""
+
+
+class CloudAgentHealth(BaseModel):
+    enabled: bool
+    worker_online: bool
+    worker_last_seen: str = ""
+    storage_writable: bool
+    free_space_ok: bool
+    free_space_bytes: int = Field(ge=0)
