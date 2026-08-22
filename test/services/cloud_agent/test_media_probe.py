@@ -174,6 +174,16 @@ def test_validate_audio_accepts_audio_only_within_duration_policy(monkeypatch, t
     assert result.duration == pytest.approx(60.0)
 
 
+def test_validate_audio_allows_longer_valid_audio_without_fixed_max(monkeypatch, tmp_path):
+    media_path = _write_media(tmp_path, "voice.mp3")
+    _patch_run(monkeypatch, _audio_payload(duration=63.25))
+
+    result = validate_audio(media_path, min_duration=1.0)
+
+    assert result.has_audio is True
+    assert result.duration == pytest.approx(63.25)
+
+
 def test_validate_audio_rejects_missing_audio_stream(monkeypatch, tmp_path):
     media_path = _write_media(tmp_path, "not-audio.mp4")
     _patch_run(monkeypatch, _video_payload())
