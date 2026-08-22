@@ -4,7 +4,13 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.models.cloud_agent import CloudJobCreate, CloudJobStatus
+from app.models.cloud_agent import (
+    CloudControlRequest,
+    CloudJobCheckpoint,
+    CloudJobCreate,
+    CloudJobStatus,
+)
+from app.models.exception import HttpException
 from app.models.six_clip import empty_six_clip_plan
 from app.services import voice
 from app.services.cloud_agent.browser import PersistentBrowserManager
@@ -57,6 +63,10 @@ def _client(tmp_path):
     return TestClient(app, raise_server_exceptions=False), store
 
 
+def _created_job(store: CloudJobStore):
+    return store.create_job(CloudJobCreate.model_validate(_request_payload()))
+
+
 def test_cloud_agent_router_contract_is_registered_on_existing_root_router():
     cloud_agent = _cloud_agent_controller()
     app_router = importlib.import_module("app.router")
@@ -94,7 +104,7 @@ def test_create_job_persists_queue_without_running_tts_or_browser(monkeypatch, t
 
 def test_job_list_and_detail_expose_server_derived_timing_fields(tmp_path):
     client, store = _client(tmp_path)
-    created = store.create_job(CloudJobCreate.model_validate(_request_payload()))
+    created = _created_job(store)
     store.patch_job(
         created.id,
         audio_duration_seconds=63.25,
@@ -137,3 +147,109 @@ def test_client_cannot_override_server_derived_timing_fields_on_create(tmp_path)
     assert persisted.audio_duration_seconds == pytest.approx(0.0)
     assert persisted.canva_playback_speed == pytest.approx(1.0)
     assert persisted.target_final_duration_seconds == pytest.approx(60.0)
+
+
+def test_pause_queued_job_is_immediate_safe_pause(tmp_path):
+    client, store = _client(tmp_path)
+    created = _created_job(store)
+
+    response = client.post(f"/api/v1/cloud-agent/jobs/{created.id}/pause")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["status"] == CloudJobStatus.PAUSED.value
+    assert data["control_request"] == CloudControlRequest.NONE.value
+    assert data["checkpoint"] == CloudJobCheckpoint.NONE.value
+    persisted = store.get_job(created.id)
+    assert persisted is not None
+    assert persisted.status is CloudJobStatus.PAUSED
+
+
+def test_pause_active_job_requests_stop_at_next_safe_boundary(tmp_path):
+    client, store = _client(tmp_path)
+    created = _created_job(store)
+    store.patch_job(
+        created.id,
+        status=CloudJobStatus.TTS_GENERATING,
+        current_step="tts_generating",
+    )
+
+    response = client.post(f"/api/v1/cloud-agent/jobs/{created.id}/pause")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["status"] == CloudJobStatus.TTS_GENERATING.value
+    assert data["control_request"] == CloudControlRequest.PAUSE.value
+    assert data["current_step"] == "tts_generating"
+
+
+def test_cancel_inactive_job_is_immediate_but_active_job_uses_safe_boundary(tmp_path):
+    client, store = _client(tmp_path)
+    paused = _created_job(store)
+    active = _created_job(store)
+    store.patch_job(paused.id, status=CloudJobStatus.PAUSED, current_step="paused")
+    store.patch_job(
+        active.id,
+        status=CloudJobStatus.FLOW_GENERATING,
+        current_step="flow_generating",
+    )
+
+    paused_response = client.post(f"/api/v1/cloud-agent/jobs/{paused.id}/cancel")
+    active_response = client.post(f"/api/v1/cloud-agent/jobs/{active.id}/cancel")
+
+    assert paused_response.status_code == 200
+    paused_data = paused_response.json()["data"]
+    assert paused_data["status"] == CloudJobStatus.CANCELLED.value
+    assert paused_data["control_request"] == CloudControlRequest.NONE.value
+
+    assert active_response.status_code == 200
+    active_data = active_response.json()["data"]
+    assert active_data["status"] == CloudJobStatus.FLOW_GENERATING.value
+    assert active_data["control_request"] == CloudControlRequest.CANCEL.value
+
+
+def test_resume_paused_or_human_required_requeues_and_preserves_checkpoint(tmp_path):
+    client, store = _client(tmp_path)
+    paused = _created_job(store)
+    human = _created_job(store)
+    store.patch_job(
+        paused.id,
+        status=CloudJobStatus.PAUSED,
+        checkpoint=CloudJobCheckpoint.PREFLIGHT_PASSED,
+        current_step="paused",
+    )
+    store.patch_job(
+        human.id,
+        status=CloudJobStatus.HUMAN_REQUIRED,
+        checkpoint=CloudJobCheckpoint.TTS_READY,
+        current_step="human_required",
+        error_code="HUMAN_REQUIRED",
+        error_message="manual login required",
+    )
+
+    paused_response = client.post(f"/api/v1/cloud-agent/jobs/{paused.id}/resume")
+    human_response = client.post(f"/api/v1/cloud-agent/jobs/{human.id}/resume")
+
+    assert paused_response.status_code == 200
+    paused_data = paused_response.json()["data"]
+    assert paused_data["status"] == CloudJobStatus.QUEUED.value
+    assert paused_data["checkpoint"] == CloudJobCheckpoint.PREFLIGHT_PASSED.value
+    assert paused_data["control_request"] == CloudControlRequest.NONE.value
+
+    assert human_response.status_code == 200
+    human_data = human_response.json()["data"]
+    assert human_data["status"] == CloudJobStatus.QUEUED.value
+    assert human_data["checkpoint"] == CloudJobCheckpoint.TTS_READY.value
+    assert human_data["error_code"] == ""
+    assert human_data["error_message"] == ""
+
+
+def test_resume_rejects_job_that_is_not_paused_or_human_required(tmp_path):
+    cloud_agent = _cloud_agent_controller()
+    store = CloudJobStore(str(tmp_path / "cloud-agent.sqlite3"))
+    created = _created_job(store)
+
+    with pytest.raises(HttpException) as exc_info:
+        cloud_agent.resume_cloud_agent_job(created.id, None, store=store)
+
+    assert exc_info.value.status_code == 409
