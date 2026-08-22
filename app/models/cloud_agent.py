@@ -1,0 +1,84 @@
+from enum import Enum
+
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.models.six_clip import SixClipPlan
+
+
+class CloudJobStatus(str, Enum):
+    DRAFT = "DRAFT"
+    SCRIPT_READY = "SCRIPT_READY"
+    PROMPT_READY = "PROMPT_READY"
+    QUEUED = "QUEUED"
+    PREFLIGHT = "PREFLIGHT"
+    PREFLIGHT_PASSED = "PREFLIGHT_PASSED"
+    TTS_GENERATING = "TTS_GENERATING"
+    TTS_READY = "TTS_READY"
+    FLOW_GENERATING = "FLOW_GENERATING"
+    FLOW_DOWNLOADING = "FLOW_DOWNLOADING"
+    FLOW_READY = "FLOW_READY"
+    CANVA_UPLOADING = "CANVA_UPLOADING"
+    CANVA_EDITING = "CANVA_EDITING"
+    CAPTIONING = "CAPTIONING"
+    EXPORTING = "EXPORTING"
+    DOWNLOADING_FINAL = "DOWNLOADING_FINAL"
+    VALIDATING = "VALIDATING"
+    FINAL_VALIDATED = "FINAL_VALIDATED"
+    COMPLETED = "COMPLETED"
+    PAUSED = "PAUSED"
+    HUMAN_REQUIRED = "HUMAN_REQUIRED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class CloudJobCheckpoint(str, Enum):
+    NONE = "NONE"
+    PREFLIGHT_PASSED = "PREFLIGHT_PASSED"
+    TTS_READY = "TTS_READY"
+    FLOW_READY = "FLOW_READY"
+    FINAL_VALIDATED = "FINAL_VALIDATED"
+    COMPLETED = "COMPLETED"
+
+
+class CloudControlRequest(str, Enum):
+    NONE = "NONE"
+    PAUSE = "PAUSE"
+    CANCEL = "CANCEL"
+
+
+class ServiceSessionStatus(str, Enum):
+    CHECKING = "CHECKING"
+    READY = "READY"
+    SESSION_EXPIRED = "SESSION_EXPIRED"
+    AUTO_RELOGIN = "AUTO_RELOGIN"
+    LOGIN_REQUIRED = "LOGIN_REQUIRED"
+    CAPTCHA_REQUIRED = "CAPTCHA_REQUIRED"
+    TWO_FACTOR_REQUIRED = "2FA_REQUIRED"
+    VERIFICATION_REQUIRED = "VERIFICATION_REQUIRED"
+    ERROR = "ERROR"
+
+
+class CloudJobCreate(BaseModel):
+    subject: str
+    script: str
+    master_prompt: str
+    clip_plan: SixClipPlan
+    language: str = ""
+    target_words: int = Field(default=130, ge=40, le=400)
+    tts_provider: str
+    voice_id: str
+    voice_speed: float = Field(default=1.0, gt=0)
+
+    @field_validator("script", "master_prompt")
+    @classmethod
+    def _require_non_blank_content(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("value must not be blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_target_words_match_clip_plan(self):
+        if self.target_words != self.clip_plan.target_words:
+            raise ValueError("target_words must match clip_plan.target_words")
+        return self
