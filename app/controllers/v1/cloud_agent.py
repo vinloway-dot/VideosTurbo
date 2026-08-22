@@ -5,6 +5,7 @@ from app.controllers.v1.base import new_router
 from app.models.cloud_agent import CloudControlRequest, CloudJobCreate, CloudJobStatus
 from app.models.exception import HttpException
 from app.services.cloud_agent.job_store import CloudJobStore
+from app.services.cloud_agent.storage import CloudJobStorage
 from app.utils import utils
 
 
@@ -36,6 +37,10 @@ _TERMINAL_JOB_STATUSES = {
 
 def get_cloud_job_store() -> CloudJobStore:
     return CloudJobStore(str(config.app["cloud_agent_db_path"]))
+
+
+def get_cloud_job_storage() -> CloudJobStorage:
+    return CloudJobStorage()
 
 
 def _not_implemented():
