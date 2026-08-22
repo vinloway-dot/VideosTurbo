@@ -529,8 +529,10 @@ class TestConfigPersistence:
         assert normalized["cloud_agent_worker_heartbeat_seconds"] == 10
         assert normalized["cloud_agent_max_retries"] == 3
         assert normalized["cloud_agent_min_free_disk_gb"] == 10
-        assert normalized["cloud_agent_tts_min_duration_seconds"] == 58
-        assert normalized["cloud_agent_tts_max_duration_seconds"] == 62
+        assert normalized["cloud_agent_tts_min_duration_seconds"] == 1
+        assert normalized["cloud_agent_canva_min_playback_speed"] == 0.85
+        assert normalized["cloud_agent_final_duration_tolerance_seconds"] == 1.0
+        assert "cloud_agent_tts_max_duration_seconds" not in normalized
         assert normalized["cloud_agent_final_min_size_bytes"] == 1048576
         assert normalized["cloud_agent_expected_width"] == 1080
         assert normalized["cloud_agent_expected_height"] == 1920
