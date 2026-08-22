@@ -1,0 +1,123 @@
+name: Patch SixClip Target Words
+
+on:
+  push:
+    branches:
+      - ui/six-clip-compact-sections
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ui/six-clip-compact-sections
+
+      - name: Apply exact target words changes
+        shell: python
+        run: |
+          from pathlib import Path
+
+          replacements = {
+              Path("app/models/schema.py"): [
+                  (
+                      'target_words: int = Field(default=130, ge=40, le=400)',
+                      'target_words: int = Field(default=130, ge=40)',
+                  ),
+              ],
+              Path("app/models/six_clip.py"): [
+                  (
+                      'target_words: int = Field(default=130, ge=40, le=400)',
+                      'target_words: int = Field(default=130, ge=40)',
+                  ),
+              ],
+              Path("app/services/six_clip_plan.py"): [
+                  (
+                      '    if target < 40 or target > 400:\n'
+                      '        raise ValueError("target_words must be between 40 and 400")\n\n'
+                      '    requirements = [\n'
+                      '        f"Write approximately {target} words so the narration is suitable for about 60 seconds.",',
+                      '    if target < 40:\n'
+                      '        raise ValueError("target_words must be at least 40")\n\n'
+                      '    requirements = [\n'
+                      '        f"Write approximately {target} words.",',
+                  ),
+              ],
+              Path("webui/Main.py"): [
+                  (
+                      'def _saved_ui_number(key, default, minimum, maximum, number_type=float):\n'
+                      '    """读取并限幅持久化数值，避免非法配置破坏 Streamlit slider。"""\n'
+                      '    try:\n'
+                      '        saved = config.ui.get(key, default)\n'
+                      '        if isinstance(saved, bool):\n'
+                      '            raise ValueError("boolean is not a numeric setting")\n'
+                      '        value = number_type(saved)\n'
+                      '        if isinstance(value, float) and not math.isfinite(value):\n'
+                      '            raise ValueError("non-finite value")\n'
+                      '    except (TypeError, ValueError, OverflowError):\n'
+                      '        value = default\n'
+                      '    return min(maximum, max(minimum, value))',
+                      'def _saved_ui_number(key, default, minimum, maximum=None, number_type=float):\n'
+                      '    """读取并限幅持久化数值，避免非法配置破坏 Streamlit 数值控件。"""\n'
+                      '    try:\n'
+                      '        saved = config.ui.get(key, default)\n'
+                      '        if isinstance(saved, bool):\n'
+                      '            raise ValueError("boolean is not a numeric setting")\n'
+                      '        value = number_type(saved)\n'
+                      '        if isinstance(value, float) and not math.isfinite(value):\n'
+                      '            raise ValueError("non-finite value")\n'
+                      '    except (TypeError, ValueError, OverflowError):\n'
+                      '        value = default\n'
+                      '    value = max(minimum, value)\n'
+                      '    return value if maximum is None else min(maximum, value)',
+                  ),
+                  (
+                      '            params.target_words = st.number_input(\n'
+                      '                "Target Words",\n'
+                      '                min_value=40,\n'
+                      '                max_value=400,\n'
+                      '                value=_saved_ui_number("target_words", 130, 40, 400, int),\n'
+                      '                step=5,\n'
+                      '                key="target_words_input",\n'
+                      '                help="Approximate narration word count for the 60-second script.",\n'
+                      '            )',
+                      '            params.target_words = st.number_input(\n'
+                      '                "Target Words",\n'
+                      '                min_value=40,\n'
+                      '                value=_saved_ui_number("target_words", 130, 40, None, int),\n'
+                      '                step=5,\n'
+                      '                key="target_words_input",\n'
+                      '                help=(\n'
+                      '                    "Approximate narration word count. "\n'
+                      '                    "Longer scripts automatically build longer timelines."\n'
+                      '                ),\n'
+                      '            )',
+                  ),
+              ],
+          }
+
+          for path, pairs in replacements.items():
+              text = path.read_text(encoding="utf-8")
+              for old, new in pairs:
+                  if old not in text:
+                      if new in text:
+                          continue
+                      raise SystemExit(f"expected source block not found: {path}")
+                  text = text.replace(old, new, 1)
+              path.write_text(text, encoding="utf-8")
+
+      - name: Commit patch
+        run: |
+          if git diff --quiet; then
+            echo "No patch needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add webui/Main.py app/models/schema.py app/models/six_clip.py app/services/six_clip_plan.py
+          git commit -m "feat: remove SixClip target words upper limit"
+          git push origin HEAD:ui/six-clip-compact-sections
