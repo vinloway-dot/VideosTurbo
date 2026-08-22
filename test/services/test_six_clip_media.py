@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from app.models.six_clip import SixClipPlan, SixClipSegment
-from app.services import six_clip_media
+from app.services import six_clip_media, six_clip_plan
 
 
 class FakeResponse:
@@ -76,7 +76,7 @@ def test_google_flow_style_url_without_extension_is_imported_from_content_type(
     imported = six_clip_media.import_media_url(signed_url, tmp_path, clip_index=3)
 
     assert imported.media_kind == "video"
-    assert imported.local_path.endswith("clip-03.mp4")
+    assert imported.local_path.endswith("clip-003.mp4")
     assert Path(imported.local_path).read_bytes() == mp4_bytes
     assert "Signature" not in imported.local_path
 
@@ -183,9 +183,94 @@ def test_save_uploaded_media_accepts_image_and_video(tmp_path):
     )
 
     assert image.media_kind == "image"
-    assert image.local_path.endswith("clip-01.png")
+    assert image.local_path.endswith("clip-001.png")
     assert video.media_kind == "video"
-    assert video.local_path.endswith("clip-02.mp4")
+    assert video.local_path.endswith("clip-002.mp4")
+
+
+def test_import_accepts_dynamic_absolute_index(monkeypatch, tmp_path, mp4_bytes):
+    monkeypatch.setattr(
+        six_clip_media.requests,
+        "get",
+        lambda *args, **kwargs: FakeResponse(mp4_bytes, "video/mp4"),
+    )
+
+    imported = six_clip_media.import_media_url(
+        "https://example.com/media",
+        tmp_path,
+        clip_index=127,
+    )
+
+    assert imported.local_path.endswith("clip-127.mp4")
+
+
+def test_import_rejects_non_positive_clip_index(monkeypatch, tmp_path, mp4_bytes):
+    monkeypatch.setattr(
+        six_clip_media.requests,
+        "get",
+        lambda *args, **kwargs: FakeResponse(mp4_bytes, "video/mp4"),
+    )
+
+    with pytest.raises(six_clip_media.SixClipMediaError, match="positive"):
+        six_clip_media.import_media_url(
+            "https://example.com/media",
+            tmp_path,
+            clip_index=0,
+        )
+
+
+def _dynamic_media_plan(
+    duration: float,
+    source_dir: Path,
+    *,
+    missing: set[int] | None = None,
+) -> SixClipPlan:
+    missing = missing or set()
+    ranges = six_clip_plan.build_timeline_ranges(duration)
+    segments = []
+    for index, (start, end) in enumerate(ranges, start=1):
+        source = source_dir / f"source-{index}.mp4"
+        if index not in missing:
+            source.write_bytes(b"media")
+        segments.append(
+            SixClipSegment(
+                index=index,
+                start_sec=start,
+                end_sec=end,
+                media_kind="video",
+                media_path=str(source),
+            )
+        )
+    return SixClipPlan(
+        target_words=300,
+        narration_duration_sec=duration,
+        timeline_duration_sec=max(60.0, duration),
+        narration_fingerprint="voice-fingerprint",
+        segments=segments,
+    )
+
+
+def test_missing_media_lists_dynamic_absolute_ranges(tmp_path):
+    plan = _dynamic_media_plan(127.0, tmp_path, missing={7, 13})
+
+    assert six_clip_media.missing_media_message(plan) == (
+        "Clip 7 (60–70s), Clip 13 (120–127s)"
+    )
+
+
+def test_materialize_dynamic_plan_uses_stable_absolute_filenames(tmp_path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    task_dir = tmp_path / "task"
+    plan = _dynamic_media_plan(127.0, source_dir)
+
+    materialized = six_clip_media.materialize_plan_for_task(plan, task_dir)
+
+    assert len(materialized.segments) == 13
+    assert materialized.segments[0].media_path.endswith("clip-001.mp4")
+    assert materialized.segments[-1].media_path.endswith("clip-013.mp4")
+    assert materialized.narration_duration_sec == 127.0
+    assert materialized.narration_fingerprint == "voice-fingerprint"
 
 
 def test_validate_ready_media_reports_all_missing_or_deleted_clips(tmp_path):

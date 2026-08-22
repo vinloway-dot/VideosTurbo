@@ -95,11 +95,11 @@ def _detect_media_type(content_type: str, header: bytes) -> tuple[str, str]:
 
 
 def _destination_path(destination_dir: str | os.PathLike, clip_index: int, suffix: str) -> Path:
-    if clip_index < 1 or clip_index > 6:
-        raise SixClipMediaError("clip_index must be between 1 and 6")
+    if isinstance(clip_index, bool) or not isinstance(clip_index, int) or clip_index < 1:
+        raise SixClipMediaError("clip_index must be a positive integer")
     destination = Path(destination_dir)
     destination.mkdir(parents=True, exist_ok=True)
-    return destination / f"clip-{clip_index:02d}{suffix.lower()}"
+    return destination / f"clip-{clip_index:03d}{suffix.lower()}"
 
 
 def import_media_url(
@@ -253,7 +253,7 @@ def validate_ready_media(plan: SixClipPlan) -> list[int]:
 def missing_media_message(plan: SixClipPlan) -> str:
     missing = set(validate_ready_media(plan))
     ranges = [
-        f"Clip {segment.index} ({segment.start_sec}–{segment.end_sec}s)"
+        f"Clip {segment.index} ({segment.start_sec:g}–{segment.end_sec:g}s)"
         for segment in plan.segments
         if segment.index in missing
     ]
@@ -275,7 +275,7 @@ def materialize_plan_for_task(
     for segment in plan.segments:
         source = Path(segment.media_path)
         suffix = source.suffix.lower()
-        target = destination / f"clip-{segment.index:02d}{suffix}"
+        target = destination / f"clip-{segment.index:03d}{suffix}"
         if source.resolve() != target.resolve():
             shutil.copy2(source, target)
         segments.append(segment.model_copy(update={"media_path": str(target)}))
