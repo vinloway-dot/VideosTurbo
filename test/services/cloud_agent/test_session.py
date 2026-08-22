@@ -20,13 +20,13 @@ class SequenceProvider:
         self.check_calls = []
         self.repair_calls = []
 
-    def check_session(self, *, headed: bool = False):
+    def check_session(self, *, headed: bool = False, job_id: str = ""):
         self.check_calls.append(headed)
         if not self.checks:
             raise AssertionError("unexpected extra session check")
         return self.checks.pop(0)
 
-    def repair_session(self, *, headed: bool = False):
+    def repair_session(self, *, headed: bool = False, job_id: str = ""):
         self.repair_calls.append(headed)
         if self.repair is None:
             raise AssertionError("unexpected repair attempt")
