@@ -136,6 +136,33 @@ def test_probe_media_uses_path_ffprobe_when_ffmpeg_is_not_local(monkeypatch, tmp
     assert captured["command"][0] == "/usr/bin/ffprobe"
 
 
+def test_probe_media_falls_back_to_literal_ffprobe_when_not_installed(monkeypatch, tmp_path):
+    media_path = _write_media(tmp_path)
+    monkeypatch.setattr(
+        "app.services.cloud_agent.media_probe.utils.get_ffmpeg_binary", lambda: "ffmpeg"
+    )
+    monkeypatch.setattr(
+        "app.services.cloud_agent.media_probe.shutil.which", lambda name: None
+    )
+    captured = _patch_run(monkeypatch, _audio_payload())
+
+    probe_media(media_path)
+
+    assert captured["command"][0] == "ffprobe"
+
+
+def test_probe_media_rejects_missing_file_before_running_ffprobe(monkeypatch, tmp_path):
+    missing = tmp_path / "missing.mp4"
+
+    def should_not_run(*args, **kwargs):
+        raise AssertionError("ffprobe must not run for a missing file")
+
+    monkeypatch.setattr("app.services.cloud_agent.media_probe.subprocess.run", should_not_run)
+
+    with pytest.raises(MediaValidationError, match="does not exist"):
+        probe_media(missing)
+
+
 def test_validate_audio_accepts_audio_only_within_duration_policy(monkeypatch, tmp_path):
     media_path = _write_media(tmp_path, "voice.mp3")
     _patch_run(monkeypatch, _audio_payload(duration=60.0))
@@ -153,6 +180,16 @@ def test_validate_audio_rejects_missing_audio_stream(monkeypatch, tmp_path):
 
     with pytest.raises(MediaValidationError, match="audio stream"):
         validate_audio(media_path, min_duration=1.0, max_duration=120.0)
+
+
+def test_validate_audio_rejects_missing_audio_codec(monkeypatch, tmp_path):
+    media_path = _write_media(tmp_path, "voice.mp3")
+    payload = _audio_payload()
+    payload["streams"][0].pop("codec_name")
+    _patch_run(monkeypatch, payload)
+
+    with pytest.raises(MediaValidationError, match="audio codec"):
+        validate_audio(media_path, min_duration=58.0, max_duration=62.0)
 
 
 def test_validate_video_accepts_video_only_flow_clip(monkeypatch, tmp_path):
@@ -186,6 +223,26 @@ def test_validate_video_rejects_missing_video_stream(monkeypatch, tmp_path):
 
     with pytest.raises(MediaValidationError, match="video stream"):
         validate_video(media_path)
+
+
+def test_validate_video_rejects_missing_video_codec(monkeypatch, tmp_path):
+    media_path = _write_media(tmp_path, "clip_01.mp4")
+    payload = _video_payload()
+    payload["streams"][0].pop("codec_name")
+    _patch_run(monkeypatch, payload)
+
+    with pytest.raises(MediaValidationError, match="video codec"):
+        validate_video(media_path)
+
+
+def test_validate_video_rejects_missing_required_audio_codec(monkeypatch, tmp_path):
+    media_path = _write_media(tmp_path, "final.mp4")
+    payload = _final_payload()
+    payload["streams"][1].pop("codec_name")
+    _patch_run(monkeypatch, payload)
+
+    with pytest.raises(MediaValidationError, match="audio codec"):
+        validate_video(media_path, require_audio=True)
 
 
 def test_probe_media_rejects_nonzero_ffprobe_and_redacts_url_query(monkeypatch, tmp_path):
