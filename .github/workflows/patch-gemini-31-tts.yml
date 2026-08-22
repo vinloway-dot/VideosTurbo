@@ -25,120 +25,94 @@ jobs:
           voice_path = Path("app/services/voice.py")
           voice_text = voice_path.read_text(encoding="utf-8")
 
-          old_constants = '''MINIMAX_TTS_MODELS = (
-              "speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo",
-              "speech-02-hd", "speech-02-turbo", "speech-01-hd", "speech-01-turbo",
-          )
-          GEMINI_TTS_VOICES = (
-          '''
-          new_constants = '''MINIMAX_TTS_MODELS = (
-              "speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo",
-              "speech-02-hd", "speech-02-turbo", "speech-01-hd", "speech-01-turbo",
-          )
-          GEMINI_TTS_DEFAULT_MODEL = "gemini-3.1-flash-tts-preview"
+          voice_marker = "GEMINI_TTS_VOICES = ("
+          constants = """GEMINI_TTS_DEFAULT_MODEL = \"gemini-3.1-flash-tts-preview\"
           GEMINI_TTS_MODELS = (
               GEMINI_TTS_DEFAULT_MODEL,
-              "gemini-2.5-flash-preview-tts",
-              "gemini-2.5-pro-preview-tts",
+              \"gemini-2.5-flash-preview-tts\",
+              \"gemini-2.5-pro-preview-tts\",
           )
-          GEMINI_TTS_VOICES = (
-          '''
-          if old_constants not in voice_text:
-              raise SystemExit("Gemini constants insertion point not found")
-          voice_text = voice_text.replace(old_constants, new_constants, 1)
+          GEMINI_TTS_VOICES = ("""
+          if "GEMINI_TTS_DEFAULT_MODEL" not in voice_text:
+              if voice_marker not in voice_text:
+                  raise SystemExit("Gemini voice catalog marker not found")
+              voice_text = voice_text.replace(voice_marker, constants, 1)
 
-          old_start = '''        logger.info(f"start, voice name: {voice_name}, try: 1")
+          logger_line = '        logger.info(f"start, voice name: {voice_name}, try: 1")'
+          model_setup = """        model = str(
+              config.app.get(\"gemini_tts_model\", GEMINI_TTS_DEFAULT_MODEL)
+              or GEMINI_TTS_DEFAULT_MODEL
+          ).strip()
+          logger.info(
+              f\"start Gemini TTS, model: {model}, voice name: {voice_name}, try: 1\"
+          )"""
+          if 'config.app.get("gemini_tts_model", GEMINI_TTS_DEFAULT_MODEL)' not in voice_text:
+              if logger_line not in voice_text:
+                  raise SystemExit("Gemini TTS logger marker not found")
+              voice_text = voice_text.replace(logger_line, model_setup, 1)
 
-              generation_config = types.GenerateContentConfig(
-          '''
-          new_start = '''        model = str(
-                  config.app.get("gemini_tts_model", GEMINI_TTS_DEFAULT_MODEL)
-                  or GEMINI_TTS_DEFAULT_MODEL
-              ).strip()
-              logger.info(f"start Gemini TTS, model: {model}, voice name: {voice_name}, try: 1")
-
-              generation_config = types.GenerateContentConfig(
-          '''
-          if old_start not in voice_text:
-              raise SystemExit("Gemini TTS start block not found")
-          voice_text = voice_text.replace(old_start, new_start, 1)
-
-          old_model = '''            response = client.models.generate_content(
-                          model="gemini-2.5-flash-preview-tts",
-                          contents=text,
-                          config=generation_config,
-                      )
-          '''
-          new_model = '''            response = client.models.generate_content(
-                          model=model,
-                          contents=text,
-                          config=generation_config,
-                      )
-          '''
-          if old_model not in voice_text:
-              raise SystemExit("Hard-coded Gemini TTS model call not found")
-          voice_text = voice_text.replace(old_model, new_model, 1)
+          hardcoded_model = 'model="gemini-2.5-flash-preview-tts"'
+          if hardcoded_model in voice_text:
+              voice_text = voice_text.replace(hardcoded_model, "model=model", 1)
           voice_path.write_text(voice_text, encoding="utf-8")
 
           main_path = Path("webui/Main.py")
           main_text = main_path.read_text(encoding="utf-8")
 
-          old_signature = '''    if tts_server == "gemini-tts":
-                  return {
-                      "credential": _credential_signature(config.app.get("gemini_api_key", ""))
-                  }
-          '''
-          new_signature = '''    if tts_server == "gemini-tts":
-                  return {
-                      "model_id": config.app.get(
-                          "gemini_tts_model", voice.GEMINI_TTS_DEFAULT_MODEL
-                      ),
-                      "credential": _credential_signature(config.app.get("gemini_api_key", "")),
-                  }
-          '''
-          if old_signature not in main_text:
-              raise SystemExit("Gemini preview signature block not found")
-          main_text = main_text.replace(old_signature, new_signature, 1)
+          credential_line = '            "credential": _credential_signature(config.app.get("gemini_api_key", ""))'
+          model_signature = """            \"model_id\": config.app.get(
+              \"gemini_tts_model\", voice.GEMINI_TTS_DEFAULT_MODEL
+          ),
+          """ + credential_line + ","
+          gemini_signature_block = main_text.split('if tts_server == "gemini-tts":', 1)[1].split("return {}", 1)[0]
+          if '"model_id": config.app.get(' not in gemini_signature_block:
+              if credential_line not in main_text:
+                  raise SystemExit("Gemini preview credential marker not found")
+              main_text = main_text.replace(credential_line, model_signature, 1)
 
-          old_ui = '''                _set_runtime_config("app", "gemini_api_key", gemini_tts_api_key)
+          api_key_line = '                _set_runtime_config("app", "gemini_api_key", gemini_tts_api_key)'
+          selector = """
 
-                      # 当选择硅基流动时，显示API key输入框和说明信息
-          '''
-          new_ui = '''                _set_runtime_config("app", "gemini_api_key", gemini_tts_api_key)
-
-                      saved_gemini_tts_model = str(
-                          config.app.get(
-                              "gemini_tts_model", voice.GEMINI_TTS_DEFAULT_MODEL
-                          )
-                          or voice.GEMINI_TTS_DEFAULT_MODEL
-                      ).strip()
-                      if saved_gemini_tts_model not in voice.GEMINI_TTS_MODELS:
-                          saved_gemini_tts_model = voice.GEMINI_TTS_DEFAULT_MODEL
-                      gemini_tts_model = stable_selectbox(
-                          "Gemini TTS Model",
-                          options=voice.GEMINI_TTS_MODELS,
-                          default_value=saved_gemini_tts_model,
-                          key="gemini_tts_model_select",
-                      )
-                      _set_runtime_config("app", "gemini_tts_model", gemini_tts_model)
-
-                      # 当选择硅基流动时，显示API key输入框和说明信息
-          '''
-          if old_ui not in main_text:
-              raise SystemExit("Gemini WebUI settings insertion point not found")
-          main_text = main_text.replace(old_ui, new_ui, 1)
+              saved_gemini_tts_model = str(
+                  config.app.get(
+                      \"gemini_tts_model\", voice.GEMINI_TTS_DEFAULT_MODEL
+                  )
+                  or voice.GEMINI_TTS_DEFAULT_MODEL
+              ).strip()
+              if saved_gemini_tts_model not in voice.GEMINI_TTS_MODELS:
+                  saved_gemini_tts_model = voice.GEMINI_TTS_DEFAULT_MODEL
+              gemini_tts_model = stable_selectbox(
+                  \"Gemini TTS Model\",
+                  options=voice.GEMINI_TTS_MODELS,
+                  default_value=saved_gemini_tts_model,
+                  key=\"gemini_tts_model_select\",
+              )
+              _set_runtime_config(\"app\", \"gemini_tts_model\", gemini_tts_model)"""
+          if 'key="gemini_tts_model_select"' not in main_text:
+              if api_key_line not in main_text:
+                  raise SystemExit("Gemini API key config marker not found")
+              main_text = main_text.replace(api_key_line, api_key_line + selector, 1)
           main_path.write_text(main_text, encoding="utf-8")
 
           test_voice_path = Path("test/services/test_voice.py")
           test_voice_text = test_voice_path.read_text(encoding="utf-8")
-          old_expectation = '        self.assertEqual(captured["model"], "gemini-2.5-flash-preview-tts")\n'
-          new_expectation = '        self.assertEqual(captured["model"], vs.GEMINI_TTS_DEFAULT_MODEL)\n'
-          if old_expectation not in test_voice_text:
-              raise SystemExit("Legacy Gemini model expectation not found")
-          test_voice_path.write_text(
-              test_voice_text.replace(old_expectation, new_expectation, 1),
-              encoding="utf-8",
-          )
+          old_expectation = 'self.assertEqual(captured["model"], "gemini-2.5-flash-preview-tts")'
+          new_expectation = 'self.assertEqual(captured["model"], vs.GEMINI_TTS_DEFAULT_MODEL)'
+          if old_expectation in test_voice_text:
+              test_voice_text = test_voice_text.replace(old_expectation, new_expectation, 1)
+          test_voice_path.write_text(test_voice_text, encoding="utf-8")
+
+      - name: Verify patch markers
+        shell: python
+        run: |
+          from pathlib import Path
+          voice = Path("app/services/voice.py").read_text(encoding="utf-8")
+          main = Path("webui/Main.py").read_text(encoding="utf-8")
+          assert 'GEMINI_TTS_DEFAULT_MODEL = "gemini-3.1-flash-tts-preview"' in voice
+          assert 'model=model' in voice
+          assert '"Gemini TTS Model"' in main
+          assert 'options=voice.GEMINI_TTS_MODELS' in main
+          assert '"model_id": config.app.get(' in main
 
       - name: Commit patch
         run: |
