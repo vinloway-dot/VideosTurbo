@@ -3771,8 +3771,8 @@ def _get_voice_preview_provider_signature(tts_server: str) -> dict:
     if tts_server == "gemini-tts":
         return {
             "model_id": config.app.get(
-    "gemini_tts_model", voice.GEMINI_TTS_DEFAULT_MODEL
-),
+                "gemini_tts_model", voice.GEMINI_TTS_DEFAULT_MODEL
+            ),
             "credential": _credential_signature(config.app.get("gemini_api_key", "")),
         }
     if tts_server == "mimo-tts":
@@ -4957,21 +4957,21 @@ def _render_audio_settings(panel, params):
                 )
                 _set_runtime_config("app", "gemini_api_key", gemini_tts_api_key)
 
-    saved_gemini_tts_model = str(
-        config.app.get(
-            "gemini_tts_model", voice.GEMINI_TTS_DEFAULT_MODEL
-        )
-        or voice.GEMINI_TTS_DEFAULT_MODEL
-    ).strip()
-    if saved_gemini_tts_model not in voice.GEMINI_TTS_MODELS:
-        saved_gemini_tts_model = voice.GEMINI_TTS_DEFAULT_MODEL
-    gemini_tts_model = stable_selectbox(
-        "Gemini TTS Model",
-        options=voice.GEMINI_TTS_MODELS,
-        default_value=saved_gemini_tts_model,
-        key="gemini_tts_model_select",
-    )
-    _set_runtime_config("app", "gemini_tts_model", gemini_tts_model)
+                saved_gemini_tts_model = str(
+                    config.app.get(
+                        "gemini_tts_model", voice.GEMINI_TTS_DEFAULT_MODEL
+                    )
+                    or voice.GEMINI_TTS_DEFAULT_MODEL
+                ).strip()
+                if saved_gemini_tts_model not in voice.GEMINI_TTS_MODELS:
+                    saved_gemini_tts_model = voice.GEMINI_TTS_DEFAULT_MODEL
+                gemini_tts_model = stable_selectbox(
+                    "Gemini TTS Model",
+                    options=voice.GEMINI_TTS_MODELS,
+                    default_value=saved_gemini_tts_model,
+                    key="gemini_tts_model_select",
+                )
+                _set_runtime_config("app", "gemini_tts_model", gemini_tts_model)
 
             # 当选择硅基流动时，显示API key输入框和说明信息
             if tts_mode_enabled and (

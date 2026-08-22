@@ -1169,12 +1169,12 @@ def gemini_tts(
             return None
 
         model = str(
-    config.app.get("gemini_tts_model", GEMINI_TTS_DEFAULT_MODEL)
-    or GEMINI_TTS_DEFAULT_MODEL
-).strip()
-logger.info(
-    f"start Gemini TTS, model: {model}, voice name: {voice_name}, try: 1"
-)
+            config.app.get("gemini_tts_model", GEMINI_TTS_DEFAULT_MODEL)
+            or GEMINI_TTS_DEFAULT_MODEL
+        ).strip()
+        logger.info(
+            f"start Gemini TTS, model: {model}, voice name: {voice_name}, try: 1"
+        )
 
         generation_config = types.GenerateContentConfig(
             response_modalities=["AUDIO"],
