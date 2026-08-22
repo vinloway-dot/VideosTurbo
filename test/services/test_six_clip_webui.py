@@ -14,11 +14,15 @@ def test_main_uses_fixed_six_clip_ui_instead_of_legacy_stock_panel():
     assert "params.six_clip_mode = True" in MAIN_SOURCE
 
 
-def test_generate_script_flow_populates_six_clip_plan():
+def test_generate_script_flow_is_text_only_and_confirmation_builds_plan():
     assert "six_clip_plan.build_script_generation_requirements(" in MAIN_SOURCE
-    assert "clip_plan = six_clip_plan.generate_six_clip_plan(" in MAIN_SOURCE
-    assert "six_clip_timeline.set_session_plan(clip_plan, sync_widgets=True)" in MAIN_SOURCE
-    assert "generate_script_terms_and_six_clip_plan" in MAIN_SOURCE
+    local_generation = MAIN_SOURCE.split(
+        "def _render_local_script_generation", 1
+    )[1].split("def _render_loomloom_candidates", 1)[0]
+    assert "six_clip_plan.generate_six_clip_plan(" not in local_generation
+    assert "voice.tts(" not in local_generation
+    assert "def confirm_script_and_build_timeline(" in MAIN_SOURCE
+    assert 'key="confirm_script_build_timeline_button"' in MAIN_SOURCE
 
 
 def test_timeline_ui_has_editable_prompt_and_exactly_one_media_source_per_clip():

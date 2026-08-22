@@ -331,7 +331,14 @@ def render_six_clip_sections(
                 )
             )
 
-    plan = SixClipPlan(target_words=int(target_words), segments=updated_segments)
+    plan = SixClipPlan(
+        target_words=int(target_words),
+        narration_duration_sec=plan.narration_duration_sec,
+        timeline_duration_sec=plan.timeline_duration_sec,
+        slot_duration_sec=plan.slot_duration_sec,
+        narration_fingerprint=plan.narration_fingerprint,
+        segments=updated_segments,
+    )
     set_session_plan(plan, sync_widgets=False)
 
     missing = six_clip_media.validate_ready_media(plan)

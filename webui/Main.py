@@ -35,6 +35,7 @@ from app.models.llm_provider import (
     get_llm_provider,
     normalize_provider_override,
 )
+from app.models.six_clip import SixClipPlan
 from app.models.schema import (
     MaterialInfo,
     VideoAspect,
@@ -2785,16 +2786,10 @@ def _render_local_script_generation(params):
                 match_script_order=False,
                 app_config=app_config_snapshot,
             )
-            clip_plan = six_clip_plan.generate_six_clip_plan(
-                script,
-                language=params.video_language,
-                target_words=params.target_words,
-                app_config=app_config_snapshot,
-            )
-            return script, terms, clip_plan
+            return script, terms
 
-        script, terms, clip_plan = _run_llm_read_operation(
-            "generate_script_terms_and_six_clip_plan",
+        script, terms = _run_llm_read_operation(
+            "generate_script_and_terms",
             generate_script_and_terms,
         )
         if "Error: " in script:
@@ -2804,7 +2799,6 @@ def _render_local_script_generation(params):
         else:
             st.session_state["video_script"] = script
             st.session_state["video_terms"] = ", ".join(terms)
-            six_clip_timeline.set_session_plan(clip_plan, sync_widgets=True)
 
 
 def _render_loomloom_candidates():
@@ -3820,7 +3814,10 @@ def _synthesize_voice_preview(
                 voice_name=voice_name,
                 voice_rate=voice_rate,
                 voice_file=audio_file,
-                voice_volume=voice_volume,
+                # Full narration is canonical source audio. The final MoviePy
+                # mixer applies the selected gain once, so baking it in here
+                # would make non-default volume play twice as loud or quiet.
+                voice_volume=1.0 if preview_type == "full" else voice_volume,
             )
         if not sub_maker or not os.path.exists(audio_file):
             logger.error(f"{preview_type} voice preview did not produce an audio file")
@@ -3865,6 +3862,92 @@ def _synthesize_voice_preview(
             )
 
 
+def get_current_narration_fingerprint(params, voice_mode: str) -> str:
+    """Return the full narration identity for the current editable settings."""
+    if voice_mode != VOICE_MODE_TTS:
+        return ""
+    script_content = str(params.video_script or "").strip()
+    if not script_content or not params.voice_name:
+        return ""
+    selected_tts_server = config.ui.get("tts_server", "azure-tts-v1")
+    return _voice_preview_fingerprint(
+        preview_type="full",
+        content=script_content,
+        tts_server=selected_tts_server,
+        voice_name=params.voice_name,
+        voice_rate=params.voice_rate,
+        voice_volume=params.voice_volume,
+        provider_signature=_get_voice_preview_provider_signature(selected_tts_server),
+    )
+
+
+def confirm_script_and_build_timeline(
+    params,
+    voice_mode: str,
+    app_config_snapshot,
+):
+    """Confirm exact narration audio, then build its authoritative timeline."""
+    script_content = str(params.video_script or "").strip()
+    if not script_content:
+        st.warning(tr("Voiceover Script Required"))
+        return None
+    if voice_mode != VOICE_MODE_TTS:
+        st.warning("Timeline confirmation currently requires TTS voice mode.")
+        return None
+
+    narration_fingerprint = get_current_narration_fingerprint(params, voice_mode)
+    preview = _get_reusable_full_voice_preview(params, voice_mode)
+    if preview is None:
+        selected_tts_server = config.ui.get("tts_server", "azure-tts-v1")
+        preview = _synthesize_voice_preview(
+            content=script_content,
+            preview_type="full",
+            selected_tts_server=selected_tts_server,
+            voice_name=params.voice_name,
+            voice_rate=params.voice_rate,
+            voice_volume=params.voice_volume,
+        )
+        if preview and preview.get("busy"):
+            st.warning(tr("Voice Preview Busy"))
+            return None
+        if not preview:
+            st.error(tr("Voice Preview No Audio"))
+            return None
+        preview["fingerprint"] = narration_fingerprint
+        st.session_state["voice_preview_audio"] = preview
+
+    duration = preview.get("duration")
+    if (
+        not isinstance(duration, (int, float))
+        or not math.isfinite(duration)
+        or duration <= 0
+    ):
+        st.warning(tr("Voice Preview Duration Unavailable"))
+        return None
+
+    try:
+        maximum_clip_count = int(
+            app_config_snapshot.get("max_dynamic_clip_count", 0) or 0
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("app.max_dynamic_clip_count must be an integer") from exc
+    ranges = six_clip_plan.build_timeline_ranges(
+        float(duration),
+        maximum_clip_count=maximum_clip_count,
+    )
+    subtitle_cues = voice.extract_timed_text_cues(preview["sub_maker"])
+    return six_clip_plan.generate_six_clip_plan(
+        script_content,
+        language=params.video_language,
+        target_words=params.target_words,
+        app_config=app_config_snapshot,
+        timeline_ranges=ranges,
+        narration_duration_sec=float(duration),
+        narration_fingerprint=narration_fingerprint,
+        subtitle_cues=subtitle_cues,
+    )
+
+
 def _render_voice_preview(params, friendly_names, selected_tts_server, voice_name):
     """渲染低成本短试听、完整文案时长估算和按需完整配音预览。"""
     if not friendly_names:
@@ -3894,9 +3977,9 @@ def _render_voice_preview(params, friendly_names, selected_tts_server, voice_nam
         icon=":material/graphic_eq:",
         use_container_width=True,
     )
-    full_preview_requested = preview_columns[1].button(
-        tr("Generate Full Voiceover Preview"),
-        key="generate_full_voiceover_preview_button",
+    confirmation_requested = preview_columns[1].button(
+        tr("Confirm Script & Build Timeline"),
+        key="confirm_script_build_timeline_button",
         icon=":material/article:",
         help=tr("Full Voiceover Preview Cost Hint"),
         use_container_width=True,
@@ -3908,9 +3991,6 @@ def _render_voice_preview(params, friendly_names, selected_tts_server, voice_nam
     if short_preview_requested:
         preview_type = "sample"
         preview_content = sample_content
-    elif full_preview_requested:
-        preview_type = "full"
-        preview_content = script_content
 
     sample_fingerprint = _voice_preview_fingerprint(
         preview_type="sample",
@@ -3936,10 +4016,8 @@ def _render_voice_preview(params, friendly_names, selected_tts_server, voice_nam
     )
 
     if preview_type:
-        requested_fingerprint = (
-            sample_fingerprint if preview_type == "sample" else full_fingerprint
-        )
-        cached_preview = st.session_state.get("voice_preview_audio")
+        requested_fingerprint = sample_fingerprint
+        cached_preview = st.session_state.get("voice_sample_preview_audio")
         if (
             not cached_preview
             or cached_preview.get("fingerprint") != requested_fingerprint
@@ -3962,17 +4040,51 @@ def _render_voice_preview(params, friendly_names, selected_tts_server, voice_nam
                     st.warning(tr("Voice Preview Busy"))
                 elif preview_result:
                     preview_result["fingerprint"] = requested_fingerprint
-                    st.session_state["voice_preview_audio"] = preview_result
+                    st.session_state["voice_sample_preview_audio"] = preview_result
                 else:
                     st.error(tr("Voice Preview No Audio"))
 
-    cached_preview = st.session_state.get("voice_preview_audio")
-    valid_fingerprints = {sample_fingerprint, full_fingerprint}
-    if (
-        cached_preview
-        and cached_preview.get("fingerprint") in valid_fingerprints
-        and cached_preview.get("audio_bytes")
-    ):
+    if confirmation_requested:
+        try:
+            with st.spinner(tr("Synthesizing Voice")):
+                app_config_snapshot = config.snapshot_config_with_pending(config.app)
+                confirmed_plan = confirm_script_and_build_timeline(
+                    params,
+                    VOICE_MODE_TTS,
+                    app_config_snapshot,
+                )
+        except Exception as exc:
+            logger.exception("failed to confirm narration and build timeline")
+            st.error(f"Failed to build timeline: {exc}")
+        else:
+            if confirmed_plan is not None:
+                six_clip_timeline.set_session_plan(
+                    confirmed_plan,
+                    sync_widgets=True,
+                )
+                st.success(
+                    f"Timeline confirmed: {confirmed_plan.narration_duration_sec:.1f} "
+                    f"seconds / {len(confirmed_plan.segments)} clips."
+                )
+
+    sample_preview = st.session_state.get("voice_sample_preview_audio")
+    full_preview = st.session_state.get("voice_preview_audio")
+    valid_sample = bool(
+        sample_preview
+        and sample_preview.get("fingerprint") == sample_fingerprint
+        and sample_preview.get("audio_bytes")
+    )
+    valid_full = bool(
+        full_preview
+        and full_preview.get("fingerprint") == full_fingerprint
+        and full_preview.get("audio_bytes")
+    )
+    cached_preview = (
+        sample_preview
+        if short_preview_requested and valid_sample
+        else full_preview if valid_full else sample_preview if valid_sample else None
+    )
+    if cached_preview:
         # 只在用户本次明确点击“试听音色”时自动播放。Streamlit 的其它控件
         # 也会触发页面 rerun；如果对缓存音频永久开启 autoplay，修改任意设置
         # 都可能让旧试听从头播放。完整试听继续保留手动播放，避免较长音频在
@@ -3996,6 +4108,35 @@ def _render_voice_preview(params, friendly_names, selected_tts_server, voice_nam
             else:
                 st.warning(tr("Voice Preview Duration Unavailable"))
 
+    raw_plan = st.session_state.get(six_clip_timeline.PLAN_SESSION_KEY)
+    if raw_plan:
+        try:
+            current_plan = (
+                raw_plan
+                if isinstance(raw_plan, SixClipPlan)
+                else SixClipPlan.model_validate(raw_plan)
+            )
+        except Exception:
+            current_plan = None
+        current_fingerprint = get_current_narration_fingerprint(
+            params,
+            VOICE_MODE_TTS,
+        )
+        if (
+            current_plan is not None
+            and six_clip_plan.is_timeline_current(
+                current_plan,
+                current_fingerprint,
+            )
+            and _get_reusable_full_voice_preview(params, VOICE_MODE_TTS) is not None
+        ):
+            st.caption(
+                f"Current timeline: {current_plan.narration_duration_sec:.1f} "
+                f"seconds / {len(current_plan.segments)} clips."
+            )
+        else:
+            st.warning("Timeline is stale—reconfirm before rendering.")
+
 
 def _get_reusable_full_voice_preview(params, voice_mode: str) -> dict | None:
     """
@@ -4010,26 +4151,10 @@ def _get_reusable_full_voice_preview(params, voice_mode: str) -> dict | None:
         return None
 
     script_content = str(params.video_script or "").strip()
-    selected_tts_server = config.ui.get("tts_server", "azure-tts-v1")
-    if (
-        not script_content
-        or not params.voice_name
-        # 正式视频会在 MoviePy 合成阶段统一应用配音音量；部分 Provider 又会
-        # 在 TTS 阶段直接写入音量增益。非默认音量下复用试听可能造成二次增益，
-        # 因此先保守回退原流程，避免为少量场景引入 Provider 特判。
-        or not math.isclose(float(params.voice_volume), 1.0)
-    ):
+    if not script_content or not params.voice_name:
         return None
 
-    expected_fingerprint = _voice_preview_fingerprint(
-        preview_type="full",
-        content=script_content,
-        tts_server=selected_tts_server,
-        voice_name=params.voice_name,
-        voice_rate=params.voice_rate,
-        voice_volume=params.voice_volume,
-        provider_signature=_get_voice_preview_provider_signature(selected_tts_server),
-    )
+    expected_fingerprint = get_current_narration_fingerprint(params, voice_mode)
     cached_preview = st.session_state.get("voice_preview_audio")
     if (
         not cached_preview

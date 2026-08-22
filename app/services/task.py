@@ -413,7 +413,7 @@ def _resolve_reusable_voice_preview(
         "voice_rate": float(params.voice_rate),
         "voice_volume": float(params.voice_volume),
     }
-    if not math.isclose(float(params.voice_volume), 1.0) or any(
+    if any(
         voice_preview.get(key) != value for key, value in expected_values.items()
     ):
         logger.info(
