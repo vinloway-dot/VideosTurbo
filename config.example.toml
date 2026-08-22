@@ -310,7 +310,7 @@ max_concurrent_tasks = 5
 max_queued_tasks = 100
 
 # -----------------------------------------------------------------------------
-# Cross-platform Publishing / 跨แพลตฟอร์ม Publishing
+# Cross-platform Publishing / 跨平台发布
 # -----------------------------------------------------------------------------
 
 # Upload-Post can publish generated videos to TikTok, Instagram, and YouTube.
