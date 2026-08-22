@@ -4,13 +4,13 @@ from pathlib import Path
 
 import pytest
 
+from app.services.cloud_agent.errors import MediaValidationError
 from app.services.cloud_agent.media_probe import (
     MediaProbe,
     probe_media,
     validate_audio,
     validate_video,
 )
-from app.services.cloud_agent.errors import MediaValidationError
 
 
 def _write_media(tmp_path: Path, name: str = "media.bin", size: int = 128) -> Path:
