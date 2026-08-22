@@ -116,8 +116,9 @@ def _workflow(tmp_path, store, *, preflight=None, tts=None, flow=None, canva=Non
         tts or RecordingTTS(),
         flow or RecordingFlow(),
         canva or RecordingCanva(),
-        tts_min_duration=58.0,
-        tts_max_duration=62.0,
+        tts_min_duration=1.0,
+        canva_min_playback_speed=0.85,
+        final_duration_tolerance_seconds=1.0,
         final_min_size_bytes=1,
         expected_width=1080,
         expected_height=1920,
@@ -125,13 +126,31 @@ def _workflow(tmp_path, store, *, preflight=None, tts=None, flow=None, canva=Non
 
 
 def _accept_media(monkeypatch):
+    def fake_validate_audio(path, **kwargs):
+        return _media_probe(
+            Path(path),
+            duration=60.0,
+            has_audio=True,
+            has_video=False,
+        )
+
+    def fake_validate_video(path, **kwargs):
+        media_path = Path(path)
+        is_final = media_path.name == "final.mp4"
+        return _media_probe(
+            media_path,
+            duration=60.0 if is_final else 10.0,
+            has_audio=is_final,
+            has_video=True,
+        )
+
     monkeypatch.setattr(
         "app.services.cloud_agent.workflow.validate_audio",
-        lambda *args, **kwargs: None,
+        fake_validate_audio,
     )
     monkeypatch.setattr(
         "app.services.cloud_agent.workflow.validate_video",
-        lambda *args, **kwargs: None,
+        fake_validate_video,
     )
 
 
