@@ -1,0 +1,334 @@
+from pathlib import Path
+from typing import Protocol
+
+from app.models.cloud_agent import (
+    CloudControlRequest,
+    CloudJobCheckpoint,
+    CloudJobRecord,
+    CloudJobStatus,
+)
+from app.services.cloud_agent.errors import HumanRequiredError, MediaValidationError
+from app.services.cloud_agent.job_store import CloudJobStore
+from app.services.cloud_agent.media_probe import validate_audio, validate_video
+from app.services.cloud_agent.storage import CloudJobStorage, JobPaths
+
+
+class PreflightClient(Protocol):
+    def ensure_ready(self, job_id: str) -> None: ...
+
+
+class TTSClient(Protocol):
+    def generate(self, job: CloudJobRecord, output_path: Path) -> Path: ...
+
+
+class FlowClient(Protocol):
+    def generate_and_download(self, job: CloudJobRecord, flow_dir: Path) -> list[Path]: ...
+
+
+class CanvaClient(Protocol):
+    def assemble_and_export(
+        self,
+        job: CloudJobRecord,
+        clips: list[Path],
+        audio: Path,
+        output: Path,
+    ) -> Path: ...
+
+
+_CHECKPOINT_RANK = {
+    CloudJobCheckpoint.NONE: 0,
+    CloudJobCheckpoint.PREFLIGHT_PASSED: 1,
+    CloudJobCheckpoint.TTS_READY: 2,
+    CloudJobCheckpoint.FLOW_READY: 3,
+    CloudJobCheckpoint.FINAL_VALIDATED: 4,
+    CloudJobCheckpoint.COMPLETED: 5,
+}
+
+
+class CloudAgentWorkflow:
+    def __init__(
+        self,
+        store: CloudJobStore,
+        storage: CloudJobStorage,
+        preflight: PreflightClient,
+        tts: TTSClient,
+        flow: FlowClient,
+        canva: CanvaClient,
+        *,
+        tts_min_duration: float,
+        tts_max_duration: float,
+        final_min_size_bytes: int,
+        expected_width: int,
+        expected_height: int,
+    ):
+        self.store = store
+        self.storage = storage
+        self.preflight = preflight
+        self.tts = tts
+        self.flow = flow
+        self.canva = canva
+        self.tts_min_duration = tts_min_duration
+        self.tts_max_duration = tts_max_duration
+        self.final_min_size_bytes = final_min_size_bytes
+        self.expected_width = expected_width
+        self.expected_height = expected_height
+
+    def _get_job(self, job_id: str) -> CloudJobRecord:
+        job = self.store.get_job(job_id)
+        if job is None:
+            raise KeyError(f"cloud job not found: {job_id}")
+        return job
+
+    @staticmethod
+    def _at_least(checkpoint: CloudJobCheckpoint, target: CloudJobCheckpoint) -> bool:
+        return _CHECKPOINT_RANK[checkpoint] >= _CHECKPOINT_RANK[target]
+
+    def _control_boundary(self, job_id: str) -> CloudJobRecord | None:
+        job = self._get_job(job_id)
+        if job.control_request is CloudControlRequest.PAUSE:
+            return self.store.patch_job(
+                job.id,
+                status=CloudJobStatus.PAUSED,
+                current_step="paused",
+                control_request=CloudControlRequest.NONE,
+            )
+        if job.control_request is CloudControlRequest.CANCEL:
+            return self.store.patch_job(
+                job.id,
+                status=CloudJobStatus.CANCELLED,
+                current_step="cancelled",
+                control_request=CloudControlRequest.NONE,
+            )
+        return None
+
+    def _validate_audio_checkpoint(self, checkpoint: CloudJobCheckpoint, paths: JobPaths) -> None:
+        if not paths.voice_file.is_file():
+            raise MediaValidationError(
+                f"checkpoint {checkpoint.value} requires audio artifact: {paths.voice_file}"
+            )
+        try:
+            validate_audio(
+                paths.voice_file,
+                min_duration=self.tts_min_duration,
+                max_duration=self.tts_max_duration,
+            )
+        except MediaValidationError as exc:
+            raise MediaValidationError(
+                f"checkpoint {checkpoint.value} has invalid audio artifact: {exc}"
+            ) from exc
+
+    def _validate_flow_checkpoint(self, checkpoint: CloudJobCheckpoint, paths: JobPaths) -> None:
+        missing = [path for path in paths.flow_files if not path.is_file()]
+        if missing:
+            raise MediaValidationError(
+                f"checkpoint {checkpoint.value} requires six Flow artifacts; missing: {missing[0]}"
+            )
+        for path in paths.flow_files:
+            try:
+                validate_video(
+                    path,
+                    min_size_bytes=1,
+                    expected_width=self.expected_width,
+                    expected_height=self.expected_height,
+                )
+            except MediaValidationError as exc:
+                raise MediaValidationError(
+                    f"checkpoint {checkpoint.value} has invalid Flow artifact {path.name}: {exc}"
+                ) from exc
+
+    def _validate_final_checkpoint(self, checkpoint: CloudJobCheckpoint, paths: JobPaths) -> None:
+        if not paths.final_file.is_file():
+            raise MediaValidationError(
+                f"checkpoint {checkpoint.value} requires final artifact: {paths.final_file}"
+            )
+        try:
+            validate_video(
+                paths.final_file,
+                require_audio=True,
+                min_size_bytes=self.final_min_size_bytes,
+                expected_width=self.expected_width,
+                expected_height=self.expected_height,
+            )
+        except MediaValidationError as exc:
+            raise MediaValidationError(
+                f"checkpoint {checkpoint.value} has invalid final artifact: {exc}"
+            ) from exc
+
+    def _validate_checkpoint_artifacts(self, job: CloudJobRecord, paths: JobPaths) -> None:
+        checkpoint = job.checkpoint
+        if self._at_least(checkpoint, CloudJobCheckpoint.TTS_READY):
+            self._validate_audio_checkpoint(checkpoint, paths)
+        if self._at_least(checkpoint, CloudJobCheckpoint.FLOW_READY):
+            self._validate_flow_checkpoint(checkpoint, paths)
+        if self._at_least(checkpoint, CloudJobCheckpoint.FINAL_VALIDATED):
+            self._validate_final_checkpoint(checkpoint, paths)
+
+    def run(self, job_id: str, *, worker_id: str) -> CloudJobRecord:
+        del worker_id  # Ownership is enforced by the durable lease in CloudJobStore.
+        job = self._get_job(job_id)
+        if job.status is CloudJobStatus.COMPLETED or job.checkpoint is CloudJobCheckpoint.COMPLETED:
+            return job
+
+        stopped = self._control_boundary(job.id)
+        if stopped is not None:
+            return stopped
+
+        paths = self.storage.write_inputs(job.id, job.script, job.master_prompt)
+
+        try:
+            job = self._get_job(job.id)
+            self._validate_checkpoint_artifacts(job, paths)
+
+            if job.checkpoint is CloudJobCheckpoint.NONE:
+                self.store.patch_job(
+                    job.id,
+                    status=CloudJobStatus.PREFLIGHT,
+                    current_step="preflight",
+                    progress=5,
+                    error_code="",
+                    error_message="",
+                )
+                self.preflight.ensure_ready(job.id)
+                job = self.store.patch_job(
+                    job.id,
+                    status=CloudJobStatus.PREFLIGHT_PASSED,
+                    checkpoint=CloudJobCheckpoint.PREFLIGHT_PASSED,
+                    current_step="preflight_passed",
+                    progress=10,
+                )
+                stopped = self._control_boundary(job.id)
+                if stopped is not None:
+                    return stopped
+
+            job = self._get_job(job.id)
+            if job.checkpoint is CloudJobCheckpoint.PREFLIGHT_PASSED:
+                self.store.patch_job(
+                    job.id,
+                    status=CloudJobStatus.TTS_GENERATING,
+                    current_step="tts_generating",
+                    progress=15,
+                )
+                self.tts.generate(job, paths.voice_file)
+                if not paths.voice_file.is_file():
+                    raise MediaValidationError("TTS step did not produce the canonical audio artifact")
+                validate_audio(
+                    paths.voice_file,
+                    min_duration=self.tts_min_duration,
+                    max_duration=self.tts_max_duration,
+                )
+                job = self.store.patch_job(
+                    job.id,
+                    status=CloudJobStatus.TTS_READY,
+                    checkpoint=CloudJobCheckpoint.TTS_READY,
+                    current_step="tts_ready",
+                    progress=30,
+                    voice_file=str(paths.voice_file),
+                )
+                stopped = self._control_boundary(job.id)
+                if stopped is not None:
+                    return stopped
+
+            job = self._get_job(job.id)
+            if job.checkpoint is CloudJobCheckpoint.TTS_READY:
+                self._validate_audio_checkpoint(job.checkpoint, paths)
+                self.store.patch_job(
+                    job.id,
+                    status=CloudJobStatus.FLOW_GENERATING,
+                    current_step="flow_generating",
+                    progress=35,
+                )
+                generated = self.flow.generate_and_download(job, paths.flow_dir)
+                if len(generated) != 6:
+                    raise MediaValidationError(
+                        f"Flow step must produce exactly six clips; got {len(generated)}"
+                    )
+                missing = [path for path in paths.flow_files if not path.is_file()]
+                if missing:
+                    raise MediaValidationError(
+                        f"Flow step did not produce canonical clip: {missing[0]}"
+                    )
+                for path in paths.flow_files:
+                    validate_video(
+                        path,
+                        min_size_bytes=1,
+                        expected_width=self.expected_width,
+                        expected_height=self.expected_height,
+                    )
+                job = self.store.patch_job(
+                    job.id,
+                    status=CloudJobStatus.FLOW_READY,
+                    checkpoint=CloudJobCheckpoint.FLOW_READY,
+                    current_step="flow_ready",
+                    progress=60,
+                )
+                stopped = self._control_boundary(job.id)
+                if stopped is not None:
+                    return stopped
+
+            job = self._get_job(job.id)
+            if job.checkpoint is CloudJobCheckpoint.FLOW_READY:
+                self._validate_audio_checkpoint(job.checkpoint, paths)
+                self._validate_flow_checkpoint(job.checkpoint, paths)
+                stopped = self._control_boundary(job.id)
+                if stopped is not None:
+                    return stopped
+                self.store.patch_job(
+                    job.id,
+                    status=CloudJobStatus.CANVA_UPLOADING,
+                    current_step="canva_assembling",
+                    progress=65,
+                )
+                self.canva.assemble_and_export(
+                    job,
+                    list(paths.flow_files),
+                    paths.voice_file,
+                    paths.final_file,
+                )
+                if not paths.final_file.is_file():
+                    raise MediaValidationError("Canva step did not produce the canonical final artifact")
+                self.store.patch_job(
+                    job.id,
+                    status=CloudJobStatus.VALIDATING,
+                    current_step="validating",
+                    progress=90,
+                )
+                validate_video(
+                    paths.final_file,
+                    require_audio=True,
+                    min_size_bytes=self.final_min_size_bytes,
+                    expected_width=self.expected_width,
+                    expected_height=self.expected_height,
+                )
+                job = self.store.patch_job(
+                    job.id,
+                    status=CloudJobStatus.FINAL_VALIDATED,
+                    checkpoint=CloudJobCheckpoint.FINAL_VALIDATED,
+                    current_step="final_validated",
+                    progress=95,
+                    final_video=str(paths.final_file),
+                )
+                stopped = self._control_boundary(job.id)
+                if stopped is not None:
+                    return stopped
+
+            job = self._get_job(job.id)
+            if job.checkpoint is CloudJobCheckpoint.FINAL_VALIDATED:
+                self._validate_final_checkpoint(job.checkpoint, paths)
+                return self.store.patch_job(
+                    job.id,
+                    status=CloudJobStatus.COMPLETED,
+                    checkpoint=CloudJobCheckpoint.COMPLETED,
+                    current_step="completed",
+                    progress=100,
+                    final_video=str(paths.final_file),
+                )
+
+            return self._get_job(job.id)
+        except HumanRequiredError as exc:
+            return self.store.patch_job(
+                job.id,
+                status=CloudJobStatus.HUMAN_REQUIRED,
+                current_step="human_required",
+                error_code="HUMAN_REQUIRED",
+                error_message=str(exc),
+            )
