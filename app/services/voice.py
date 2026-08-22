@@ -39,6 +39,12 @@ MINIMAX_TTS_MODELS = (
     "speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo",
     "speech-02-hd", "speech-02-turbo", "speech-01-hd", "speech-01-turbo",
 )
+GEMINI_TTS_DEFAULT_MODEL = "gemini-3.1-flash-tts-preview"
+GEMINI_TTS_MODELS = (
+    GEMINI_TTS_DEFAULT_MODEL,
+    "gemini-2.5-flash-preview-tts",
+    "gemini-2.5-pro-preview-tts",
+)
 GEMINI_TTS_VOICES = (
     ("Zephyr", "Bright"),
     ("Puck", "Upbeat"),
@@ -1162,7 +1168,13 @@ def gemini_tts(
             logger.error("Gemini API key is not set")
             return None
 
-        logger.info(f"start, voice name: {voice_name}, try: 1")
+        model = str(
+    config.app.get("gemini_tts_model", GEMINI_TTS_DEFAULT_MODEL)
+    or GEMINI_TTS_DEFAULT_MODEL
+).strip()
+logger.info(
+    f"start Gemini TTS, model: {model}, voice name: {voice_name}, try: 1"
+)
 
         generation_config = types.GenerateContentConfig(
             response_modalities=["AUDIO"],
@@ -1179,7 +1191,7 @@ def gemini_tts(
         # 请求结束后释放 HTTP 连接，同时保留原有 PCM 转码和字幕时间轴逻辑。
         with genai.Client(api_key=api_key) as client:
             response = client.models.generate_content(
-                model="gemini-2.5-flash-preview-tts",
+                model=model,
                 contents=text,
                 config=generation_config,
             )

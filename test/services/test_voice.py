@@ -572,7 +572,7 @@ class TestVoiceService(unittest.TestCase):
         self.assertEqual(sub_maker.offset[0][0], 0)
         self.assertLess(sub_maker.offset[0][1], sub_maker.offset[1][1])
         self.assertEqual(captured["client_kwargs"], {"api_key": "test-key"})
-        self.assertEqual(captured["model"], "gemini-2.5-flash-preview-tts")
+        self.assertEqual(captured["model"], vs.GEMINI_TTS_DEFAULT_MODEL)
         self.assertEqual(captured["contents"], text)
         self.assertEqual(captured["config"].response_modalities, ["AUDIO"])
         voice_config = captured["config"].speech_config.voice_config
