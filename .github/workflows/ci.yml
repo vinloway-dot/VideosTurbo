@@ -51,13 +51,26 @@ jobs:
         if: matrix.python-version == '3.11'
         run: uv sync --frozen --python ${{ matrix.python-version }}
 
-      - name: Verify Task 3A RED
+      - name: Verify Task 3A focused tests
         if: matrix.python-version == '3.11'
         run: >-
           uv run --no-sync python -X utf8 -m pytest -v
           test/services/cloud_agent/test_models.py
           test/services/cloud_agent/test_adaptive_config.py
           test/services/cloud_agent/test_job_store.py
+          test/services/test_config.py
+
+      - name: Verify Task 3A Ruff
+        if: matrix.python-version == '3.11'
+        run: >-
+          uv run --no-sync ruff check
+          app/models/cloud_agent.py
+          app/services/cloud_agent/job_store.py
+          app/config/config.py
+          test/services/cloud_agent/test_models.py
+          test/services/cloud_agent/test_adaptive_config.py
+          test/services/cloud_agent/test_job_store.py
+          test/services/test_config.py
 
       - name: Diagnose stale dependency lock
         if: matrix.python-version == '3.11'
