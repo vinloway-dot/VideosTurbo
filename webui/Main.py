@@ -213,8 +213,8 @@ def _saved_ui_choice(key, options, default):
     return default
 
 
-def _saved_ui_number(key, default, minimum, maximum, number_type=float):
-    """读取并限幅持久化数值，避免非法配置破坏 Streamlit slider。"""
+def _saved_ui_number(key, default, minimum, maximum=None, number_type=float):
+    """读取并限幅持久化数值，避免非法配置破坏 Streamlit 数值控件。"""
     try:
         saved = config.ui.get(key, default)
         if isinstance(saved, bool):
@@ -224,7 +224,8 @@ def _saved_ui_number(key, default, minimum, maximum, number_type=float):
             raise ValueError("non-finite value")
     except (TypeError, ValueError, OverflowError):
         value = default
-    return min(maximum, max(minimum, value))
+    value = max(minimum, value)
+    return value if maximum is None else min(maximum, value)
 
 
 def _saved_ui_bool(key, default):
@@ -3144,11 +3145,13 @@ def _render_script_settings(panel, params):
             params.target_words = st.number_input(
                 "Target Words",
                 min_value=40,
-                max_value=400,
-                value=_saved_ui_number("target_words", 130, 40, 400, int),
+                value=_saved_ui_number("target_words", 130, 40, None, int),
                 step=5,
                 key="target_words_input",
-                help="Approximate narration word count for the 60-second script.",
+                help=(
+                    "Approximate narration word count. "
+                    "Longer scripts automatically build longer timelines."
+                ),
             )
             _set_runtime_config("ui", "target_words", int(params.target_words))
 
@@ -3767,7 +3770,10 @@ def _get_voice_preview_provider_signature(tts_server: str) -> dict:
         }
     if tts_server == "gemini-tts":
         return {
-            "credential": _credential_signature(config.app.get("gemini_api_key", ""))
+            "model_id": config.app.get(
+                "gemini_tts_model", voice.GEMINI_TTS_DEFAULT_MODEL
+            ),
+            "credential": _credential_signature(config.app.get("gemini_api_key", "")),
         }
     if tts_server == "mimo-tts":
         return {"credential": _credential_signature(config.app.get("mimo_api_key", ""))}
@@ -4754,15 +4760,51 @@ def _render_audio_settings(panel, params):
             elif selected_tts_server == "minimax-tts":
                 filtered_voices = minimax_voices
             elif selected_tts_server == "elevenlabs":
-                # 音色列表位于 Key 输入框之前渲染，必须先统一恢复重连状态并读取
-                # 配置/环境变量，否则页面会用空 Key 加载并缓存空音色列表。
+                # 权限或网络错误不能永久缓存成空列表。否则用户在 ElevenLabs
+                # 后台修正 Key 权限后，同一 Streamlit session 仍会一直看到
+                # “No voices available” 且不会再次请求远端目录。
                 saved_elevenlabs_api_key = _sync_elevenlabs_api_key_input()
                 cache_key = f"elevenlabs_voices_{saved_elevenlabs_api_key}"
-                if cache_key not in st.session_state:
-                    st.session_state[cache_key] = voice.get_elevenlabs_voices(
-                        saved_elevenlabs_api_key
-                    )
-                filtered_voices = st.session_state[cache_key]
+                refresh_elevenlabs_voices = st.button(
+                    tr("Refresh ElevenLabs Voices"),
+                    key="refresh_elevenlabs_voices_button",
+                    icon=":material/refresh:",
+                    use_container_width=True,
+                    disabled=not bool(saved_elevenlabs_api_key),
+                )
+                if refresh_elevenlabs_voices:
+                    st.session_state.pop(cache_key, None)
+
+                if cache_key in st.session_state:
+                    filtered_voices = st.session_state[cache_key]
+                elif saved_elevenlabs_api_key:
+                    try:
+                        loaded_elevenlabs_voices = voice.get_elevenlabs_voices(
+                            saved_elevenlabs_api_key,
+                            raise_on_error=True,
+                        )
+                    except voice.ElevenLabsVoiceCatalogError as exc:
+                        logger.warning(f"load ElevenLabs voices failed: {exc}")
+                        st.error(
+                            tr("ElevenLabs Voices Load Failed").format(
+                                error=str(exc)
+                            )
+                        )
+                        filtered_voices = []
+                    else:
+                        filtered_voices = loaded_elevenlabs_voices
+                        if loaded_elevenlabs_voices:
+                            st.session_state[cache_key] = loaded_elevenlabs_voices
+                            if refresh_elevenlabs_voices:
+                                st.success(
+                                    tr("ElevenLabs Voices Loaded").format(
+                                        count=len(loaded_elevenlabs_voices)
+                                    )
+                                )
+                        else:
+                            st.warning(tr("ElevenLabs Voices Empty"))
+                else:
+                    filtered_voices = []
             elif selected_tts_server == "chatterbox":
                 # 自托管 Chatterbox 服务的预置音色（来自 [chatterbox] voices 配置）
                 _sync_chatterbox_config_from_session_state()
@@ -4914,6 +4956,22 @@ def _render_audio_settings(panel, params):
                     key="gemini_tts_api_key_input",
                 )
                 _set_runtime_config("app", "gemini_api_key", gemini_tts_api_key)
+
+                saved_gemini_tts_model = str(
+                    config.app.get(
+                        "gemini_tts_model", voice.GEMINI_TTS_DEFAULT_MODEL
+                    )
+                    or voice.GEMINI_TTS_DEFAULT_MODEL
+                ).strip()
+                if saved_gemini_tts_model not in voice.GEMINI_TTS_MODELS:
+                    saved_gemini_tts_model = voice.GEMINI_TTS_DEFAULT_MODEL
+                gemini_tts_model = stable_selectbox(
+                    "Gemini TTS Model",
+                    options=voice.GEMINI_TTS_MODELS,
+                    default_value=saved_gemini_tts_model,
+                    key="gemini_tts_model_select",
+                )
+                _set_runtime_config("app", "gemini_tts_model", gemini_tts_model)
 
             # 当选择硅基流动时，显示API key输入框和说明信息
             if tts_mode_enabled and (

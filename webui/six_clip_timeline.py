@@ -13,6 +13,7 @@ from app.utils import utils
 
 PLAN_SESSION_KEY = "six_clip_plan"
 MEDIA_SESSION_ID_KEY = "six_clip_media_session_id"
+EDIT_SEGMENT_SESSION_KEY = "six_clip_edit_segment_index"
 
 
 def _widget_key(index: int, field: str) -> str:
@@ -198,8 +199,7 @@ def render_six_clip_sections(
     st.subheader("Section 2 — Timeline Clips")
     st.caption(
         f"{len(plan.segments)} clips / {plan.timeline_duration_sec:g} seconds. "
-        "Each card owns its displayed range. Add a direct media URL or upload "
-        "an image/video for every clip before rendering."
+        "Select a clip to edit its text and media."
     )
 
     _, page_count = timeline_page(plan, page=1)
@@ -221,28 +221,73 @@ def render_six_clip_sections(
         st.caption(f"Page {selected_page} of {page_count}")
     visible_segments, _ = timeline_page(plan, page=selected_page)
 
+    active_index = st.session_state.get(EDIT_SEGMENT_SESSION_KEY)
+    visible_indexes = {segment.index for segment in visible_segments}
+    if active_index not in visible_indexes:
+        active_index = None
+        st.session_state.pop(EDIT_SEGMENT_SESSION_KEY, None)
+
+    card_columns = st.columns(3)
+    for position, segment in enumerate(visible_segments):
+        index = segment.index
+        if position > 0 and position % 3 == 0:
+            card_columns = st.columns(3)
+        with card_columns[position % 3]:
+            with st.container(border=True):
+                ready = bool(
+                    segment.media_path
+                    and Path(segment.media_path).is_file()
+                    and segment.media_kind in {"video", "image"}
+                )
+                status = "✓ Media Ready" if ready else "⚠ Media Missing"
+                st.markdown(f"**CLIP {index}**")
+                st.caption(
+                    f"{segment.start_sec:g}–{segment.end_sec:g} sec · {status}"
+                )
+                if segment.title:
+                    st.caption(segment.title)
+                if st.button(
+                    "Edit Clip",
+                    key=_widget_key(index, "edit"),
+                    use_container_width=True,
+                    type="primary" if active_index == index else "secondary",
+                ):
+                    st.session_state[EDIT_SEGMENT_SESSION_KEY] = index
+                    st.rerun()
+
     updated_segments: dict[int, SixClipSegment] = {}
     session_dir = _media_session_dir()
-    for segment in visible_segments:
-        index = segment.index
+    active_index = st.session_state.get(EDIT_SEGMENT_SESSION_KEY)
+    active_segment = next(
+        (segment for segment in visible_segments if segment.index == active_index),
+        None,
+    )
+
+    if active_segment is not None:
+        index = active_segment.index
         title_key = _widget_key(index, "title")
         narration_key = _widget_key(index, "narration")
         prompt_key = _widget_key(index, "prompt")
-        st.session_state.setdefault(title_key, segment.title)
-        st.session_state.setdefault(narration_key, segment.narration_context)
-        st.session_state.setdefault(prompt_key, segment.video_prompt)
+        st.session_state.setdefault(title_key, active_segment.title)
+        st.session_state.setdefault(
+            narration_key,
+            active_segment.narration_context,
+        )
+        st.session_state.setdefault(prompt_key, active_segment.video_prompt)
 
         with st.container(border=True):
-            ready = bool(
-                segment.media_path
-                and Path(segment.media_path).is_file()
-                and segment.media_kind in {"video", "image"}
+            header_col, close_col = st.columns([5, 1])
+            header_col.markdown(
+                f"### Editing CLIP {index} — "
+                f"{active_segment.start_sec:g}–{active_segment.end_sec:g} seconds"
             )
-            status = "✓ Media Ready" if ready else "⚠ Media Missing"
-            st.markdown(
-                f"### CLIP {index} — {segment.start_sec}–{segment.end_sec} seconds  "
-                f"\n{status}"
-            )
+            if close_col.button(
+                "Close",
+                key=_widget_key(index, "close_editor"),
+                use_container_width=True,
+            ):
+                st.session_state.pop(EDIT_SEGMENT_SESSION_KEY, None)
+                st.rerun()
 
             title = st.text_input(
                 "Clip Title",
@@ -250,12 +295,12 @@ def render_six_clip_sections(
             ).strip()
             narration = st.text_area(
                 "Narration Context",
-                height=120,
+                height=90,
                 key=narration_key,
             ).strip()
             prompt = st.text_area(
                 "Video Prompt (English)",
-                height=260,
+                height=140,
                 key=prompt_key,
             ).strip()
 
@@ -265,8 +310,8 @@ def render_six_clip_sections(
                 horizontal=True,
                 key=_widget_key(index, "media_mode"),
             )
-            current_kind = segment.media_kind
-            current_path = segment.media_path
+            current_kind = active_segment.media_kind
+            current_path = active_segment.media_path
 
             if media_mode == "URL":
                 media_url = st.text_input(
@@ -369,17 +414,15 @@ def render_six_clip_sections(
                     st.rerun()
                 info_col.caption(f"Local imported copy: {Path(current_path).name}")
 
-            updated_segments[index] = (
-                SixClipSegment(
-                    index=index,
-                    start_sec=segment.start_sec,
-                    end_sec=segment.end_sec,
-                    title=title,
-                    narration_context=narration,
-                    video_prompt=prompt,
-                    media_kind=current_kind,
-                    media_path=current_path,
-                )
+            updated_segments[index] = SixClipSegment(
+                index=index,
+                start_sec=active_segment.start_sec,
+                end_sec=active_segment.end_sec,
+                title=title,
+                narration_context=narration,
+                video_prompt=prompt,
+                media_kind=current_kind,
+                media_path=current_path,
             )
 
     plan = SixClipPlan(
@@ -409,12 +452,15 @@ def render_six_clip_sections(
     st.subheader("Section 3 — Master Prompt")
     st.caption(
         "This is rebuilt from the current Section 2 narration and video prompts. "
-        "Each copyable batch contains at most six absolute timeline clips."
+        "Open a batch only when you need to copy or review it."
     )
     for batch_index, prompt in enumerate(
         build_master_prompt_batches(plan),
         start=1,
     ):
-        st.caption(f"Prompt batch {batch_index}")
-        st.code(prompt, language=None, wrap_lines=True)
+        with st.expander(
+            f"Master Prompt — Batch {batch_index}",
+            expanded=False,
+        ):
+            st.code(prompt, language=None, wrap_lines=True)
     return plan

@@ -43,7 +43,7 @@ class SixClipSegment(BaseModel):
 
 
 class SixClipPlan(BaseModel):
-    target_words: int = Field(default=130, ge=40, le=400)
+    target_words: int = Field(default=130, ge=40)
     narration_duration_sec: float = Field(
         default=60.0,
         gt=0,

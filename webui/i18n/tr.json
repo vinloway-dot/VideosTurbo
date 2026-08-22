@@ -297,6 +297,10 @@
     "Please Enter the Coverr API Key": "Lütfen **Coverr API Anahtarını** girin",
     "Video Encoder": "Video Kodlayıcı",
     "Default Video Encoder": "Varsayılan (Önerilen)",
-    "Video Encoder Help": "Gelişmiş seçenek. Varsayılan, uygulamanın kararlı kodlayıcı politikasını izler; şu anda libx264 kullanılır. Donanım kodlayıcı kullanılamıyorsa uygulama otomatik olarak libx264'e döner."
+    "Video Encoder Help": "Gelişmiş seçenek. Varsayılan, uygulamanın kararlı kodlayıcı politikasını izler; şu anda libx264 kullanılır. Donanım kodlayıcı kullanılamıyorsa uygulama otomatik olarak libx264'e döner.",
+    "Refresh ElevenLabs Voices": "Refresh ElevenLabs Voices",
+    "ElevenLabs Voices Load Failed": "Unable to load ElevenLabs voices: {error}",
+    "ElevenLabs Voices Loaded": "Loaded {count} ElevenLabs voices.",
+    "ElevenLabs Voices Empty": "ElevenLabs returned 0 voices for this account. Add a voice to My Voices, or check the account plan and voice permissions."
   }
 }

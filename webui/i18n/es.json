@@ -297,6 +297,10 @@
     "Please Enter the Coverr API Key": "Introduce la **API Key de Coverr**",
     "Video Encoder": "Codificador de vídeo",
     "Default Video Encoder": "Predeterminado (recomendado)",
-    "Video Encoder Help": "Opción avanzada. Predeterminado sigue la política estable de la aplicación, actualmente libx264. Si un codificador de hardware no está disponible, la aplicación vuelve automáticamente a libx264."
+    "Video Encoder Help": "Opción avanzada. Predeterminado sigue la política estable de la aplicación, actualmente libx264. Si un codificador de hardware no está disponible, la aplicación vuelve automáticamente a libx264.",
+    "Refresh ElevenLabs Voices": "Refresh ElevenLabs Voices",
+    "ElevenLabs Voices Load Failed": "Unable to load ElevenLabs voices: {error}",
+    "ElevenLabs Voices Loaded": "Loaded {count} ElevenLabs voices.",
+    "ElevenLabs Voices Empty": "ElevenLabs returned 0 voices for this account. Add a voice to My Voices, or check the account plan and voice permissions."
   }
 }

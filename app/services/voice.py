@@ -39,6 +39,12 @@ MINIMAX_TTS_MODELS = (
     "speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo",
     "speech-02-hd", "speech-02-turbo", "speech-01-hd", "speech-01-turbo",
 )
+GEMINI_TTS_DEFAULT_MODEL = "gemini-3.1-flash-tts-preview"
+GEMINI_TTS_MODELS = (
+    GEMINI_TTS_DEFAULT_MODEL,
+    "gemini-2.5-flash-preview-tts",
+    "gemini-2.5-pro-preview-tts",
+)
 GEMINI_TTS_VOICES = (
     ("Zephyr", "Bright"),
     ("Puck", "Upbeat"),
@@ -173,18 +179,33 @@ def get_minimax_voices(voice_id: str | None = None) -> list[str]:
     return [f"minimax:{voice_id}"]
 
 
-def get_elevenlabs_voices(api_key: str) -> list[str]:
+class ElevenLabsVoiceCatalogError(RuntimeError):
+    """Raised when the ElevenLabs voice catalog cannot be loaded."""
+
+
+def get_elevenlabs_voices(
+    api_key: str,
+    *,
+    raise_on_error: bool = False,
+) -> list[str]:
     if not api_key:
+        message = "ElevenLabs API key is not configured"
+        if raise_on_error:
+            raise ElevenLabsVoiceCatalogError(message)
         return []
     try:
         url = "https://api.elevenlabs.io/v2/voices"
-        params = {"is_favorite": "true", "page_size": 100}
+        params = {"page_size": 100}
         headers = {"xi-api-key": api_key}
         response = requests.get(url, params=params, headers=headers, timeout=10)
         if response.status_code != 200:
-            logger.warning(
-                f"ElevenLabs voices fetch failed with status {response.status_code}: {response.text}"
+            message = (
+                f"ElevenLabs voices request failed (HTTP {response.status_code}): "
+                f"{response.text}"
             )
+            logger.warning(message)
+            if raise_on_error:
+                raise ElevenLabsVoiceCatalogError(message)
             return []
         data = response.json()
         voices = data.get("voices", [])
@@ -193,8 +214,13 @@ def get_elevenlabs_voices(api_key: str) -> list[str]:
             for v in voices
             if v.get("voice_id") and v.get("name") and v.get("status") != "disabled"
         ]
+    except ElevenLabsVoiceCatalogError:
+        raise
     except Exception as e:
-        logger.warning(f"ElevenLabs voices fetch failed: {str(e)}")
+        message = f"ElevenLabs voices request failed: {str(e)}"
+        logger.warning(message)
+        if raise_on_error:
+            raise ElevenLabsVoiceCatalogError(message) from e
         return []
 
 
@@ -1142,7 +1168,13 @@ def gemini_tts(
             logger.error("Gemini API key is not set")
             return None
 
-        logger.info(f"start, voice name: {voice_name}, try: 1")
+        model = str(
+            config.app.get("gemini_tts_model", GEMINI_TTS_DEFAULT_MODEL)
+            or GEMINI_TTS_DEFAULT_MODEL
+        ).strip()
+        logger.info(
+            f"start Gemini TTS, model: {model}, voice name: {voice_name}, try: 1"
+        )
 
         generation_config = types.GenerateContentConfig(
             response_modalities=["AUDIO"],
@@ -1159,7 +1191,7 @@ def gemini_tts(
         # 请求结束后释放 HTTP 连接，同时保留原有 PCM 转码和字幕时间轴逻辑。
         with genai.Client(api_key=api_key) as client:
             response = client.models.generate_content(
-                model="gemini-2.5-flash-preview-tts",
+                model=model,
                 contents=text,
                 config=generation_config,
             )
