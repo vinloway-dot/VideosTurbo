@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from app.models.schema import VideoParams
 from app.models.six_clip import SixClipPlan, SixClipSegment
 from app.services.six_clip_plan import build_script_generation_requirements
 
@@ -22,14 +23,19 @@ def _segments() -> list[SixClipSegment]:
 
 
 def test_target_words_accepts_values_above_previous_400_limit():
+    params = VideoParams(video_subject="test", target_words=100_000)
     plan = SixClipPlan(target_words=100_000, segments=_segments())
 
+    assert params.target_words == 100_000
     assert plan.target_words == 100_000
     requirements = build_script_generation_requirements(100_000)
     assert "100000" in requirements
 
 
 def test_target_words_still_rejects_values_below_minimum():
+    with pytest.raises(ValidationError):
+        VideoParams(video_subject="test", target_words=39)
+
     with pytest.raises(ValidationError):
         SixClipPlan(target_words=39, segments=_segments())
 
