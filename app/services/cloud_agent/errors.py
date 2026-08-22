@@ -1,1 +1,5 @@
-"""Typed Cloud Agent errors are defined by the tasks that own their behavior."""
+"""Typed errors for Cloud Agent workflow boundaries."""
+
+
+class MediaValidationError(ValueError):
+    """Raised when a produced media artifact fails validation."""
