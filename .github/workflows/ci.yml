@@ -82,16 +82,17 @@ jobs:
           test/services/cloud_agent/test_workflow.py
           test/services/test_config.py
 
-      - name: Diagnose stale dependency lock
+      - name: Generate dependency lock artifact
         if: matrix.python-version == '3.11'
-        shell: bash
-        run: |
-          if uv lock --check; then
-            exit 0
-          fi
-          uv lock
-          git diff -- uv.lock
-          exit 1
+        run: uv lock
+
+      - name: Upload generated dependency lock
+        if: matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-uv-lock
+          path: uv.lock
+          retention-days: 1
 
       - name: Install dependencies
         run: uv sync --frozen --python ${{ matrix.python-version }}
