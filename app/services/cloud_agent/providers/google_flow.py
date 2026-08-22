@@ -1,4 +1,5 @@
 from app.models.cloud_agent import ServiceSessionStatus
+from app.services.cloud_agent.providers._browser_session import BrowserSessionProvider
 from app.services.cloud_agent.providers._session_detection import (
     classify_security_challenge,
 )
@@ -26,3 +27,13 @@ def classify_google_flow_session(*, url: str, html: str) -> ServiceSessionStatus
         return ServiceSessionStatus.READY
 
     return ServiceSessionStatus.ERROR
+
+
+class GoogleFlowSessionProvider(BrowserSessionProvider):
+    def __init__(self, browser, *, service_url: str) -> None:
+        super().__init__(
+            browser,
+            service="google_flow",
+            service_url=service_url,
+            classifier=classify_google_flow_session,
+        )

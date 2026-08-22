@@ -7,9 +7,19 @@ from app.services.cloud_agent.errors import HumanRequiredError
 
 
 class SessionProvider(Protocol):
-    def check_session(self, *, headed: bool = False) -> SessionCheckResult: ...
+    def check_session(
+        self,
+        *,
+        headed: bool = False,
+        job_id: str = "",
+    ) -> SessionCheckResult: ...
 
-    def repair_session(self, *, headed: bool = False) -> SessionCheckResult: ...
+    def repair_session(
+        self,
+        *,
+        headed: bool = False,
+        job_id: str = "",
+    ) -> SessionCheckResult: ...
 
 
 class SessionManager:
@@ -30,17 +40,17 @@ class SessionManager:
         job_id: str,
     ) -> SessionCheckResult:
         provider = self._provider(service)
-        initial = provider.check_session(headed=False)
+        initial = provider.check_session(headed=False, job_id=job_id)
         if initial.status is ServiceSessionStatus.READY:
             return initial
 
         if initial.status is ServiceSessionStatus.SESSION_EXPIRED:
-            repair = provider.repair_session(headed=False)
+            repair = provider.repair_session(headed=False, job_id=job_id)
             if repair.status in {
                 ServiceSessionStatus.AUTO_RELOGIN,
                 ServiceSessionStatus.READY,
             }:
-                verified = provider.check_session(headed=False)
+                verified = provider.check_session(headed=False, job_id=job_id)
                 if verified.status is ServiceSessionStatus.READY:
                     return verified
                 self._raise_unready(service, job_id, verified)
