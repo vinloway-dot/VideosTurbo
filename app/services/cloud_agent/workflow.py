@@ -19,7 +19,7 @@ from app.services.cloud_agent.timing import calculate_adaptive_timing
 
 
 class PreflightClient(Protocol):
-    def ensure_ready(self, job_id: str) -> None: ...
+    def ensure_ready(self, job_id: str, *, worker_id: str) -> None: ...
 
 
 class TTSClient(Protocol):
@@ -195,7 +195,6 @@ class CloudAgentWorkflow:
             self._validate_final_checkpoint(job, paths)
 
     def run(self, job_id: str, *, worker_id: str) -> CloudJobRecord:
-        del worker_id  # Ownership is enforced by the durable lease in CloudJobStore.
         job = self._get_job(job_id)
         if job.status is CloudJobStatus.COMPLETED or job.checkpoint is CloudJobCheckpoint.COMPLETED:
             return job
@@ -219,7 +218,7 @@ class CloudAgentWorkflow:
                     error_code="",
                     error_message="",
                 )
-                self.preflight.ensure_ready(job.id)
+                self.preflight.ensure_ready(job.id, worker_id=worker_id)
                 job = self.store.patch_job(
                     job.id,
                     status=CloudJobStatus.PREFLIGHT_PASSED,
