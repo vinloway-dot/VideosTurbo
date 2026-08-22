@@ -1,12 +1,23 @@
+import shutil
+from pathlib import Path
+
 from fastapi import Depends, Request
+from fastapi.responses import FileResponse
 
 from app.config import config
 from app.controllers.v1.base import new_router
-from app.models.cloud_agent import CloudControlRequest, CloudJobCreate, CloudJobStatus
+from app.models.cloud_agent import (
+    CloudControlRequest,
+    CloudJobCheckpoint,
+    CloudJobCreate,
+    CloudJobStatus,
+)
 from app.models.exception import HttpException
 from app.services.cloud_agent.job_store import CloudJobStore
+from app.services.cloud_agent.preflight import _probe_storage_writable
 from app.services.cloud_agent.storage import CloudJobStorage
 from app.utils import utils
+from app.utils.file_security import resolve_path_within_directory
 
 
 router = new_router()
@@ -32,6 +43,10 @@ _TERMINAL_JOB_STATUSES = {
     CloudJobStatus.COMPLETED,
     CloudJobStatus.FAILED,
     CloudJobStatus.CANCELLED,
+}
+_FINAL_CHECKPOINTS = {
+    CloudJobCheckpoint.FINAL_VALIDATED,
+    CloudJobCheckpoint.COMPLETED,
 }
 
 
@@ -71,9 +86,37 @@ def _invalid_transition(job_id: str, action: str, status: CloudJobStatus) -> Non
 
 
 @router.get("/cloud-agent/health")
-def get_cloud_agent_health(request: Request):
+def get_cloud_agent_health(
+    request: Request,
+    store: CloudJobStore = Depends(get_cloud_job_store),
+    storage: CloudJobStorage = Depends(get_cloud_job_storage),
+):
     del request
-    return _not_implemented()
+    storage_root = Path(storage.root)
+    storage_writable = _probe_storage_writable(storage_root)
+    free_space_bytes = 0
+    if storage_writable:
+        try:
+            free_space_bytes = int(shutil.disk_usage(storage_root).free)
+        except OSError:
+            storage_writable = False
+
+    required_free_bytes = int(
+        float(config.app["cloud_agent_min_free_disk_gb"]) * 1024**3
+    )
+    worker_last_seen = store.get_worker_last_seen()
+    return utils.get_response(
+        200,
+        {
+            "enabled": bool(config.app["cloud_agent_enabled"]),
+            "worker_last_seen": worker_last_seen or "",
+            "worker_online": bool(worker_last_seen),
+            "storage_writable": storage_writable,
+            "free_space_bytes": free_space_bytes,
+            "free_space_ok": storage_writable
+            and free_space_bytes >= required_free_bytes,
+        },
+    )
 
 
 @router.post("/cloud-agent/jobs")
@@ -183,9 +226,65 @@ def cancel_cloud_agent_job(
 
 
 @router.get("/cloud-agent/jobs/{job_id}/final")
-def get_cloud_agent_final(job_id: str, request: Request):
-    del job_id, request
-    return _not_implemented()
+def get_cloud_agent_final(
+    job_id: str,
+    request: Request,
+    store: CloudJobStore = Depends(get_cloud_job_store),
+    storage: CloudJobStorage = Depends(get_cloud_job_storage),
+):
+    del request
+    job = _require_job(store, job_id)
+    if job.checkpoint not in _FINAL_CHECKPOINTS:
+        raise HttpException(
+            task_id=job.id,
+            status_code=409,
+            message="cloud agent final video has not passed final validation",
+        )
+
+    paths = storage.prepare(job.id)
+    if not job.final_video:
+        raise HttpException(
+            task_id=job.id,
+            status_code=404,
+            message="cloud agent final video is unavailable",
+        )
+
+    expected = paths.final_file.resolve()
+    recorded = Path(job.final_video).resolve()
+    if recorded != expected:
+        raise HttpException(
+            task_id=job.id,
+            status_code=409,
+            message="cloud agent final video path does not match the job artifact",
+        )
+
+    try:
+        resolved = Path(
+            resolve_path_within_directory(
+                str(paths.job_dir),
+                str(paths.final_file),
+                require_file=True,
+            )
+        )
+    except ValueError as exc:
+        raise HttpException(
+            task_id=job.id,
+            status_code=404,
+            message="cloud agent final video is unavailable",
+        ) from exc
+
+    if resolved != expected:
+        raise HttpException(
+            task_id=job.id,
+            status_code=409,
+            message="cloud agent final video path is outside the job directory",
+        )
+
+    return FileResponse(
+        path=str(resolved),
+        media_type="video/mp4",
+        filename=f"{job.id}.mp4",
+    )
 
 
 @router.post("/cloud-agent/sessions/check")
