@@ -12,8 +12,9 @@ from streamlit.testing.v1 import AppTest
 
 from app.config import config
 from app.models.schema import VideoParams
+from app.models.six_clip import SixClipPlan, SixClipSegment
 from app.services import task as tm
-from app.services import llm, six_clip_plan
+from app.services import llm, six_clip_media, six_clip_plan
 from app.services import voice
 from app.services import webui_task
 from app.utils import utils
@@ -205,6 +206,48 @@ def test_short_sample_does_not_replace_confirmed_full_narration_cache():
         app.session_state["voice_preview_audio"]["fingerprint"]
         == confirmed_fingerprint
     )
+
+
+def test_stale_timeline_blocks_webui_submission_before_media_copy(tmp_path):
+    media_file = tmp_path / "clip.mp4"
+    media_file.write_bytes(b"media")
+    plan = SixClipPlan(
+        target_words=130,
+        narration_fingerprint="stale-fingerprint",
+        segments=[
+            SixClipSegment(
+                index=index,
+                start_sec=(index - 1) * 10,
+                end_sec=index * 10,
+                media_kind="video",
+                media_path=str(media_file),
+            )
+            for index in range(1, 7)
+        ],
+    )
+    test_ui = dict(
+        config.ui,
+        voice_mode="tts",
+        tts_server="azure-tts-v1",
+        voice_name="en-US-JennyNeural-Female",
+    )
+
+    with (
+        patch.object(config, "ui", test_ui),
+        patch.object(config, "save_config"),
+        patch.object(six_clip_media, "materialize_plan_for_task") as materialize,
+        patch.object(webui_task, "submit_generation") as submit,
+    ):
+        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
+        app.session_state["ui_language"] = "en"
+        app.session_state["video_script"] = "Edited narration."
+        app.session_state["six_clip_plan"] = plan.model_dump(mode="json")
+        app.run()
+        _button_by_key(app, "generate_video_button").click().run()
+
+    materialize.assert_not_called()
+    submit.assert_not_called()
+    assert any("Confirm/Rebuild Timeline" in item.value for item in app.error)
 
 
 def test_duration_estimator_is_local_and_respects_voice_rate():
@@ -517,7 +560,7 @@ def test_task_reuses_matching_full_preview_without_calling_tts():
     finally:
         shutil.rmtree(task_dir, ignore_errors=True)
 
-    assert result == (str(audio_file.resolve()), 9, sub_maker)
+    assert result == (str(audio_file.resolve()), 8.2, sub_maker)
     synthesize.assert_not_called()
 
 

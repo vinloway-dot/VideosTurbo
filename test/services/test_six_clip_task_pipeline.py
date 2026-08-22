@@ -1,13 +1,21 @@
 from pathlib import Path
 
+import pytest
+
 from app.models.schema import VideoParams
 from app.models.six_clip import SixClipPlan, SixClipSegment
-from app.services import task
+from app.services import six_clip_plan, task
 
 
-def _plan(tmp_path: Path, *, ready: bool = True) -> SixClipPlan:
+def _plan(
+    tmp_path: Path,
+    *,
+    ready: bool = True,
+    duration: float = 60.0,
+) -> SixClipPlan:
     segments = []
-    for index in range(1, 7):
+    ranges = six_clip_plan.build_timeline_ranges(duration)
+    for index, (start, end) in enumerate(ranges, start=1):
         media_path = ""
         media_kind = ""
         if ready:
@@ -18,8 +26,8 @@ def _plan(tmp_path: Path, *, ready: bool = True) -> SixClipPlan:
         segments.append(
             SixClipSegment(
                 index=index,
-                start_sec=(index - 1) * 10,
-                end_sec=index * 10,
+                start_sec=start,
+                end_sec=end,
                 title=f"Clip {index}",
                 narration_context="n",
                 video_prompt="p",
@@ -27,7 +35,13 @@ def _plan(tmp_path: Path, *, ready: bool = True) -> SixClipPlan:
                 media_path=media_path,
             )
         )
-    return SixClipPlan(target_words=130, segments=segments)
+    return SixClipPlan(
+        target_words=300 if duration > 60 else 130,
+        narration_duration_sec=duration,
+        timeline_duration_sec=max(60.0, duration),
+        narration_fingerprint="voice-fingerprint" if duration > 60 else "",
+        segments=segments,
+    )
 
 
 def _params(plan: SixClipPlan) -> VideoParams:
@@ -73,25 +87,28 @@ def test_missing_media_fails_before_script_or_tts(monkeypatch, tmp_path):
     assert failures
 
 
-def test_six_clip_mode_rejects_narration_longer_than_sixty_seconds(
+def test_backend_rejects_plan_audio_range_mismatch_before_subtitle(
     monkeypatch, tmp_path
 ):
     _stub_state(monkeypatch)
-    params = _params(_plan(tmp_path, ready=True))
+    params = _params(_plan(tmp_path, ready=True, duration=63.0))
     failures = []
+    audio_file = tmp_path / "audio.mp3"
+    audio_file.write_bytes(b"audio")
 
     monkeypatch.setattr(task, "generate_script", lambda *args, **kwargs: "Narration")
     monkeypatch.setattr(task, "save_script_data", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         task,
         "generate_audio",
-        lambda *args, **kwargs: ("audio.mp3", 61.2, None),
+        lambda *args, **kwargs: (str(audio_file), 68.0, None),
     )
+    monkeypatch.setattr(task.voice, "get_audio_duration", lambda _: 68.0)
     monkeypatch.setattr(
         task,
         "generate_subtitle",
         lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("subtitle generation must not run after overlong narration")
+            AssertionError("subtitle must not run after timeline mismatch")
         ),
     )
     monkeypatch.setattr(
@@ -104,19 +121,21 @@ def test_six_clip_mode_rejects_narration_longer_than_sixty_seconds(
     result = task._run_pipeline("task-2", params)
 
     assert result["failed_stage"] == "audio"
-    assert "60" in result["error"]
-    assert "Target Words" in result["error"]
+    assert "confirm/rebuild timeline" in result["error"].lower()
     assert failures
 
 
-def test_six_clip_mode_bypasses_stock_downloader_and_uses_fixed_renderer(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(("duration", "count"), [(63.0, 7), (127.0, 13)])
+def test_dynamic_timeline_bypasses_stock_and_uses_all_clips(
+    monkeypatch, tmp_path, duration, count
 ):
     _stub_state(monkeypatch)
-    params = _params(_plan(tmp_path, ready=True))
+    params = _params(_plan(tmp_path, ready=True, duration=duration))
     combined = tmp_path / "combined-1.mp4"
     combined.write_bytes(b"combined")
-    prepared = [str(tmp_path / f"prepared-{i}.mp4") for i in range(1, 7)]
+    audio_file = tmp_path / "audio.mp3"
+    audio_file.write_bytes(b"audio")
+    prepared = [str(tmp_path / f"prepared-{i}.mp4") for i in range(1, count + 1)]
     for value in prepared:
         Path(value).write_bytes(b"prepared")
     calls = []
@@ -126,8 +145,9 @@ def test_six_clip_mode_bypasses_stock_downloader_and_uses_fixed_renderer(
     monkeypatch.setattr(
         task,
         "generate_audio",
-        lambda *args, **kwargs: ("audio.mp3", 50, None),
+        lambda *args, **kwargs: (str(audio_file), duration, None),
     )
+    monkeypatch.setattr(task.voice, "get_audio_duration", lambda _: duration)
     monkeypatch.setattr(task, "generate_subtitle", lambda *args, **kwargs: "")
     monkeypatch.setattr(
         task,
@@ -144,7 +164,10 @@ def test_six_clip_mode_bypasses_stock_downloader_and_uses_fixed_renderer(
     monkeypatch.setattr(
         task.six_clip_render,
         "concat_six_clip_timeline",
-        lambda *args, **kwargs: calls.append("concat") or str(combined),
+        lambda *args, **kwargs: calls.append(
+            ("concat", kwargs["timeline_duration_sec"])
+        )
+        or str(combined),
     )
     monkeypatch.setattr(
         task,
@@ -163,5 +186,5 @@ def test_six_clip_mode_bypasses_stock_downloader_and_uses_fixed_renderer(
 
     result = task._run_pipeline("task-3", params)
 
-    assert calls == ["prepare", "concat"]
+    assert calls == ["prepare", ("concat", duration)]
     assert result["materials"] == prepared

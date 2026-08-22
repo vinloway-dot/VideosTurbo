@@ -21,6 +21,7 @@ from app.services import (
     loomloom,
     material,
     six_clip_media,
+    six_clip_plan,
     six_clip_render,
     sonilo,
     subtitle,
@@ -413,6 +414,8 @@ def _resolve_reusable_voice_preview(
         "voice_rate": float(params.voice_rate),
         "voice_volume": float(params.voice_volume),
     }
+    if params.six_clip_mode and params.six_clip_plan is not None:
+        expected_values["fingerprint"] = params.six_clip_plan.narration_fingerprint
     if any(
         voice_preview.get(key) != value for key, value in expected_values.items()
     ):
@@ -448,7 +451,67 @@ def _resolve_reusable_voice_preview(
     logger.info(
         f"using full voice preview audio, task_id: {task_id}, duration: {duration:.2f}s"
     )
-    return preview_file, math.ceil(duration), sub_maker
+    return preview_file, float(duration), sub_maker
+
+
+def measure_timeline_audio_duration(
+    audio_file: str,
+    voice_preview: dict | None,
+) -> float:
+    """Measure narration exactly, preferring only the audio file's own preview."""
+    preview_duration = None
+    if voice_preview:
+        preview_path = path.realpath(str(voice_preview.get("audio_file") or ""))
+        actual_path = path.realpath(str(audio_file or ""))
+        if preview_path and preview_path == actual_path:
+            preview_duration = voice_preview.get("duration")
+
+    duration = (
+        float(preview_duration)
+        if isinstance(preview_duration, (int, float))
+        else float(voice.get_audio_duration(audio_file))
+    )
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError("narration audio duration must be a finite positive number")
+    return duration
+
+
+def validate_audio_matches_plan(
+    plan,
+    measured_duration_sec: float,
+) -> None:
+    """Fail when confirmed ranges no longer describe the narration audio."""
+    measured = float(measured_duration_sec)
+    expected_ranges = six_clip_plan.build_timeline_ranges(
+        measured,
+        slot_duration_sec=plan.slot_duration_sec,
+    )
+    actual_ranges = tuple(
+        (segment.start_sec, segment.end_sec) for segment in plan.segments
+    )
+    expected_timeline = max(60.0, measured)
+    matches = (
+        math.isclose(plan.narration_duration_sec, measured, abs_tol=1e-6)
+        and math.isclose(
+            plan.timeline_duration_sec,
+            expected_timeline,
+            abs_tol=1e-6,
+        )
+        and len(actual_ranges) == len(expected_ranges)
+        and all(
+            math.isclose(actual_start, expected_start, abs_tol=1e-6)
+            and math.isclose(actual_end, expected_end, abs_tol=1e-6)
+            for (actual_start, actual_end), (expected_start, expected_end) in zip(
+                actual_ranges,
+                expected_ranges,
+            )
+        )
+    )
+    if not matches:
+        raise ValueError(
+            "Narration audio does not match the submitted clip ranges; "
+            "confirm/rebuild timeline before rendering."
+        )
 
 
 def generate_audio(task_id, params, video_script, voice_preview=None):
@@ -1313,15 +1376,26 @@ def _run_pipeline(
             "audio",
             "failed to prepare narration audio",
         )
-    if params.six_clip_mode and float(audio_duration or 0) > 60.0:
-        return _mark_task_failed(
-            task_id,
-            "audio",
-            (
-                f"Narration is {float(audio_duration):.1f} seconds; the six-clip timeline "
-                "is fixed at 60 seconds. Reduce Target Words or increase Voice Rate."
-            ),
-        )
+    if params.six_clip_mode:
+        try:
+            measured_duration = measure_timeline_audio_duration(
+                audio_file,
+                voice_preview,
+            )
+            maximum_clip_count = int(
+                config.app.get("max_dynamic_clip_count", 0) or 0
+            )
+            six_clip_plan.build_timeline_ranges(
+                measured_duration,
+                maximum_clip_count=maximum_clip_count,
+            )
+            validate_audio_matches_plan(
+                params.six_clip_plan,
+                measured_duration,
+            )
+        except (TypeError, ValueError) as exc:
+            return _mark_task_failed(task_id, "audio", str(exc))
+        audio_duration = measured_duration
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=30)
 

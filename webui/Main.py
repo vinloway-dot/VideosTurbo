@@ -4194,6 +4194,7 @@ def _get_reusable_full_voice_preview(params, voice_mode: str) -> dict | None:
         "audio_bytes": bytes(cached_preview["audio_bytes"]),
         "duration": float(duration),
         "sub_maker": cached_preview["sub_maker"],
+        "fingerprint": expected_fingerprint,
         "script": script_content,
         "voice_name": params.voice_name,
         "voice_rate": float(params.voice_rate),
@@ -5413,10 +5414,31 @@ def _render_generation_controls(
             st.error(tr("Video Script and Subject Cannot Both Be Empty"))
             st.stop()
 
+        reusable_voice_preview = None
         if params.six_clip_mode:
             if params.six_clip_plan is None:
                 _remove_active_generation_task(task_id)
                 st.error("Six-clip plan is missing.")
+                st.stop()
+            current_fingerprint = get_current_narration_fingerprint(
+                params,
+                voice_mode,
+            )
+            reusable_voice_preview = _get_reusable_full_voice_preview(
+                params,
+                voice_mode,
+            )
+            if (
+                not six_clip_plan.is_timeline_current(
+                    params.six_clip_plan,
+                    current_fingerprint,
+                )
+                or reusable_voice_preview is None
+                or reusable_voice_preview.get("fingerprint")
+                != params.six_clip_plan.narration_fingerprint
+            ):
+                _remove_active_generation_task(task_id)
+                st.error("Confirm/Rebuild Timeline before generating video.")
                 st.stop()
             try:
                 params.six_clip_plan = six_clip_media.materialize_plan_for_task(
@@ -5628,10 +5650,11 @@ def _render_generation_controls(
                 if m.url:
                     params.video_materials.append(m)
 
-        reusable_voice_preview = _get_reusable_full_voice_preview(
-            params,
-            voice_mode,
-        )
+        if reusable_voice_preview is None:
+            reusable_voice_preview = _get_reusable_full_voice_preview(
+                params,
+                voice_mode,
+            )
         if reusable_voice_preview:
             # 试听缓存只存在当前 Streamlit 会话。提交前把音频写入目标任务目录，
             # 后台线程随后只读取任务自己的文件；即使页面 rerun、浏览器关闭或
