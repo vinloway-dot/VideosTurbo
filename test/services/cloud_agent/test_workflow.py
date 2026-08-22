@@ -51,6 +51,16 @@ class RecordingPreflight:
             raise self.error
 
 
+class PausingPreflight(RecordingPreflight):
+    def __init__(self, store: CloudJobStore):
+        super().__init__()
+        self.store = store
+
+    def ensure_ready(self, job_id: str) -> None:
+        super().ensure_ready(job_id)
+        self.store.patch_job(job_id, control_request=CloudControlRequest.PAUSE)
+
+
 class RecordingTTS:
     def __init__(self):
         self.calls: list[tuple[str, Path]] = []
@@ -116,6 +126,36 @@ def _accept_media(monkeypatch):
     )
 
 
+def test_workflow_progresses_from_queue_through_all_durable_checkpoints(monkeypatch, tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    preflight = RecordingPreflight()
+    tts = RecordingTTS()
+    flow = RecordingFlow()
+    canva = RecordingCanva()
+    _accept_media(monkeypatch)
+    workflow = _workflow(
+        tmp_path,
+        store,
+        preflight=preflight,
+        tts=tts,
+        flow=flow,
+        canva=canva,
+    )
+
+    result = workflow.run(job.id, worker_id=WORKER_ID)
+
+    assert preflight.calls == [job.id]
+    assert len(tts.calls) == 1
+    assert len(flow.calls) == 1
+    assert len(canva.calls) == 1
+    assert result.status is CloudJobStatus.COMPLETED
+    assert result.checkpoint is CloudJobCheckpoint.COMPLETED
+    assert result.progress == 100
+    assert Path(result.voice_file).is_file()
+    assert Path(result.final_video).is_file()
+
+
 def test_flow_ready_checkpoint_skips_tts_and_flow_then_calls_canva(monkeypatch, tmp_path):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     job = _claimed_job(store)
@@ -172,6 +212,21 @@ def test_pause_request_stops_at_safe_boundary_and_preserves_checkpoint(tmp_path)
     assert tts.calls == []
     assert flow.calls == []
     assert canva.calls == []
+
+
+def test_pause_arriving_during_preflight_stops_before_tts(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    preflight = PausingPreflight(store)
+    tts = RecordingTTS()
+    workflow = _workflow(tmp_path, store, preflight=preflight, tts=tts)
+
+    result = workflow.run(job.id, worker_id=WORKER_ID)
+
+    assert preflight.calls == [job.id]
+    assert tts.calls == []
+    assert result.status is CloudJobStatus.PAUSED
+    assert result.checkpoint is CloudJobCheckpoint.PREFLIGHT_PASSED
 
 
 def test_cancel_request_stops_before_next_external_step(tmp_path):
