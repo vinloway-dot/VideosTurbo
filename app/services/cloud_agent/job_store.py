@@ -32,6 +32,12 @@ _CLAIMABLE_STATUSES = (
     CloudJobStatus.FINAL_VALIDATED,
 )
 
+_TIMING_COLUMNS = {
+    "audio_duration_seconds": "REAL NOT NULL DEFAULT 0",
+    "canva_playback_speed": "REAL NOT NULL DEFAULT 1",
+    "target_final_duration_seconds": "REAL NOT NULL DEFAULT 60",
+}
+
 _MUTABLE_COLUMNS = {
     "status",
     "checkpoint",
@@ -41,6 +47,9 @@ _MUTABLE_COLUMNS = {
     "flow_status",
     "canva_status",
     "voice_file",
+    "audio_duration_seconds",
+    "canva_playback_speed",
+    "target_final_duration_seconds",
     "final_video",
     "error_code",
     "error_message",
@@ -103,6 +112,9 @@ class CloudJobStore:
                     flow_status TEXT NOT NULL,
                     canva_status TEXT NOT NULL,
                     voice_file TEXT NOT NULL,
+                    audio_duration_seconds REAL NOT NULL DEFAULT 0,
+                    canva_playback_speed REAL NOT NULL DEFAULT 1,
+                    target_final_duration_seconds REAL NOT NULL DEFAULT 60,
                     final_video TEXT NOT NULL,
                     error_code TEXT NOT NULL,
                     error_message TEXT NOT NULL,
@@ -115,6 +127,17 @@ class CloudJobStore:
                 )
                 """
             )
+            existing_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(cloud_agent_jobs)"
+                ).fetchall()
+            }
+            for column, definition in _TIMING_COLUMNS.items():
+                if column not in existing_columns:
+                    connection.execute(
+                        f"ALTER TABLE cloud_agent_jobs ADD COLUMN {column} {definition}"
+                    )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS cloud_agent_workers (
@@ -145,6 +168,9 @@ class CloudJobStore:
             flow_status=row["flow_status"],
             canva_status=row["canva_status"],
             voice_file=row["voice_file"],
+            audio_duration_seconds=row["audio_duration_seconds"],
+            canva_playback_speed=row["canva_playback_speed"],
+            target_final_duration_seconds=row["target_final_duration_seconds"],
             final_video=row["final_video"],
             error_code=row["error_code"],
             error_message=row["error_message"],
@@ -187,12 +213,13 @@ class CloudJobStore:
                     id, subject, script, master_prompt, clip_plan_json, language,
                     target_words, tts_provider, voice_id, voice_speed, status,
                     checkpoint, control_request, current_step, progress,
-                    flow_status, canva_status, voice_file, final_video,
+                    flow_status, canva_status, voice_file, audio_duration_seconds,
+                    canva_playback_speed, target_final_duration_seconds, final_video,
                     error_code, error_message, worker_id, lease_until, created_at,
                     started_at, completed_at, updated_at
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -214,6 +241,9 @@ class CloudJobStore:
                     record.flow_status,
                     record.canva_status,
                     record.voice_file,
+                    record.audio_duration_seconds,
+                    record.canva_playback_speed,
+                    record.target_final_duration_seconds,
                     record.final_video,
                     record.error_code,
                     record.error_message,
