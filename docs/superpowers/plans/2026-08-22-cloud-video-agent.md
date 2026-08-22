@@ -1,14 +1,14 @@
 # Cloud Video Agent Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Before every production-code change, use `superpowers:test-driven-development`. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Before every production-code behavior change, use `superpowers:test-driven-development`. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a persistent Cloud Agent that lets a user generate/review a script in VideosTurbo, press `Start Auto Production`, close their local browser/computer, and later receive a validated final MP4 produced through existing API-backed TTS, Google Flow browser automation, and Canva browser automation on Ubuntu Cloud Server.
+**Goal:** Build a persistent Cloud Agent that lets a user generate/review a script in VideosTurbo, press `Start Auto Production`, close their local browser/computer, and later receive a validated final MP4 produced through one canonical TTS artifact, six Google Flow source clips, and Adaptive Six-Clip final assembly in Canva on Ubuntu Cloud Server.
 
-**Architecture:** Reuse the current FastAPI, configuration, LLM/script generation, `SixClipPlan`, Master Prompt, TTS routing, storage-root and FFmpeg helpers. Add a focused `app/services/cloud_agent/` domain with SQLite persistence for Cloud Agent jobs/checkpoints/leases/worker heartbeat, one persistent worker, Playwright service adapters, local + session Preflight, bounded retry/resume, media validation, and cleanup. Streamlit uses the FastAPI Cloud Agent control contract; legacy render/stock paths stay intact until the real Ubuntu End-to-End gate passes.
+**Architecture:** Reuse the current FastAPI, configuration, LLM/script generation, `SixClipPlan`, Master Prompt, TTS routing, storage-root and FFmpeg/ffprobe helpers. Keep six Google Flow clips for MVP. After Preflight, create the canonical `voice.mp3` once, preserve its exact decimal duration, calculate a safe Canva playback factor, reject before Flow only when the configured quality floor would be exceeded, then let Canva own clip ordering, playback adjustment, narration, captions and export. SQLite persists jobs/checkpoints/leases/heartbeat plus narration/playback timing so restart/resume never repeats successful paid TTS/Flow work merely to recover timing information.
 
 **Tech Stack:** Python >=3.11, FastAPI, Streamlit, Pydantic, stdlib `sqlite3`, Playwright sync API, Chromium/Chrome, FFmpeg/ffprobe, existing `app.services.voice`, existing `app.services.llm`, pytest 9.1.1, Ruff 0.15.21, systemd, Xvfb/noVNC, Nginx.
 
-**Spec:** `docs/superpowers/specs/2026-08-22-cloud-video-agent-design.md`
+**Spec:** `docs/superpowers/specs/2026-08-22-cloud-video-agent-design.md` — Design Spec v2.2, Adaptive Six-Clip + Canva Playback.
 
 ## Global Constraints
 
@@ -18,7 +18,14 @@
 - Do not replace or mutate legacy `app.services.state` / legacy task-manager behavior for Cloud Agent persistence; Cloud Agent uses its own SQLite store because restart-resume is mandatory even when Redis is disabled.
 - Reuse `app.services.llm.generate_script`, `app.services.six_clip_plan`, `app.models.six_clip.SixClipPlan`, and `app.services.voice.tts` rather than duplicating provider logic.
 - TTS must use backend/API integration; do not automate TTS provider web pages.
-- Google Flow and Canva are the only MVP browser-automation services.
+- The Cloud Agent creates/reuses one canonical production `voice.mp3`; it must not synthesize a disposable full-length preview and then synthesize production audio again.
+- Preserve exact decimal narration duration from ffprobe. Do not `ceil()` before Adaptive timing calculations.
+- MVP keeps exactly six Google Flow source clips. Variable clip counts are deferred to a separate long-video design.
+- Canva owns Cloud Agent final assembly. Do not route Cloud Agent final assembly through legacy `six_clip_render.py` or pre-concatenate the six production clips with FFmpeg.
+- Adaptive timing uses base visual duration `60.0` seconds and configurable `cloud_agent_canva_min_playback_speed = 0.85`.
+- For narration `D <= 60`, use `canva_playback_speed = 1.0` and target final duration `60.0`.
+- For narration `D > 60`, use `canva_playback_speed = 60.0 / D` and target final duration `D`.
+- If required playback speed is below the configured floor, fail with `NARRATION_TOO_LONG_FOR_SIX_CLIP` before consuming Google Flow generation credit.
 - `Start Auto Production` must run local + session Preflight before TTS or paid generation work.
 - Local Preflight verifies worker heartbeat, storage writability, and configured minimum free disk.
 - Session Preflight opens the real Flow/Canva services; cookie existence alone is not sufficient.
@@ -27,480 +34,405 @@
 - Re-check Flow immediately before Flow work and Canva immediately before Canva work.
 - Persist `status` separately from the last durable `checkpoint`.
 - Persist the existing `SixClipPlan` as JSON; do not create a duplicate six-clip domain model.
+- Persist `audio_duration_seconds`, `canva_playback_speed`, and `target_final_duration_seconds` server-side.
 - MVP runs one active worker/job at a time; additional jobs remain queued.
 - Long external steps renew their worker lease; expired leases are recoverable only after checkpoint/artifact validation.
 - Browser persistent profiles are shared across API/worker processes and require a process-safe lock, not only `threading.Lock`.
 - Production human recovery uses headed Playwright on Xvfb/noVNC; headless remains a configurable development/test option.
+- Canva automation must prefer role/text/accessible-label/input selectors plus observable post-action verification; coordinate-only clicking is not the primary strategy.
 - Do not delete Flow source clips before Final Validation succeeds.
+- Final Validation must verify the exported duration against `target_final_duration_seconds` and ensure narration is not truncated outside configured tolerance.
 - Do not remove legacy stock/render paths until the new workflow passes real End-to-End Ubuntu smoke testing.
 - API keys, credentials, browser profiles, cookies and signed media URLs must never be committed to Git or returned to the client.
 - Keep project dependency convention: exact pins in `pyproject.toml`, `uv.lock`, pytest, Ruff and the current >=70% coverage floor.
 
 ---
 
-## Repository Facts the Plan Must Preserve
+## Current Implementation Baseline — Do Not Recreate Completed Work
 
-Verified on `feature/cloud-video-agent` before implementation:
+Verified on `feature/cloud-video-agent` after Design Spec v2.2 commit `b41df45f697a45c3d1b75ba13497a95767527010`:
+
+- [x] Task 1 baseline — Cloud Agent models + SQLite jobs/checkpoints/leases/worker heartbeat.
+- [x] Task 2 baseline — per-job storage + ffprobe media probing/validation.
+- [x] Task 3 baseline — persistent worker + pause/cancel/checkpoint resume + lease renewal.
+- [x] Task 4 config v2.1 defaults were added through the existing config loader.
+- [x] `playwright==1.62.0` was added to `pyproject.toml`.
+- [ ] `uv.lock` still needs to be regenerated from a real `uv lock` result; do not invent package hashes.
+- [ ] Temporary CI dependency-lock diagnostic in `.github/workflows/ci.yml` must be replaced with a permanent non-mutating `uv lock --check` after the generated lock diff is applied.
+- [ ] Task 4 browser profile locking / browser manager implementation has not started.
+
+Previous verified CI before the v2.2 correction passed Windows smoke, Python 3.11 and Python 3.13. Reuse the existing working code and tests; the next work is the v2.2 delta, not a rewrite.
+
+---
+
+## Repository Facts the Plan Must Preserve
 
 - `app/asgi.py` already creates the FastAPI app and includes `root_api_router`.
 - `app/controllers/v1/base.py::new_router()` applies `/api/v1`.
 - `app/services/state.py` provides `MemoryState` / optional `RedisState`, but default MemoryState is not restart-durable.
-- `app/controllers/manager/*` is coupled to the legacy video task flow and is not reused as the Cloud Agent durable queue.
-- `app/services/voice.py::tts(text, voice_name, voice_rate, voice_file, voice_volume=1.0)` already routes multiple API-backed TTS providers including ElevenLabs.
-- `app/services/llm.py::generate_script(...)` already centralizes LLM provider behavior.
-- `app/services/six_clip_plan.py` and `app/models/six_clip.py` already own the six fixed 10-second segments and Master Prompt construction.
+- `app/services/voice.py::tts(text, voice_name, voice_rate, voice_file, voice_volume=1.0)` already routes API-backed TTS providers.
+- `app/services/llm.py::generate_script(...)` centralizes LLM provider behavior.
+- `app/services/six_clip_plan.py` and `app/models/six_clip.py` own the six planning sections and Master Prompt construction.
+- `app/services/cloud_agent/media_probe.py::probe_media()` already returns a float duration from ffprobe JSON.
+- `app/services/cloud_agent/workflow.py` currently validates TTS against a configured min/max and requires exactly six Flow files; the six-file requirement remains, the fixed narration max does not.
+- `app/services/cloud_agent/storage.py` already owns deterministic `clip_01.mp4` … `clip_06.mp4` paths.
 - `app/utils/utils.py::storage_dir(...)` and `get_ffmpeg_binary()` already exist.
 - `deploy/systemd/videosturbo-webui.service.example` already runs Streamlit; update/reuse it rather than creating a duplicate WebUI service.
-- `main.py` starts the existing FastAPI app with Uvicorn; production deployment therefore needs a separate API systemd service in addition to WebUI and worker.
+- `main.py` starts the existing FastAPI app with Uvicorn; production deployment needs separate API and worker services in addition to WebUI.
 
 ---
 
-## Planned File Map
+# Gate A2 — v2.2 Adaptive Timing Correction to Completed Tasks 1–3
 
-### New production modules
-
-- `app/models/cloud_agent.py` — Cloud Agent status/control/request/record/session/health models.
-- `app/services/cloud_agent/__init__.py` — package boundary.
-- `app/services/cloud_agent/errors.py` — typed workflow/session/validation errors.
-- `app/services/cloud_agent/job_store.py` — SQLite schema, job persistence, atomic claiming, lease renewal and worker heartbeat.
-- `app/services/cloud_agent/storage.py` — deterministic per-job directories, input writing and safe cleanup.
-- `app/services/cloud_agent/media_probe.py` — ffprobe parsing and audio/video validation.
-- `app/services/cloud_agent/browser_lock.py` — process-safe per-service profile locking.
-- `app/services/cloud_agent/browser.py` — persistent Playwright contexts/profiles and evidence capture.
-- `app/services/cloud_agent/preflight.py` — local worker/storage checks plus session-preflight orchestration.
-- `app/services/cloud_agent/session.py` — Flow/Canva session policy and safe Auto Re-login classification.
-- `app/services/cloud_agent/providers/__init__.py` — provider package.
-- `app/services/cloud_agent/providers/google_flow.py` — Google Flow adapter.
-- `app/services/cloud_agent/providers/canva.py` — Canva adapter.
-- `app/services/cloud_agent/tts.py` — thin adapter around existing `app.services.voice.tts`.
-- `app/services/cloud_agent/workflow.py` — durable checkpointed production state machine.
-- `app/services/cloud_agent/worker.py` — persistent one-job-at-a-time worker loop.
-- `app/services/cloud_agent/factory.py` — config-driven production construction.
-- `app/controllers/v1/cloud_agent.py` — Cloud Agent API.
-- `webui/cloud_agent.py` — Streamlit Cloud Agent API/UI helpers.
-- `deploy/systemd/videosturbo-api.service.example` — existing FastAPI/Uvicorn service.
-- `deploy/systemd/videosturbo-worker.service.example` — Cloud Agent worker service.
-- `deploy/cloud-agent/README.md` — Ubuntu/Xvfb/noVNC/Nginx runbook.
-
-### Existing files to modify
-
-- `app/router.py` — register Cloud Agent controller.
-- `app/config/config.py` — expose/reuse `[app]` Cloud Agent settings only if normalization helpers are needed.
-- `config.example.toml` — document non-secret Cloud Agent settings under `[app]`.
-- `pyproject.toml` / `uv.lock` — exact-pin Playwright dependency.
-- `webui/Main.py` — integrate Cloud Agent UI while preserving current script/six-clip generation.
-- `.gitignore` — ignore Cloud Agent DB, job artifacts and local browser profiles.
-- `deploy/systemd/videosturbo-webui.service.example` — retain current Streamlit startup and align environment/reverse-proxy expectations.
-
-### New tests
-
-- `test/services/cloud_agent/test_models.py`
-- `test/services/cloud_agent/test_job_store.py`
-- `test/services/cloud_agent/test_storage.py`
-- `test/services/cloud_agent/test_media_probe.py`
-- `test/services/cloud_agent/test_browser_lock.py`
-- `test/services/cloud_agent/test_browser.py`
-- `test/services/cloud_agent/test_preflight.py`
-- `test/services/cloud_agent/test_session.py`
-- `test/services/cloud_agent/test_tts.py`
-- `test/services/cloud_agent/test_google_flow.py`
-- `test/services/cloud_agent/test_canva.py`
-- `test/services/cloud_agent/test_worker.py`
-- `test/services/cloud_agent/test_workflow.py`
-- `test/services/test_cloud_agent_controller.py`
-- `test/services/test_cloud_agent_webui.py`
-- local HTML fixtures under `test/resources/cloud_agent/{google_flow,canva}/`.
-
----
-
-# Gate A — Durable jobs, artifacts and worker semantics
-
-### Task 1: Cloud Agent domain models + SQLite job/checkpoint store
+### Task 3A: Durable Adaptive timing fields + compatible SQLite/config evolution
 
 **Files:**
-- Create: `app/models/cloud_agent.py`
-- Create: `app/services/cloud_agent/__init__.py`
-- Create: `app/services/cloud_agent/errors.py`
-- Create: `app/services/cloud_agent/job_store.py`
-- Test: `test/services/cloud_agent/test_models.py`
-- Test: `test/services/cloud_agent/test_job_store.py`
+- Modify: `app/models/cloud_agent.py`
+- Modify: `app/services/cloud_agent/job_store.py`
+- Modify: `app/config/config.py`
+- Modify: `config.example.toml`
+- Modify: `test/services/cloud_agent/test_models.py`
+- Modify: `test/services/cloud_agent/test_job_store.py`
+- Modify: `test/services/test_config.py`
 
-**Interfaces:**
-
-- Reuse `app.models.six_clip.SixClipPlan` for `clip_plan` input and JSON persistence.
-- Produce `CloudJobStatus`, `CloudJobCheckpoint`, `CloudControlRequest`, `ServiceSessionStatus`.
-- Produce `CloudJobCreate`, `CloudJobRecord`, `SessionCheckResult`, `CloudAgentHealth`.
-- Produce `CloudJobStore(db_path: str)` with:
+**Interfaces produced:**
 
 ```python
-create_job(request: CloudJobCreate) -> CloudJobRecord
-get_job(job_id: str) -> CloudJobRecord | None
-list_jobs(limit: int = 50, offset: int = 0) -> list[CloudJobRecord]
-patch_job(job_id: str, **changes) -> CloudJobRecord
-claim_next_job(worker_id: str, lease_seconds: int) -> CloudJobRecord | None
-renew_lease(job_id: str, worker_id: str, lease_seconds: int) -> bool
-release_lease(job_id: str, worker_id: str) -> bool
-update_worker_heartbeat(worker_id: str, *, now: str | None = None) -> None
-get_worker_last_seen(worker_id: str | None = None) -> str | None
-```
-
-- Cloud Agent code never writes its durable state through legacy `sm.state`.
-
-- [ ] **Step 1: Write failing enum/model tests**
-
-```python
-from app.models.cloud_agent import (
-    CloudControlRequest,
-    CloudJobCheckpoint,
-    CloudJobStatus,
-    ServiceSessionStatus,
-)
-
-
-def test_status_and_checkpoint_are_separate_domains():
-    assert CloudJobStatus.HUMAN_REQUIRED.value == "HUMAN_REQUIRED"
-    assert CloudJobStatus.PAUSED.value == "PAUSED"
-    assert CloudJobCheckpoint.FLOW_READY.value == "FLOW_READY"
-    assert CloudJobCheckpoint.FINAL_VALIDATED.value == "FINAL_VALIDATED"
-
-
-def test_control_request_is_not_encoded_as_status():
-    assert CloudControlRequest.NONE.value == "NONE"
-    assert CloudControlRequest.PAUSE.value == "PAUSE"
-    assert CloudControlRequest.CANCEL.value == "CANCEL"
-
-
-def test_session_states_include_safe_recovery_and_human_challenges():
-    assert ServiceSessionStatus.AUTO_RELOGIN.value == "AUTO_RELOGIN"
-    assert ServiceSessionStatus.CAPTCHA_REQUIRED.value == "CAPTCHA_REQUIRED"
-    assert ServiceSessionStatus.READY.value == "READY"
-```
-
-- [ ] **Step 2: Run focused test and verify RED**
-
-Run:
-
-```bash
-uv run pytest test/services/cloud_agent/test_models.py -v
-```
-
-Expected: FAIL because `app.models.cloud_agent` does not exist.
-
-- [ ] **Step 3: Implement minimal domain models**
-
-Use Pydantic and existing `SixClipPlan`:
-
-```python
-class CloudJobCreate(BaseModel):
-    subject: str
-    script: str
-    master_prompt: str
-    clip_plan: SixClipPlan
-    language: str = ""
-    target_words: int = Field(default=130, ge=40, le=400)
-    tts_provider: str
-    voice_id: str
-    voice_speed: float = Field(default=1.0, gt=0)
-
-
 class CloudJobRecord(CloudJobCreate):
-    id: str
-    status: CloudJobStatus
-    checkpoint: CloudJobCheckpoint
-    control_request: CloudControlRequest
-    current_step: str
-    progress: int = Field(ge=0, le=100)
-    flow_status: str
-    canva_status: str
-    voice_file: str
-    final_video: str
-    error_code: str
-    error_message: str
-    worker_id: str
-    lease_until: str
-    created_at: str
-    started_at: str
-    completed_at: str
-    updated_at: str
+    audio_duration_seconds: float = Field(default=0.0, ge=0)
+    canva_playback_speed: float = Field(default=1.0, gt=0, le=1.0)
+    target_final_duration_seconds: float = Field(default=60.0, gt=0)
 ```
 
-Validate non-empty script/Master Prompt, and validate `target_words == clip_plan.target_words` so stored content cannot silently disagree.
+SQLite columns:
 
-- [ ] **Step 4: Write failing persistence, claim, lease and heartbeat tests**
+```text
+audio_duration_seconds REAL NOT NULL DEFAULT 0
+canva_playback_speed REAL NOT NULL DEFAULT 1
+target_final_duration_seconds REAL NOT NULL DEFAULT 60
+```
+
+v2.2 config defaults:
+
+```text
+cloud_agent_tts_min_duration_seconds = 1
+cloud_agent_canva_min_playback_speed = 0.85
+cloud_agent_final_duration_tolerance_seconds = 1.0
+```
+
+`cloud_agent_tts_max_duration_seconds` is obsolete for Cloud Agent policy and must not remain in `CLOUD_AGENT_DEFAULTS` or `config.example.toml`. An old user `config.toml` may still contain that key; Cloud Agent code simply does not consume it as a narration ceiling.
+
+- [ ] **Step 1: RED — model/default tests**
 
 ```python
-store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
-job = store.create_job(request)
-assert store.get_job(job.id).clip_plan == request.clip_plan
+def test_cloud_job_record_has_restart_safe_timing_defaults(job_request):
+    record = make_record(job_request)
+    assert record.audio_duration_seconds == 0.0
+    assert record.canva_playback_speed == 1.0
+    assert record.target_final_duration_seconds == 60.0
 
-claimed = store.claim_next_job("worker-a", lease_seconds=60)
-assert claimed.id == job.id
-assert store.claim_next_job("worker-b", lease_seconds=60) is None
 
-assert store.renew_lease(job.id, "worker-a", lease_seconds=60) is True
-assert store.renew_lease(job.id, "worker-b", lease_seconds=60) is False
-
-store.update_worker_heartbeat("worker-a", now="2026-08-22T06:00:00+00:00")
-assert store.get_worker_last_seen("worker-a") == "2026-08-22T06:00:00+00:00"
+def test_cloud_agent_v22_defaults_remove_fixed_tts_ceiling():
+    assert config.CLOUD_AGENT_DEFAULTS["cloud_agent_tts_min_duration_seconds"] == 1
+    assert config.CLOUD_AGENT_DEFAULTS["cloud_agent_canva_min_playback_speed"] == 0.85
+    assert config.CLOUD_AGENT_DEFAULTS["cloud_agent_final_duration_tolerance_seconds"] == 1.0
+    assert "cloud_agent_tts_max_duration_seconds" not in config.CLOUD_AGENT_DEFAULTS
 ```
 
-Also test:
+Also assert the example config contains the three v2.2 values and no fixed TTS max ceiling.
 
-- a new store instance sees the same job;
-- `PAUSED`, `HUMAN_REQUIRED`, `FAILED`, `CANCELLED`, `COMPLETED` are never auto-claimed;
-- expired lease can be reclaimed only for resumable active/queued work;
-- `release_lease` fails for the wrong worker;
-- `clip_plan_json` round-trips through `SixClipPlan.model_validate_json(...)`.
-
-- [ ] **Step 5: Run persistence tests and verify RED**
+- [ ] **Step 2: Run RED**
 
 ```bash
-uv run pytest test/services/cloud_agent/test_job_store.py -v
+uv run pytest test/services/cloud_agent/test_models.py test/services/test_config.py -k "cloud_agent or timing" -v
 ```
 
-Expected: FAIL because `CloudJobStore` is missing.
+Expected: FAIL because timing fields/defaults are not yet v2.2.
 
-- [ ] **Step 6: Implement SQLite schema and atomic transactions**
+- [ ] **Step 3: GREEN — add record fields and v2.2 config defaults**
 
-Use stdlib `sqlite3`; no ORM. Enable WAL and busy timeout. Use a `cloud_agent_jobs` table plus a small `cloud_agent_workers` heartbeat table. Store `clip_plan_json` as JSON text from `SixClipPlan.model_dump_json()`.
+Do not add timing fields to `CloudJobCreate`; they are server-derived, not client-authoritative inputs.
 
-`claim_next_job()` must use a transaction (`BEGIN IMMEDIATE` or equivalent safe sequence) so two processes cannot claim the same row.
+- [ ] **Step 4: RED — SQLite migration/round-trip tests**
 
-- [ ] **Step 7: Verify GREEN and regressions**
+Create a database with the pre-v2.2 `cloud_agent_jobs` schema, insert one legacy row, instantiate the current `CloudJobStore`, then assert:
+
+```python
+migrated = store.get_job("legacy-job")
+assert migrated.audio_duration_seconds == 0.0
+assert migrated.canva_playback_speed == 1.0
+assert migrated.target_final_duration_seconds == 60.0
+
+updated = store.patch_job(
+    migrated.id,
+    audio_duration_seconds=63.25,
+    canva_playback_speed=60.0 / 63.25,
+    target_final_duration_seconds=63.25,
+)
+assert updated.audio_duration_seconds == 63.25
+```
+
+- [ ] **Step 5: Run migration RED**
 
 ```bash
-uv run pytest test/services/cloud_agent/test_models.py test/services/cloud_agent/test_job_store.py -v
-uv run ruff check app/models/cloud_agent.py app/services/cloud_agent/errors.py app/services/cloud_agent/job_store.py test/services/cloud_agent
+uv run pytest test/services/cloud_agent/test_job_store.py -k "timing or migration" -v
+```
+
+Expected: FAIL because old databases lack the new columns and timing fields are not patchable.
+
+- [ ] **Step 6: GREEN — evolve schema safely**
+
+During `_initialize()`, inspect `PRAGMA table_info(cloud_agent_jobs)` and `ALTER TABLE ... ADD COLUMN` only for missing v2.2 columns. Add the three fields to row mapping, create values and `_MUTABLE_COLUMNS`. Do not drop/recreate the jobs table.
+
+- [ ] **Step 7: Verify and commit**
+
+```bash
+uv run pytest test/services/cloud_agent/test_models.py test/services/cloud_agent/test_job_store.py test/services/test_config.py -v
+uv run ruff check app/models/cloud_agent.py app/services/cloud_agent/job_store.py app/config/config.py test/services/cloud_agent/test_models.py test/services/cloud_agent/test_job_store.py test/services/test_config.py
 ```
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
-
 ```bash
-git add app/models/cloud_agent.py app/services/cloud_agent/__init__.py app/services/cloud_agent/errors.py app/services/cloud_agent/job_store.py test/services/cloud_agent/test_models.py test/services/cloud_agent/test_job_store.py
-git commit -m "feat: add persistent cloud agent jobs"
+git add app/models/cloud_agent.py app/services/cloud_agent/job_store.py app/config/config.py config.example.toml test/services/cloud_agent/test_models.py test/services/cloud_agent/test_job_store.py test/services/test_config.py
+git commit -m "feat: persist adaptive cloud timing"
 ```
 
 ---
 
-### Task 2: Per-job storage + FFprobe media validation
+### Task 3B: Adaptive timing policy + audio validation without fixed max
 
 **Files:**
-- Create: `app/services/cloud_agent/storage.py`
-- Create: `app/services/cloud_agent/media_probe.py`
-- Test: `test/services/cloud_agent/test_storage.py`
-- Test: `test/services/cloud_agent/test_media_probe.py`
+- Create: `app/services/cloud_agent/timing.py`
+- Modify: `app/services/cloud_agent/errors.py`
+- Modify: `app/services/cloud_agent/media_probe.py`
+- Create: `test/services/cloud_agent/test_timing.py`
+- Modify: `test/services/cloud_agent/test_media_probe.py`
 
-**Interfaces:**
+**Interfaces produced:**
 
 ```python
-CloudJobStorage(root: Path | None = None)
-prepare(job_id: str) -> JobPaths
-write_inputs(job_id: str, script: str, master_prompt: str) -> JobPaths
-cleanup_flow_sources(job_id: str) -> None
+@dataclass(frozen=True)
+class AdaptiveTiming:
+    audio_duration_seconds: float
+    canva_playback_speed: float
+    target_final_duration_seconds: float
 
-probe_media(path: Path) -> MediaProbe
-validate_audio(path: Path, *, min_duration: float, max_duration: float) -> MediaProbe
-validate_video(
+
+def calculate_adaptive_timing(
+    audio_duration_seconds: float,
+    *,
+    base_visual_duration_seconds: float = 60.0,
+    min_playback_speed: float = 0.85,
+) -> AdaptiveTiming: ...
+
+
+class NarrationTooLongError(MediaValidationError):
+    error_code = "NARRATION_TOO_LONG_FOR_SIX_CLIP"
+```
+
+Change audio validation to:
+
+```python
+validate_audio(
     path: Path,
     *,
-    require_audio: bool = False,
-    min_size_bytes: int = 1,
-    min_duration: float | None = None,
+    min_duration: float,
     max_duration: float | None = None,
-    expected_width: int | None = None,
-    expected_height: int | None = None,
 ) -> MediaProbe
 ```
 
-Default storage root is `Path(utils.storage_dir("jobs", create=True))`.
-
-- [ ] **Step 1: Write failing storage tests**
+- [ ] **Step 1: RED — exact timing-policy tests**
 
 ```python
-paths = CloudJobStorage(tmp_path).prepare("job-123")
-assert paths.input_dir == tmp_path / "job-123" / "input"
-assert paths.voice_file == tmp_path / "job-123" / "audio" / "voice.mp3"
-assert paths.flow_files[0].name == "clip_01.mp4"
-assert paths.flow_files[-1].name == "clip_06.mp4"
-assert paths.final_file.name == "final.mp4"
-assert not paths.voice_file.exists()
-assert not paths.final_file.exists()
+@pytest.mark.parametrize(
+    ("duration", "speed", "target"),
+    [
+        (55.0, 1.0, 60.0),
+        (60.0, 1.0, 60.0),
+        (63.0, 60.0 / 63.0, 63.0),
+        (70.0, 60.0 / 70.0, 70.0),
+    ],
+)
+def test_calculate_adaptive_timing(duration, speed, target):
+    result = calculate_adaptive_timing(duration, min_playback_speed=0.85)
+    assert result.audio_duration_seconds == duration
+    assert result.canva_playback_speed == pytest.approx(speed)
+    assert result.target_final_duration_seconds == target
+
+
+def test_decimal_duration_is_not_ceiled_before_calculation():
+    result = calculate_adaptive_timing(62.1, min_playback_speed=0.85)
+    assert result.audio_duration_seconds == 62.1
+    assert result.canva_playback_speed == pytest.approx(60.0 / 62.1)
+
+
+def test_required_speed_below_floor_is_rejected():
+    with pytest.raises(NarrationTooLongError) as exc:
+        calculate_adaptive_timing(71.0, min_playback_speed=0.85)
+    assert exc.value.error_code == "NARRATION_TOO_LONG_FOR_SIX_CLIP"
 ```
 
-Also reject `../escape`, absolute paths, separators, and prove cleanup cannot remove outside `<job>/flow/`.
+Also reject non-finite/zero/negative duration, base duration <= 0, and floor outside `(0, 1]`.
 
-- [ ] **Step 2: Verify RED**
+- [ ] **Step 2: Run timing RED**
 
 ```bash
-uv run pytest test/services/cloud_agent/test_storage.py -v
+uv run pytest test/services/cloud_agent/test_timing.py -v
 ```
 
-- [ ] **Step 3: Implement safe storage paths**
+Expected: FAIL because `timing.py` does not exist.
 
-`prepare()` creates directories only. `write_inputs()` writes UTF-8 script and Master Prompt. `cleanup_flow_sources()` resolves every candidate below the job's `flow/` directory before deletion.
+- [ ] **Step 3: GREEN — implement pure timing policy**
 
-- [ ] **Step 4: Write failing ffprobe parser/validation tests**
+No browser, DB or TTS calls are allowed in `timing.py`; keep it deterministic and independently testable.
 
-Patch `subprocess.run` with representative JSON for:
+- [ ] **Step 4: RED — prove audio validator accepts >62 when no max is supplied**
 
-```text
-valid audio-only
-valid video-only Flow clip
-valid final video+audio
-missing audio
-missing video
-non-zero ffprobe exit
-invalid JSON
-file below minimum size
-out-of-policy duration
-wrong resolution
+```python
+def test_validate_audio_allows_longer_valid_audio_without_max(...):
+    probe = validate_audio(audio_path, min_duration=1.0)
+    assert probe.duration == pytest.approx(63.25)
 ```
 
-- [ ] **Step 5: Implement ffprobe wrapper**
+Retain an explicit `max_duration` test so the generic validator can still enforce a max for callers that request one.
 
-Resolve ffprobe beside `utils.get_ffmpeg_binary()` when the resolved binary is an absolute/local path; otherwise use `shutil.which("ffprobe")` then `"ffprobe"`.
+- [ ] **Step 5: GREEN — make `max_duration` optional**
 
-Command:
+Keep `_validate_duration()` generic. Do not remove its max behavior; only stop requiring a max for Cloud Agent narration.
 
-```text
-ffprobe -v error -show_streams -show_format -of json <file>
-```
-
-Normalize streams/duration into `MediaProbe`. Raise typed `MediaValidationError` with sanitized diagnostics.
-
-- [ ] **Step 6: Verify GREEN and commit**
+- [ ] **Step 6: Verify and commit**
 
 ```bash
-uv run pytest test/services/cloud_agent/test_storage.py test/services/cloud_agent/test_media_probe.py -v
-uv run ruff check app/services/cloud_agent/storage.py app/services/cloud_agent/media_probe.py test/services/cloud_agent
+uv run pytest test/services/cloud_agent/test_timing.py test/services/cloud_agent/test_media_probe.py -v
+uv run ruff check app/services/cloud_agent/timing.py app/services/cloud_agent/errors.py app/services/cloud_agent/media_probe.py test/services/cloud_agent/test_timing.py test/services/cloud_agent/test_media_probe.py
+```
 
-git add app/services/cloud_agent/storage.py app/services/cloud_agent/media_probe.py test/services/cloud_agent/test_storage.py test/services/cloud_agent/test_media_probe.py
-git commit -m "feat: add cloud agent artifact validation"
+```bash
+git add app/services/cloud_agent/timing.py app/services/cloud_agent/errors.py app/services/cloud_agent/media_probe.py test/services/cloud_agent/test_timing.py test/services/cloud_agent/test_media_probe.py
+git commit -m "feat: add adaptive six clip timing policy"
 ```
 
 ---
 
-### Task 3: Worker queue, control requests, checkpoint resume + lease renewal
+### Task 3C: Workflow timing gate, restart-safe revalidation + final-duration gate
 
 **Files:**
-- Create: `app/services/cloud_agent/workflow.py`
-- Create: `app/services/cloud_agent/worker.py`
-- Test: `test/services/cloud_agent/test_worker.py`
-- Test: `test/services/cloud_agent/test_workflow.py`
+- Modify: `app/services/cloud_agent/workflow.py`
+- Modify: `test/services/cloud_agent/test_workflow.py`
 
-**Interfaces:**
+**Constructor delta:**
 
 ```python
-CloudAgentWorkflow.run(job_id: str, *, worker_id: str) -> CloudJobRecord
-CloudAgentWorker.run_once() -> bool
-CloudAgentWorker.run_forever() -> None
+CloudAgentWorkflow(
+    ...,
+    tts_min_duration: float,
+    canva_min_playback_speed: float,
+    final_duration_tolerance_seconds: float,
+    final_min_size_bytes: int,
+    expected_width: int,
+    expected_height: int,
+)
 ```
 
-Initial dependency protocols:
+Remove `tts_max_duration` from Cloud Agent workflow construction.
 
-```python
-class PreflightClient(Protocol):
-    def ensure_ready(self, job_id: str) -> None: ...
+- [ ] **Step 1: RED — 63-second TTS continues and persists timing before Flow**
 
-class TTSClient(Protocol):
-    def generate(self, job: CloudJobRecord, output_path: Path) -> Path: ...
-
-class FlowClient(Protocol):
-    def generate_and_download(self, job: CloudJobRecord, flow_dir: Path) -> list[Path]: ...
-
-class CanvaClient(Protocol):
-    def assemble_and_export(
-        self,
-        job: CloudJobRecord,
-        clips: list[Path],
-        audio: Path,
-        output: Path,
-    ) -> Path: ...
-```
-
-- [ ] **Step 1: Write failing worker tests**
-
-Cover:
-
-```python
-assert worker.run_once() is True
-assert second_worker.run_once() is False
-```
-
-and:
-
-- heartbeat is updated even when no job is available;
-- worker renews the job lease during a simulated long step;
-- wrong-worker lease cannot be renewed/released;
-- expired lease is recoverable after restart;
-- `PAUSED` / `HUMAN_REQUIRED` are not auto-claimed.
-
-- [ ] **Step 2: Verify RED**
-
-```bash
-uv run pytest test/services/cloud_agent/test_worker.py -v
-```
-
-- [ ] **Step 3: Implement minimal worker loop and lease-heartbeat helper**
-
-Worker ID:
-
-```python
-f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex}"
-```
-
-A background lease-renewal helper is allowed only after the RED tests exist. It renews at an interval safely shorter than the configured lease and stops in `finally`.
-
-- [ ] **Step 4: Write failing checkpoint/control tests**
-
-Use fake dependencies to assert:
+Use fake media probes and assert:
 
 ```text
-checkpoint=FLOW_READY + valid voice/clips
-→ does not call TTS
-→ does not call Flow
-→ calls Canva next
+TTS generates canonical voice.mp3 once
+→ probe duration = 63.25
+→ persist audio_duration_seconds = 63.25
+→ persist canva_playback_speed = 60 / 63.25
+→ persist target_final_duration_seconds = 63.25
+→ checkpoint = TTS_READY
+→ Flow is allowed next
 ```
 
-Also assert:
+- [ ] **Step 2: RED — narration beyond policy fails before Flow**
 
-- `control_request=PAUSE` at a safe boundary sets `PAUSED` while preserving checkpoint;
-- `control_request=CANCEL` sets `CANCELLED` and stops before the next external step;
-- `HUMAN_REQUIRED` preserves checkpoint;
-- invalid artifact required by a checkpoint prevents silently skipping the paid step.
+For duration `71.0` and floor `0.85`, assert:
 
-- [ ] **Step 5: Implement state-machine shell**
+```python
+assert result.status is CloudJobStatus.FAILED
+assert result.error_code == "NARRATION_TOO_LONG_FOR_SIX_CLIP"
+assert flow.calls == 0
+assert canva.calls == 0
+```
 
-Keep status and checkpoint separate. Do not add generic `RUNNING`. The shell may use fake/no-op external clients until later tasks supply production adapters.
+- [ ] **Step 3: RED — resume at `TTS_READY` reuses audio and revalidates timing**
 
-- [ ] **Step 6: Verify GREEN and commit**
+Assert TTS call count stays zero on resume, existing `voice.mp3` is re-probed, persisted timing is validated/reconciled from the exact duration, and Flow proceeds only if policy still passes.
+
+- [ ] **Step 4: RED — resume at `FLOW_READY` never repeats paid work**
+
+Assert valid audio + six Flow clips cause:
+
+```text
+TTS calls = 0
+Flow calls = 0
+Canva calls = 1
+```
+
+and Canva receives a job with the persisted playback/target-duration values.
+
+- [ ] **Step 5: RED — final duration validation**
+
+For target `63.25` and tolerance `1.0`, assert a final duration near target passes; a final duration that truncates narration by more than tolerance fails and Flow sources remain.
+
+- [ ] **Step 6: Run workflow RED**
 
 ```bash
-uv run pytest test/services/cloud_agent/test_worker.py test/services/cloud_agent/test_workflow.py -v
-uv run ruff check app/services/cloud_agent/workflow.py app/services/cloud_agent/worker.py test/services/cloud_agent
-
-git add app/services/cloud_agent/workflow.py app/services/cloud_agent/worker.py test/services/cloud_agent/test_worker.py test/services/cloud_agent/test_workflow.py
-git commit -m "feat: add resumable cloud agent worker"
+uv run pytest test/services/cloud_agent/test_workflow.py -k "timing or narration or duration or resume" -v
 ```
+
+- [ ] **Step 7: GREEN — implement timing integration**
+
+At TTS completion:
+
+```text
+validate_audio(min only)
+→ use returned/probed decimal duration
+→ calculate_adaptive_timing(...)
+→ patch three durable timing fields
+→ TTS_READY
+```
+
+At checkpoint validation, re-probe the retained audio and verify/recompute the timing values without synthesizing new audio. Catch `NarrationTooLongError` as a deterministic `FAILED` with its error code before Flow.
+
+At Final Validation, use the returned `MediaProbe.duration` and configured tolerance. Cleanup remains strictly after `FINAL_VALIDATED`.
+
+- [ ] **Step 8: Verify Gate A2 and commit**
+
+```bash
+uv run pytest test/services/cloud_agent/test_models.py test/services/cloud_agent/test_job_store.py test/services/cloud_agent/test_timing.py test/services/cloud_agent/test_media_probe.py test/services/cloud_agent/test_worker.py test/services/cloud_agent/test_workflow.py -v
+uv run ruff check app/models/cloud_agent.py app/services/cloud_agent test/services/cloud_agent
+```
+
+```bash
+git add app/services/cloud_agent/workflow.py test/services/cloud_agent/test_workflow.py
+git commit -m "feat: apply adaptive timing to cloud workflow"
+```
+
+**Gate A2 review:** Confirm a 63-second fake workflow reaches Flow, a >policy narration stops before Flow, and `TTS_READY` / `FLOW_READY` resumes do not repeat paid steps.
 
 ---
 
 # Gate B — Browser runtime, Preflight and FastAPI contract
 
-### Task 4: Cloud Agent config + Playwright + process-safe profile locking
+### Task 4: Finish Playwright dependency lock + process-safe browser profiles
 
 **Files:**
-- Modify: `pyproject.toml`
+- Existing modified: `pyproject.toml` (`playwright==1.62.0` already present)
 - Modify: `uv.lock`
-- Modify: `config.example.toml`
+- Modify: `.github/workflows/ci.yml`
 - Modify: `.gitignore`
 - Create: `app/services/cloud_agent/browser_lock.py`
 - Create: `app/services/cloud_agent/browser.py`
-- Test: `test/services/cloud_agent/test_browser_lock.py`
-- Test: `test/services/cloud_agent/test_browser.py`
-- Extend: `test/services/test_config.py`
+- Create: `test/services/cloud_agent/test_browser_lock.py`
+- Create: `test/services/cloud_agent/test_browser.py`
 
 **Interfaces:**
 
@@ -511,93 +443,63 @@ PersistentBrowserManager.open(service: str, *, headed: bool | None = None)
 PersistentBrowserManager.capture_evidence(...)
 ```
 
-Config under existing `[app]` includes:
+- [ ] **Step 1: Resolve the already-pinned Playwright lock without invented hashes**
 
-```text
-cloud_agent_enabled = false
-cloud_agent_db_path = storage/cloud-agent.sqlite3
-cloud_agent_worker_poll_seconds = 2
-cloud_agent_worker_lease_seconds = 120
-cloud_agent_worker_heartbeat_seconds = 10
-cloud_agent_max_retries = 3
-cloud_agent_min_free_disk_gb = 10
-cloud_agent_tts_min_duration_seconds = 58
-cloud_agent_tts_max_duration_seconds = 62
-cloud_agent_final_min_size_bytes = 1048576
-cloud_agent_expected_width = 1080
-cloud_agent_expected_height = 1920
-cloud_agent_browser_headless = true
-cloud_agent_google_profile_dir = storage/browser-profiles/google-flow
-cloud_agent_canva_profile_dir = storage/browser-profiles/canva
-cloud_agent_browser_lock_dir = storage/browser-locks
-cloud_agent_remote_browser_url = http://127.0.0.1:6080/vnc.html
-cloud_agent_flow_url = ""
-cloud_agent_canva_template_url = ""
+Use the existing GitHub Actions diagnostic that runs `uv lock` and prints `git diff -- uv.lock` as the resolver source of truth. Apply that exact generated diff to `uv.lock`. Do not hand-construct Playwright/greenlet/pyee wheel hashes.
+
+- [ ] **Step 2: Replace temporary failing diagnostic with permanent lock gate**
+
+The workflow must use a non-mutating check:
+
+```yaml
+- name: Check dependency lock
+  run: uv lock --check
 ```
 
-Production may override profile paths to `/var/lib/videosturbo/...` and uses `cloud_agent_browser_headless=false` with Xvfb.
+Keep `uv sync --frozen` after the lock check.
 
-- [ ] **Step 1: Write failing config tests**
-
-Assert missing settings receive documented defaults without creating a second config loader. Assert profile/DB paths are strings and no real credential values are emitted.
-
-- [ ] **Step 2: Verify RED**
+- [ ] **Step 3: Verify dependency gate**
 
 ```bash
-uv run pytest test/services/test_config.py -k cloud_agent -v
+uv lock --check
+uv sync --frozen
 ```
 
-- [ ] **Step 3: Add exact Playwright pin and config entries**
+Expected in CI: lock check and sync succeed on supported Python jobs; Playwright browser binaries are not committed and are not installed automatically by application startup.
 
-Follow current `pyproject.toml` exact-pin style and regenerate `uv.lock`. Do not commit Playwright browser binaries.
+- [ ] **Step 4: RED — cross-process profile lock tests**
 
-- [ ] **Step 4: Write failing cross-process lock tests**
+Use `multiprocessing` and a temporary lock directory. Process A holds `google_flow`; Process B times out. A `canva` lock remains independently acquirable.
 
-Use `multiprocessing` with a temporary lock directory. Process A holds `google_flow`; Process B must time out instead of opening the same profile. A `canva` lock remains independent.
+- [ ] **Step 5: GREEN — OS-level file lock**
 
-- [ ] **Step 5: Implement process-safe profile lock**
+Implement process-safe advisory locking for Ubuntu and supported Windows test behavior behind `browser_lock.py`. Do not use only `threading.Lock`.
 
-Use an OS file-lock implementation appropriate to supported platforms; keep the API isolated in `browser_lock.py`. On Ubuntu, the lock must be advisory-process-safe. Do not rely only on `threading.Lock`.
+- [ ] **Step 6: RED — browser manager tests**
 
-- [ ] **Step 6: Write failing browser-manager tests**
+Patch Playwright and assert dedicated profile paths, `launch_persistent_context(user_data_dir=...)`, configured headless/headed override, same-service exclusion, and job-owned screenshot + HTML evidence capture.
 
-Patch Playwright and assert:
-
-- correct service profile path;
-- `launch_persistent_context(user_data_dir=...)` is used;
-- configured `headless` is honored;
-- profile lock is acquired before launch;
-- evidence path is job-owned;
-- unsupported service is rejected.
-
-- [ ] **Step 7: Implement browser manager**
+- [ ] **Step 7: GREEN — persistent browser manager**
 
 Use `playwright.sync_api.sync_playwright()`. Never use the operator's personal/default Chrome profile.
 
-- [ ] **Step 8: Add runtime ignore rules**
+- [ ] **Step 8: Runtime ignore rules**
 
-At minimum:
+Existing broad `/storage/` behavior may already cover runtime state. Add explicit comments/rules only where they improve clarity without hiding test fixtures. Browser profiles, locks and SQLite DB/WAL/SHM must never be committed.
 
-```text
-storage/cloud-agent.sqlite3*
-storage/browser-profiles/
-storage/browser-locks/
-storage/jobs/
-```
-
-Do not hide test fixtures.
-
-- [ ] **Step 9: Verify GREEN and commit**
+- [ ] **Step 9: Verify and commit**
 
 ```bash
-uv sync --frozen
-uv run pytest test/services/test_config.py -k cloud_agent -v
-uv run pytest test/services/cloud_agent/test_browser_lock.py test/services/cloud_agent/test_browser.py -v
-uv run ruff check app/services/cloud_agent/browser_lock.py app/services/cloud_agent/browser.py test/services/cloud_agent
+uv run pytest test/services/cloud_agent/test_browser_lock.py test/services/cloud_agent/test_browser.py test/services/test_config.py -v
+uv run ruff check app/services/cloud_agent/browser_lock.py app/services/cloud_agent/browser.py test/services/cloud_agent/test_browser_lock.py test/services/cloud_agent/test_browser.py
+```
 
-git add pyproject.toml uv.lock config.example.toml .gitignore app/services/cloud_agent/browser_lock.py app/services/cloud_agent/browser.py test/services/test_config.py test/services/cloud_agent/test_browser_lock.py test/services/cloud_agent/test_browser.py
+```bash
+git add uv.lock .github/workflows/ci.yml .gitignore app/services/cloud_agent/browser_lock.py app/services/cloud_agent/browser.py test/services/cloud_agent/test_browser_lock.py test/services/cloud_agent/test_browser.py
 git commit -m "feat: add cloud agent browser runtime"
 ```
+
+On the target host install Chromium once with `uv run playwright install chromium` or deployment's `--with-deps` command; runtime application code must never install it automatically.
 
 ---
 
@@ -607,78 +509,42 @@ git commit -m "feat: add cloud agent browser runtime"
 - Create: `app/services/cloud_agent/preflight.py`
 - Create: `app/services/cloud_agent/session.py`
 - Create: `app/services/cloud_agent/providers/__init__.py`
-- Create: `app/services/cloud_agent/providers/google_flow.py`
-- Create: `app/services/cloud_agent/providers/canva.py`
+- Create/extend: `app/services/cloud_agent/providers/google_flow.py`
+- Create/extend: `app/services/cloud_agent/providers/canva.py`
 - Test: `test/services/cloud_agent/test_preflight.py`
 - Test: `test/services/cloud_agent/test_session.py`
 - Test: `test/services/cloud_agent/test_google_flow.py`
 - Test: `test/services/cloud_agent/test_canva.py`
 
-**Interfaces:**
-
-Provider session contract:
+**Provider session contract:**
 
 ```python
 check_session(*, headed: bool = False) -> SessionCheckResult
 repair_session(*, headed: bool = False) -> SessionCheckResult
 ```
 
-Policy:
+**Policy:**
 
 ```python
 SessionManager.check_all() -> dict[str, SessionCheckResult]
 SessionManager.ensure_service_ready(service: str, job_id: str) -> SessionCheckResult
 SessionManager.ensure_all_ready(job_id: str) -> dict[str, SessionCheckResult]
-
 PreflightManager.ensure_ready(job_id: str, worker_id: str) -> PreflightResult
 ```
 
-- [ ] **Step 1: Write failing service-session classification tests**
+- [ ] **Step 1: RED — session classification**
 
-Use deterministic fake/local page states:
+Local fixture/page tests cover authenticated → READY, login → SESSION_EXPIRED, safe Continue-with-Google → READY, password/login challenge, CAPTCHA, 2FA, verification and network ERROR.
 
-```text
-authenticated service page      → READY
-service login page              → SESSION_EXPIRED
-Continue with Google succeeds   → READY
-password challenge              → LOGIN_REQUIRED / HumanRequiredError
-CAPTCHA marker                  → CAPTCHA_REQUIRED / HumanRequiredError
-2FA marker                      → 2FA_REQUIRED / HumanRequiredError
-Verify it's you                 → VERIFICATION_REQUIRED / HumanRequiredError
-network/navigation error        → ERROR
-```
+- [ ] **Step 2: GREEN — SessionManager policy**
 
-- [ ] **Step 2: Verify RED**
+Manager owns Check → bounded safe repair → Verify. Providers own only service-specific detection/actions. Never store Google passwords.
 
-```bash
-uv run pytest test/services/cloud_agent/test_session.py -v
-```
+- [ ] **Step 3: RED — local Preflight**
 
-- [ ] **Step 3: Implement SessionManager policy first**
+Required failures: storage not writable, disk below configured minimum, worker identity/heartbeat invalid, Flow not ready after bounded safe repair, Canva challenge before TTS.
 
-The manager owns Check → safe repair → Verify. Providers own only service-specific page detection/actions. Never put a Google password in config/SQLite.
-
-- [ ] **Step 4: Write failing local Preflight tests**
-
-Patch `shutil.disk_usage` and store heartbeat:
-
-```python
-result = preflight.ensure_ready("job-1", "worker-a")
-assert result.storage_ready is True
-assert result.worker_ready is True
-```
-
-Required failures:
-
-- storage root cannot be created/written;
-- free disk below configured minimum;
-- worker heartbeat/identity not current;
-- Flow not ready after bounded safe repair;
-- Canva challenge becomes `HUMAN_REQUIRED` before TTS is called.
-
-- [ ] **Step 5: Implement `PreflightManager`**
-
-Order:
+- [ ] **Step 4: GREEN — Preflight order**
 
 ```text
 verify executing worker identity/heartbeat
@@ -686,20 +552,14 @@ verify executing worker identity/heartbeat
 → SessionManager.ensure_all_ready(job_id)
 ```
 
-- [ ] **Step 6: Add bounded retry tests**
-
-Assert no infinite loops and max retries are configuration-driven.
-
-- [ ] **Step 7: Implement initial session-only page objects**
-
-Prefer Playwright roles/names/URL checks over brittle positional selectors. Keep all service-specific locators in provider modules.
-
-- [ ] **Step 8: Verify GREEN and commit**
+- [ ] **Step 5: Verify and commit**
 
 ```bash
 uv run pytest test/services/cloud_agent/test_preflight.py test/services/cloud_agent/test_session.py test/services/cloud_agent/test_google_flow.py test/services/cloud_agent/test_canva.py -v
 uv run ruff check app/services/cloud_agent/preflight.py app/services/cloud_agent/session.py app/services/cloud_agent/providers test/services/cloud_agent
+```
 
+```bash
 git add app/services/cloud_agent/preflight.py app/services/cloud_agent/session.py app/services/cloud_agent/providers test/services/cloud_agent/test_preflight.py test/services/cloud_agent/test_session.py test/services/cloud_agent/test_google_flow.py test/services/cloud_agent/test_canva.py
 git commit -m "feat: add cloud agent preflight"
 ```
@@ -713,9 +573,7 @@ git commit -m "feat: add cloud agent preflight"
 - Modify: `app/router.py`
 - Test: `test/services/test_cloud_agent_controller.py`
 
-**Interfaces:**
-
-Effective routes under existing `/api/v1`:
+**Effective routes under `/api/v1`:**
 
 ```text
 GET  /cloud-agent/health
@@ -734,78 +592,55 @@ POST /cloud-agent/sessions/canva/repair
 GET  /cloud-agent/sessions/{service}/open-browser
 ```
 
-- [ ] **Step 1: Write failing API tests with `TestClient`**
+- [ ] **Step 1: RED — API tests**
 
-Required behavior:
+Assert job creation is persistent but does not execute TTS/Playwright inline; pause/resume/cancel transitions are validated; session calls honor browser-profile locks; final endpoint serves only job-owned `FINAL_VALIDATED` files.
 
-```python
-response = client.post("/api/v1/cloud-agent/jobs", json=payload)
-assert response.status_code == 200
-assert response.json()["data"]["status"] == "QUEUED"
-```
-
-Also test:
-
-- job payload requires complete existing `SixClipPlan` + Master Prompt;
-- create does not execute TTS/Playwright inline;
-- GET survives a new store instance;
-- pause sets control request and returns observable state according to transition rules;
-- resume validates permitted source state before requeue;
-- cancel requests cancellation without killing arbitrary processes;
-- health reports worker last-seen and storage status;
-- manual session checks respect profile-lock busy response;
-- `open-browser` only returns the configured protected URL for supported services;
-- final endpoint serves only a job-owned `FINAL_VALIDATED` path and rejects traversal/nonexistent files.
-
-- [ ] **Step 2: Verify RED**
-
-```bash
-uv run pytest test/services/test_cloud_agent_controller.py -v
-```
-
-- [ ] **Step 3: Implement controller with dependency factories**
-
-Use `new_router()`, `utils.get_response(...)`, repository error conventions and safe `FileResponse`. Keep normal job work outside request handlers.
-
-- [ ] **Step 4: Register router**
+Job detail must expose server-derived timing fields after TTS:
 
 ```python
-from app.controllers.v1 import cloud_agent, llm, video
-
-root_api_router.include_router(video.router)
-root_api_router.include_router(llm.router)
-root_api_router.include_router(cloud_agent.router)
+assert data["audio_duration_seconds"] == pytest.approx(63.25)
+assert data["canva_playback_speed"] == pytest.approx(60.0 / 63.25)
+assert data["target_final_duration_seconds"] == pytest.approx(63.25)
 ```
 
-- [ ] **Step 5: Verify GREEN and commit**
+Client job creation must not be allowed to authoritatively set those fields.
+
+- [ ] **Step 2: GREEN — controller + router registration**
+
+Use `new_router()`, repository response/error conventions and safe `FileResponse`. Keep long production work outside request handlers.
+
+- [ ] **Step 3: Verify and commit**
 
 ```bash
 uv run pytest test/services/test_cloud_agent_controller.py test/services/test_controller_base.py -v
 uv run ruff check app/controllers/v1/cloud_agent.py app/router.py test/services/test_cloud_agent_controller.py
+```
 
+```bash
 git add app/controllers/v1/cloud_agent.py app/router.py test/services/test_cloud_agent_controller.py
 git commit -m "feat: expose cloud agent api"
 ```
 
 ---
 
-# Gate C — TTS, Flow, Canva and full workflow
+# Gate C — TTS, Flow, Canva Playback and full workflow
 
-### Task 7: Existing TTS adapter + duration gate
+### Task 7: Existing TTS adapter — canonical production audio once
 
 **Files:**
 - Create: `app/services/cloud_agent/tts.py`
 - Test: `test/services/cloud_agent/test_tts.py`
 - Reuse unchanged: `app/services/voice.py`
 
-**Interfaces:**
+**Interface:**
 
 ```python
 class ExistingVoiceTTSClient:
     def generate(self, job: CloudJobRecord, output_path: Path) -> Path: ...
 ```
 
-Calls exactly:
+Calls existing routing:
 
 ```python
 voice.tts(
@@ -816,35 +651,24 @@ voice.tts(
 )
 ```
 
-- [ ] **Step 1: Write failing adapter tests**
+- [ ] **Step 1: RED — adapter tests**
 
-Assert exact arguments and these failures:
+Assert exact arguments, provider/voice consistency validation, `voice.tts` failure handling, missing/empty artifact handling, and valid 63-second audio is not rejected by an old 60/62-second ceiling.
 
-- `voice.tts` returns `None`;
-- file missing;
-- file empty;
-- audio validator fails;
-- duration outside configured min/max;
-- inconsistent `tts_provider`/`voice_id` metadata is rejected by the adapter's lightweight validation rather than introducing a new provider registry.
+- [ ] **Step 2: GREEN — thin adapter only**
 
-- [ ] **Step 2: Verify RED**
+Do not duplicate provider HTTP clients. The adapter generates the canonical file; workflow/media-probe/timing modules own exact duration policy.
 
-```bash
-uv run pytest test/services/cloud_agent/test_tts.py -v
-```
-
-- [ ] **Step 3: Implement minimal adapter**
-
-Call existing TTS routing and then `validate_audio(...)`. Do not duplicate provider HTTP clients.
-
-- [ ] **Step 4: Verify GREEN and commit**
+- [ ] **Step 3: Verify and commit**
 
 ```bash
 uv run pytest test/services/cloud_agent/test_tts.py test/services/test_voice.py -v
 uv run ruff check app/services/cloud_agent/tts.py test/services/cloud_agent/test_tts.py
+```
 
+```bash
 git add app/services/cloud_agent/tts.py test/services/cloud_agent/test_tts.py
-git commit -m "feat: add cloud agent tts step"
+git commit -m "feat: add cloud agent tts adapter"
 ```
 
 ---
@@ -854,14 +678,9 @@ git commit -m "feat: add cloud agent tts step"
 **Files:**
 - Modify: `app/services/cloud_agent/providers/google_flow.py`
 - Test: `test/services/cloud_agent/test_google_flow.py`
-- Create fixtures:
-  - `test/resources/cloud_agent/google_flow/ready.html`
-  - `test/resources/cloud_agent/google_flow/login.html`
-  - `test/resources/cloud_agent/google_flow/challenge.html`
-  - `test/resources/cloud_agent/google_flow/generating.html`
-  - `test/resources/cloud_agent/google_flow/results.html`
+- Fixtures: `test/resources/cloud_agent/google_flow/{ready,login,challenge,generating,results}.html`
 
-**Interfaces:**
+**Interface:**
 
 ```python
 generate_and_download(
@@ -871,74 +690,93 @@ generate_and_download(
 ) -> list[Path]
 ```
 
-- [ ] **Step 1: Write failing deterministic page-object tests**
+- [ ] **Step 1: RED — deterministic page-object tests**
 
-Cover:
+Cover Agent Mode, Master Prompt insertion, observable 2/6 → 4/6 → 6/6 progress, stable result order, bounded timeout, deterministic clip names, selective retry and validation failure.
 
-- Agent Mode selection;
-- Master Prompt insertion;
-- generation-start detection;
-- observable 2/6 → 4/6 → 6/6 readiness;
-- chronological/result ordering;
-- bounded wait timeout;
-- download naming `clip_01.mp4` … `clip_06.mp4`;
-- retry only failed item/download;
-- validation failure for one clip does not silently mark `FLOW_READY`.
-
-- [ ] **Step 2: Verify RED**
-
-```bash
-uv run pytest test/services/cloud_agent/test_google_flow.py -v
-```
-
-- [ ] **Step 3: Implement production path**
-
-Sequence:
+- [ ] **Step 2: GREEN — production Flow adapter**
 
 ```text
 SessionManager.ensure_service_ready("google_flow")
 → open configured Flow URL
-→ enter Agent Mode
+→ Agent Mode
 → submit job.master_prompt
-→ observe result state, not fixed sleep alone
-→ collect six result items in stable order
-→ download each to deterministic path
-→ validate every file
+→ observe completion rather than fixed sleep alone
+→ collect exactly six items
+→ download/validate clip_01 … clip_06
 ```
 
-Use Playwright download events or authenticated browser/request context when Flow exposes a signed media URL. Never log/persist signed URLs.
+Never log/persist signed download URLs.
 
-- [ ] **Step 4: Add evidence + bounded retry**
-
-On unrecoverable browser failure, capture sanitized URL/error and safe screenshot. Use configured timeout/max retries.
-
-- [ ] **Step 5: Verify GREEN and commit**
+- [ ] **Step 3: Verify and commit**
 
 ```bash
 uv run pytest test/services/cloud_agent/test_google_flow.py -v
 uv run ruff check app/services/cloud_agent/providers/google_flow.py test/services/cloud_agent/test_google_flow.py
+```
 
+```bash
 git add app/services/cloud_agent/providers/google_flow.py test/services/cloud_agent/test_google_flow.py test/resources/cloud_agent/google_flow
 git commit -m "feat: automate google flow generation"
 ```
 
-Live Google Flow verification is Task 13, not CI.
+---
+
+### Task 9: Real Canva Playback Automation Spike — hard gate before production adapter
+
+**Files:**
+- Create after the live spike: `docs/superpowers/spikes/2026-08-22-canva-playback-spike.md`
+- No production Canva assembly code is written in this task.
+
+**Spike success contract:**
+
+1. Playwright selects one uploaded video clip reliably without coordinate-only automation.
+2. It opens Canva Playback through observable selectors.
+3. It applies a custom speed around `0.95x`.
+4. It observes evidence that playback/duration changed.
+5. The same action works for all six clips.
+6. Final visual end can be trimmed/bounded to the narration-derived target within configured tolerance.
+7. The workflow works in headed Xvfb/noVNC production-style Chromium.
+
+- [ ] **Step 1: Prepare one disposable Canva test design**
+
+Use non-sensitive test media: six short numbered clips and one narration/test audio artifact. Do not use production credentials in logs or committed files.
+
+- [ ] **Step 2: Run headed Playwright using the same persistent-profile manager planned for production**
+
+Exercise one clip manually-assisted if necessary to discover stable role/text/input selectors; record only selector strategy and sanitized observations.
+
+- [ ] **Step 3: Prove `0.95x` can be applied and verified**
+
+Capture sanitized evidence showing selected clip, Playback control and an observable duration/timeline change. Do not rely solely on “click succeeded”.
+
+- [ ] **Step 4: Repeat across six clips and bound final duration**
+
+Verify identical playback factor can be applied to each clip and final overshoot can be corrected without changing only the last clip's motion speed.
+
+- [ ] **Step 5: Record PASS/FAIL**
+
+The spike document records date, Canva editor behavior, browser mode, selectors/observable states, six-clip repetition result, trim result and final recommendation. Never record cookies, tokens or private signed URLs.
+
+- [ ] **Step 6: Gate decision**
+
+If all seven success-contract items pass, continue to Task 10. If any required item cannot be made reliable, stop implementation and revise the Design Spec before deeper Canva automation. Do not silently move final concatenation back into VideosTurbo.
+
+```bash
+git add docs/superpowers/spikes/2026-08-22-canva-playback-spike.md
+git commit -m "docs: record canva playback automation spike"
+```
 
 ---
 
-### Task 9: Canva template assembly, narration, captions + export
+### Task 10: Canva Adaptive Six-Clip assembly, narration, captions + export
 
 **Files:**
 - Modify: `app/services/cloud_agent/providers/canva.py`
 - Test: `test/services/cloud_agent/test_canva.py`
-- Create fixtures:
-  - `test/resources/cloud_agent/canva/ready.html`
-  - `test/resources/cloud_agent/canva/login.html`
-  - `test/resources/cloud_agent/canva/challenge.html`
-  - `test/resources/cloud_agent/canva/editor.html`
-  - `test/resources/cloud_agent/canva/export.html`
+- Fixtures: `test/resources/cloud_agent/canva/{ready,login,challenge,editor,playback,export}.html`
 
-**Interfaces:**
+**Interface remains:**
 
 ```python
 assemble_and_export(
@@ -949,62 +787,48 @@ assemble_and_export(
 ) -> Path
 ```
 
-- [ ] **Step 1: Write failing page-object tests**
+The adapter reads server-derived `job.canva_playback_speed` and `job.target_final_duration_seconds`.
 
-Cover:
+- [ ] **Step 1: RED — page-object tests from successful spike behavior**
 
-- ready/login/challenge state;
-- configured template URL required for MVP production path;
-- six clips + one audio upload completion;
-- clip ordering 1→6;
-- narration placement;
-- source-audio mute when configured;
-- Auto Captions action/ready state;
-- MP4 + 1080p export selection;
-- final download completion;
-- screenshot evidence on unrecoverable failure.
+Cover upload completion, ordering 1→6, `1.0x` no-adjust path, `<1.0x` uniform adjustment across all six clips, post-action verification, narration at time 0, source mute, final trim/bound, captions, MP4 1080p export and final download.
 
-- [ ] **Step 2: Verify RED**
+- [ ] **Step 2: RED — unsafe UI behavior becomes explicit failure**
 
-```bash
-uv run pytest test/services/cloud_agent/test_canva.py -v
-```
+If Playback control cannot be found or the resulting timeline cannot be verified, raise a typed error that workflow can map to `HUMAN_REQUIRED` with `checkpoint=FLOW_READY` when manual recovery is appropriate.
 
-- [ ] **Step 3: Implement minimal production path**
-
-Sequence:
+- [ ] **Step 3: GREEN — implement only spike-proven selectors/actions**
 
 ```text
 SessionManager.ensure_service_ready("canva")
-→ open configured template URL
-→ upload six validated clips + voice.mp3
-→ wait for upload completion
-→ arrange 1→6 with straight cuts
-→ mute source audio when narration is primary
-→ place narration
-→ generate captions
-→ retain template caption styling
+→ open configured template
+→ upload six validated clips + canonical voice.mp3
+→ arrange 1→6
+→ if speed < 1.0, apply same custom speed to every clip
+→ verify timeline/playback result
+→ mute source audio
+→ place narration at 0
+→ trim final visual end for rounding/overshoot if required
+→ Auto Captions
 → export MP4 1080p
-→ download to output
+→ download
 ```
 
-Do not add transitions/effects in MVP.
-
-- [ ] **Step 4: Verify GREEN and commit**
+- [ ] **Step 4: Verify and commit**
 
 ```bash
 uv run pytest test/services/cloud_agent/test_canva.py -v
 uv run ruff check app/services/cloud_agent/providers/canva.py test/services/cloud_agent/test_canva.py
-
-git add app/services/cloud_agent/providers/canva.py test/services/cloud_agent/test_canva.py test/resources/cloud_agent/canva
-git commit -m "feat: automate canva final assembly"
 ```
 
-Live Canva verification is Task 13, not CI.
+```bash
+git add app/services/cloud_agent/providers/canva.py test/services/cloud_agent/test_canva.py test/resources/cloud_agent/canva
+git commit -m "feat: automate adaptive canva assembly"
+```
 
 ---
 
-### Task 10: Full checkpointed production wiring + factory
+### Task 11: Full checkpointed production wiring + factory
 
 **Files:**
 - Modify: `app/services/cloud_agent/workflow.py`
@@ -1020,170 +844,68 @@ build_worker() -> CloudAgentWorker
 python -m app.services.cloud_agent.worker
 ```
 
-- [ ] **Step 1: Write failing full fake-E2E test**
+- [ ] **Step 1: RED — full fake E2E for 63-second narration**
 
-Assert exact concrete status order:
-
-```text
-QUEUED
-PREFLIGHT
-PREFLIGHT_PASSED
-TTS_GENERATING
-TTS_READY
-FLOW_GENERATING
-FLOW_DOWNLOADING
-FLOW_READY
-CANVA_UPLOADING
-CANVA_EDITING
-CAPTIONING
-EXPORTING
-DOWNLOADING_FINAL
-VALIDATING
-FINAL_VALIDATED
-COMPLETED
-```
-
-Assert checkpoint progression is only durable completed boundaries, e.g.:
+Assert:
 
 ```text
-NONE → TTS_READY → FLOW_READY → FINAL_VALIDATED
+QUEUED → PREFLIGHT → PREFLIGHT_PASSED
+→ TTS_GENERATING → TTS_READY (63.25s, ~0.9486x)
+→ FLOW_GENERATING → FLOW_DOWNLOADING → FLOW_READY
+→ CANVA_UPLOADING → CANVA_EDITING → CAPTIONING
+→ EXPORTING → DOWNLOADING_FINAL → VALIDATING
+→ FINAL_VALIDATED → COMPLETED
 ```
 
-- [ ] **Step 2: Add failure/recovery assertions**
+Checkpoint progression remains durable boundaries only.
 
-Required:
+- [ ] **Step 2: Recovery/failure assertions**
 
-- Preflight before TTS;
-- Flow re-check immediately before Flow;
-- Canva re-check immediately before Canva;
-- lease remains renewed during external work;
-- `HUMAN_REQUIRED` preserves checkpoint and stops;
-- `PAUSE`/`CANCEL` stop at safe boundaries;
-- resume from `FLOW_READY` validates voice + all six clips and skips TTS/Flow;
-- invalid retained artifacts prevent unsafe skip;
-- final validation occurs before cleanup;
-- failed final validation retains clips;
-- cleanup only after `FINAL_VALIDATED`.
+Cover Preflight before TTS, Flow/Canva re-checks, lease renewal, HUMAN_REQUIRED preserving checkpoint, pause/cancel, resume from TTS_READY/FLOW_READY without duplicate paid calls, `NARRATION_TOO_LONG_FOR_SIX_CLIP` before Flow, final-duration failure retaining sources, cleanup only after FINAL_VALIDATED.
 
-- [ ] **Step 3: Verify RED**
+- [ ] **Step 3: GREEN — factory reads existing `config.app`**
 
-```bash
-uv run pytest test/services/cloud_agent/test_workflow.py -v
-```
+Construct Store/Storage/ProfileLock/Browser/Session/Preflight/TTS/Flow/Canva/Workflow/Worker from the existing config object. No second config loader.
 
-- [ ] **Step 4: Wire real components through `factory.py`**
-
-Factory reads existing `config.app` and constructs Store/Storage/ProfileLock/Browser/Session/Preflight/TTS/Flow/Canva/Workflow/Worker. No global second config object.
-
-- [ ] **Step 5: Implement bounded error classification**
-
-Map:
-
-```text
-transient timeout/network → retry up to configured max
-human security challenge  → HUMAN_REQUIRED
-validation failure         → FAILED unless selective step retry applies
-user pause                 → PAUSED
-user cancel                → CANCELLED
-```
-
-- [ ] **Step 6: Verify GREEN and Gate C regression suite**
+- [ ] **Step 4: Verify Gate C and commit**
 
 ```bash
 uv run pytest test/services/cloud_agent -v
 uv run ruff check app/services/cloud_agent test/services/cloud_agent
 ```
 
-- [ ] **Step 7: Commit**
-
 ```bash
 git add app/services/cloud_agent/workflow.py app/services/cloud_agent/worker.py app/services/cloud_agent/factory.py test/services/cloud_agent/test_workflow.py
-git commit -m "feat: wire cloud video production workflow"
+git commit -m "feat: wire adaptive cloud video workflow"
 ```
 
 ---
 
 # Gate D — VideosTurbo UI
 
-### Task 11: Cloud Agent Streamlit control/status UI using FastAPI contract
+### Task 12: Cloud Agent Streamlit control/status UI through FastAPI
 
 **Files:**
 - Create: `webui/cloud_agent.py`
 - Modify: `webui/Main.py`
 - Test: `test/services/test_cloud_agent_webui.py`
-- Preserve/reuse:
-  - `app/services/six_clip_plan.py`
-  - `webui/six_clip_timeline.py` generation/session helpers where useful
-  - existing script generation settings and tests
 
-**Interfaces:**
+- [ ] **Step 1: RED — UI/API-client tests**
 
-`webui/cloud_agent.py` owns Cloud Agent API client calls and panels. It must not open SQLite directly.
+Required controls/status: Video Subject, Target Words, Language, Generate Script, Script Editor, View Master Prompt, TTS Provider, Voice, Speed, Flow/Canva checks, Open Browser, Start, Pause/Resume/Cancel, status/history/final video.
 
-- [ ] **Step 1: Write failing UI/API-client tests**
+After TTS_READY, status displays measured narration duration and Canva playback factor when below 1.0x. For `NARRATION_TOO_LONG_FOR_SIX_CLIP`, show measured duration, required speed, configured floor and actions: shorten script, reduce Target Words, or increase Voice Rate.
 
-Using Streamlit `AppTest` and/or isolated helper tests, assert the Cloud Agent path exposes:
+- [ ] **Step 2: GREEN — thin API helpers and panels**
 
-```text
-Video Subject
-Target Words
-Language
-Generate Script
-Script Editor
-View Master Prompt
-TTS Provider
-Voice
-Speed
-Check Google Flow
-Check Canva
-Check All Sessions
-Open Browser
-Start Auto Production
-Pause
-Resume
-Cancel
-Production Status
-Job History
-Final Video
-```
+Streamlit never opens SQLite directly and never becomes the worker. Cloud Agent Start does not require legacy six-media Upload/URL slots.
 
-Assert Start payload contains `script`, existing `SixClipPlan`, `master_prompt`, language/target words and selected voice settings.
-
-- [ ] **Step 2: Verify RED**
-
-```bash
-uv run pytest test/services/test_cloud_agent_webui.py -v
-```
-
-- [ ] **Step 3: Implement thin API helpers**
-
-Use configured loopback/reverse-proxy API base URL. Add bounded timeout/error messages. Do not duplicate job transition logic in Streamlit.
-
-- [ ] **Step 4: Implement Service Connections + Cloud Agent health**
-
-Display:
-
-- Flow/Canva status + last checked;
-- Check / Open Browser / Check All;
-- Worker Online/Offline from `/cloud-agent/health` heartbeat;
-- storage status when unhealthy.
-
-- [ ] **Step 5: Implement Start/status/history/final UX**
-
-Start creates a persistent job. Streamlit reruns/polls status but is not the worker. `HUMAN_REQUIRED` shows reason and Open Browser. Completed shows preview/download.
-
-- [ ] **Step 6: Disconnect legacy media requirement from Cloud Agent Start**
-
-Cloud Agent Start must not require six media Upload/URL slots. Keep legacy UI/code available during migration rather than deleting it now.
-
-- [ ] **Step 7: Verify existing six-clip/script regressions**
+- [ ] **Step 3: Regression verification and commit**
 
 ```bash
 uv run pytest test/services/test_cloud_agent_webui.py test/services/test_six_clip_webui.py test/services/test_webui_generation_defaults.py -v
 uv run ruff check webui/cloud_agent.py webui/Main.py test/services/test_cloud_agent_webui.py
 ```
-
-- [ ] **Step 8: Commit**
 
 ```bash
 git add webui/cloud_agent.py webui/Main.py test/services/test_cloud_agent_webui.py
@@ -1194,25 +916,17 @@ git commit -m "feat: add cloud production control ui"
 
 # Gate E — Ubuntu services and protected human browser
 
-### Task 12: API/WebUI/Worker systemd + Xvfb/noVNC/Nginx deployment
+### Task 13: API/WebUI/Worker systemd + Xvfb/noVNC/Nginx deployment
 
 **Files:**
 - Create: `deploy/systemd/videosturbo-api.service.example`
 - Create: `deploy/systemd/videosturbo-worker.service.example`
 - Modify: `deploy/systemd/videosturbo-webui.service.example`
 - Create: `deploy/cloud-agent/README.md`
-- Modify: `config.example.toml` only for deployment comments/defaults not already added in Task 4.
 
-**Interfaces:**
+- [ ] **Step 1: Define independent services**
 
-- Existing WebUI service remains the Streamlit process.
-- API service runs existing FastAPI/Uvicorn stack on loopback.
-- Worker is independent from both.
-- Xvfb/noVNC exposes the production headed browser only through protected access.
-
-- [ ] **Step 1: Write deployment assertions/test script where practical**
-
-Add a small parsing test if repository conventions allow, or use explicit verification commands in the runbook. Required service commands must contain:
+Required commands:
 
 ```text
 WebUI: python -m streamlit run /opt/VideosTurbo/webui/Main.py ...
@@ -1220,45 +934,17 @@ API:   /opt/VideosTurbo/.venv/bin/python /opt/VideosTurbo/main.py
 Worker:/opt/VideosTurbo/.venv/bin/python -m app.services.cloud_agent.worker
 ```
 
-All run with `WorkingDirectory=/opt/VideosTurbo` and server-side environment files for secrets.
+All use `WorkingDirectory=/opt/VideosTurbo`; secrets come from server-side environment/config files, not unit files.
 
-- [ ] **Step 2: Define API service**
+- [ ] **Step 2: Exact Ubuntu runbook**
 
-`videosturbo-api.service.example` starts the existing `main.py`/`app.asgi:app` path, binds loopback in production config, restarts on failure and does not contain secrets inline.
+Document system packages, `uv sync --frozen`, `uv run playwright install --with-deps chromium`, server data/profile/lock ownership, SQLite permissions, Xvfb display, noVNC, protected Nginx/TLS/auth/private access, service installation, first headed Flow/Canva login and session check.
 
-- [ ] **Step 3: Define worker service**
+- [ ] **Step 3: Safety boundary**
 
-Worker starts after network/API prerequisites as appropriate and restarts on failure. It does not depend on an open Streamlit session.
+noVNC is never anonymous on the public internet; browser profiles are never served by application/static routes.
 
-- [ ] **Step 4: Update/reuse WebUI service**
-
-Preserve existing Streamlit command and existing deployment safeguards unless they conflict with the Cloud Agent architecture. Add only the API-base/reverse-proxy configuration needed for Cloud Agent UI calls.
-
-- [ ] **Step 5: Write exact Ubuntu runbook**
-
-Document:
-
-```text
-install system packages
-→ install/sync project with uv
-→ uv run playwright install --with-deps chromium
-→ create server data/profile/lock directories with videosturbo ownership
-→ configure SQLite/job storage permissions
-→ configure Xvfb display
-→ configure noVNC against that display
-→ configure Nginx/TLS/auth or private-network access
-→ install/enable API service
-→ install/enable WebUI service
-→ install/enable Worker service
-→ first manual Google Flow/Canva login in headed server browser
-→ Check All Sessions
-```
-
-- [ ] **Step 6: Document browser safety boundary**
-
-State explicitly: noVNC is never anonymously exposed to the public internet; browser profile files are never served by FastAPI/Streamlit/Nginx static routes.
-
-- [ ] **Step 7: Verify service syntax/runbook references and commit**
+- [ ] **Step 4: Verify and commit**
 
 ```bash
 systemd-analyze verify deploy/systemd/videosturbo-api.service.example
@@ -1266,10 +952,10 @@ systemd-analyze verify deploy/systemd/videosturbo-worker.service.example
 systemd-analyze verify deploy/systemd/videosturbo-webui.service.example
 ```
 
-If `systemd-analyze` rejects `.example` paths because referenced EnvironmentFiles/users do not exist in CI, record the exact limitation and validate unit syntax on the real Ubuntu host in Task 13.
+If host-specific users/EnvironmentFiles prevent local verification, validate the exact units on the real Ubuntu host in Gate F and record the limitation.
 
 ```bash
-git add deploy/systemd/videosturbo-api.service.example deploy/systemd/videosturbo-worker.service.example deploy/systemd/videosturbo-webui.service.example deploy/cloud-agent/README.md config.example.toml
+git add deploy/systemd/videosturbo-api.service.example deploy/systemd/videosturbo-worker.service.example deploy/systemd/videosturbo-webui.service.example deploy/cloud-agent/README.md
 git commit -m "docs: add ubuntu cloud agent deployment"
 ```
 
@@ -1277,15 +963,16 @@ git commit -m "docs: add ubuntu cloud agent deployment"
 
 # Gate F — Automated verification + real Ubuntu End-to-End
 
-### Task 13: Verification gates and real Ubuntu smoke
+### Task 14: Verification gates and real Ubuntu smoke
 
 **Files:**
 - Create: `docs/superpowers/plans/2026-08-22-cloud-video-agent-smoke-checklist.md`
-- Modify production/tests only when a reproducible smoke bug is found; every fix follows RED → GREEN.
+- Modify production/tests only for reproducible smoke bugs; every behavior fix follows RED → GREEN.
 
-- [ ] **Step 1: Run complete automated verification**
+- [ ] **Step 1: Complete automated verification**
 
 ```bash
+uv lock --check
 uv sync --frozen
 uv run python -m compileall app webui
 uv run ruff check app webui test
@@ -1294,83 +981,41 @@ uv run pytest
 
 Expected: PASS and coverage >=70%.
 
-- [ ] **Step 2: Verify API/WebUI/Worker service independence on Ubuntu**
+- [ ] **Step 2: Runtime independence**
 
-```text
-systemctl status videosturbo-api
-systemctl status videosturbo-webui
-systemctl status videosturbo-worker
-```
+Verify API/WebUI/Worker service status and worker heartbeat without an open local browser.
 
-Verify worker heartbeat becomes Online in UI/API without opening a local browser.
+- [ ] **Step 3: Session recovery**
 
-- [ ] **Step 3: Verify session controls**
+Demonstrate READY, safe Auto Re-login, controlled HUMAN_REQUIRED, protected noVNC manual resolution and Resume. Never bypass security challenges.
 
-Demonstrate:
+- [ ] **Step 4: Real ~63-second paid E2E**
 
-1. Check All reports Flow + Canva READY.
-2. Expire one service session while keeping Google account selectable; Auto Re-login restores READY.
-3. Create a controlled human-verification state; system becomes `HUMAN_REQUIRED`.
-4. `Open Browser` opens the protected noVNC session showing the server-side browser.
-5. User resolves challenge manually; Check Again/Resume verifies READY.
+Evidence must show one canonical TTS, decimal duration around 63 seconds, calculated playback around 0.95x, six Flow clips, Canva uniform playback adjustment, same voice.mp3, captions/export, final duration within tolerance, FINAL_VALIDATED before cleanup, COMPLETED.
 
-Never bypass security challenges.
+- [ ] **Step 5: Over-policy narration stops before Flow**
 
-- [ ] **Step 4: Run one real paid-generation E2E job**
+Use narration requiring playback below `0.85x`. Verify `NARRATION_TOO_LONG_FOR_SIX_CLIP`, Flow generation is not started and the UI gives actionable guidance.
 
-Evidence checklist:
+- [ ] **Step 6: Local-browser independence**
 
-```text
-Script generated/edited using existing LLM
-SixClipPlan + Master Prompt generated
-job persisted/QUEUED
-Preflight checks worker/storage/Flow/Canva
-TTS generated using existing voice service
-voice duration validated
-Flow re-check
-Flow generated six clips
-six clips downloaded/validated
-checkpoint=FLOW_READY
-Canva re-check
-six clips + narration uploaded
-clips ordered / source audio muted as configured
-captions generated
-MP4 exported/downloaded
-final.mp4 validated
-checkpoint=FINAL_VALIDATED
-Flow sources cleaned only after validation
-status=COMPLETED
-```
+Start a job, close the user's local browser/computer, confirm worker continues, then reconnect and observe persisted state/final output.
 
-- [ ] **Step 5: Test local-browser/computer independence**
+- [ ] **Step 7: Restart recovery at TTS_READY and FLOW_READY**
 
-After Start, close the user's local browser. Confirm worker continues. Reopen from another client and confirm persisted progress/final result.
+At TTS_READY: restart worker, re-probe existing audio, do not recreate TTS. At FLOW_READY: restart worker, validate existing voice + six clips, do not recreate TTS/Flow, resume at Canva.
 
-- [ ] **Step 6: Test worker restart + lease recovery at `FLOW_READY`**
+- [ ] **Step 8: Final-validation failure retains sources**
 
-Stop/restart worker after `FLOW_READY`. Verify:
+Controlled invalid/short final export must not become COMPLETED and source Flow clips remain available.
 
-```text
-expired lease recovered
-→ voice + all six clips revalidated
-→ TTS call count does not increase
-→ Flow generation call count does not increase
-→ resume at Canva
-```
+- [ ] **Step 9: Record sanitized evidence and commit**
 
-- [ ] **Step 7: Test final-validation failure keeps sources**
-
-Use a controlled invalid final artifact/export case. Assert source clips remain and job is not marked `COMPLETED`.
-
-- [ ] **Step 8: Record evidence**
-
-Smoke checklist records date/time, app commit SHA, job IDs, PASS/FAIL and sanitized notes. Never commit cookies, credentials, signed URLs or screenshots containing secrets.
-
-- [ ] **Step 9: Commit smoke checklist**
+Checklist records date/time, commit SHA, job IDs, measured narration duration, playback factor, target/final durations, PASS/FAIL and sanitized notes. Never commit cookies, credentials, signed URLs or secret-bearing screenshots.
 
 ```bash
 git add docs/superpowers/plans/2026-08-22-cloud-video-agent-smoke-checklist.md
-git commit -m "test: record cloud agent ubuntu smoke"
+git commit -m "test: record adaptive cloud agent ubuntu smoke"
 ```
 
 No legacy cleanup starts until Gate F passes.
@@ -1379,121 +1024,95 @@ No legacy cleanup starts until Gate F passes.
 
 # Gate G — Legacy cleanup after acceptance only
 
-### Task 14: Legacy cleanup in a separate follow-up PR
+### Task 15: Legacy cleanup in a separate follow-up PR
 
-**Files:**
-- Determined by reference search after Task 13 acceptance.
-- Do not perform this task inside the initial Cloud Agent implementation PR unless the user explicitly changes the gate.
+Do not perform this task inside the initial Cloud Agent PR unless the user explicitly changes the gate.
 
-- [ ] **Step 1: Build an actual reference/import/route/UI inventory**
+- [ ] **Step 1: Build actual references/imports/routes/UI inventory**
 
-Candidate categories:
+Review stock providers, legacy Main stock path, material type/mixed UI, old six-media Upload/URL controls, Ken Burns/image processing, legacy local-render components and dependencies. Explicitly exclude Music Batch and any retained callers.
 
-```text
-Pexels/Pixabay/Coverr stock providers
-legacy Main stock search/download
-material type + mixed image/video UI
-old six-media Upload/URL controls in the main production path
-Ken Burns/image processing used only by removed path
-legacy local-render components with no retained callers
-unused dependencies after source removal
-```
-
-Explicitly exclude retained Music Batch or other still-used features.
-
-- [ ] **Step 2: For each category, write/update a regression test first**
-
-Example cycle:
+- [ ] **Step 2: Remove one proven-unused category per TDD/regression cycle**
 
 ```text
-RED/coverage guard for retained behavior
-→ remove exactly one unused category
+retained-behavior test/coverage guard
+→ remove one unused category
 → focused tests
 → full Ruff + pytest
 → commit
 ```
 
-- [ ] **Step 3: Remove dependencies only after source references are zero**
+- [ ] **Step 3: Remove dependencies only after references are zero**
 
-Regenerate `uv.lock` and run `uv sync --frozen`.
+Regenerate `uv.lock`, run `uv lock --check` and `uv sync --frozen`.
 
-- [ ] **Step 4: Final automated + real smoke**
+- [ ] **Step 4: Repeat real Cloud Agent smoke before cleanup merge**
 
-```bash
-uv sync --frozen
-uv run python -m compileall app webui
-uv run ruff check app webui test
-uv run pytest
-```
-
-Then repeat one real Cloud Agent smoke before merging cleanup.
+The cleanup PR must not change Adaptive Six-Clip timing or Canva assembly behavior.
 
 ---
 
 ## Review Gates
 
 ```text
-Gate A — Tasks 1–3
-SQLite jobs/checkpoints/lease/heartbeat + storage + worker semantics
+Gate A baseline — Tasks 1–3 already complete and previously CI-green
+
+Gate A2 — Tasks 3A–3C
+v2.2 durable timing + timing policy + workflow/resume/final-duration correction
 
 Gate B — Tasks 4–6
-Playwright/process-safe profile lock + local/session Preflight + FastAPI contract
+Playwright lock/profile runtime + local/session Preflight + FastAPI contract
 
-Gate C — Tasks 7–10
-Existing TTS adapter + Flow + Canva + full workflow
+Gate C — Tasks 7–11
+Existing TTS adapter + Flow + real Canva Playback Spike + Canva adapter + full wiring
 
-Gate D — Task 11
+Gate D — Task 12
 Streamlit UI through API
 
-Gate E — Task 12
+Gate E — Task 13
 Ubuntu API/WebUI/Worker + Xvfb/noVNC deployment
 
-Gate F — Task 13
-Full automated verification + real Ubuntu E2E/restart/session recovery
+Gate F — Task 14
+Full automated verification + ~63s E2E + over-policy/restart/session recovery smoke
 
-Gate G — Task 14
-Separate legacy-cleanup follow-up only after acceptance
+Gate G — Task 15
+Separate legacy-cleanup follow-up after acceptance
 ```
 
-Every gate must leave the branch reviewable and testable.
+Every gate must leave the branch reviewable and testable. Draft PR #4 remains Draft until Gate F passes.
 
 ## Spec Coverage Self-Review
 
-- Existing FastAPI reuse: Tasks 6, 12.
-- Existing state reviewed without unsafe reuse: Task 1 architecture/SQLite boundary.
-- Existing LLM + six-clip reuse: Tasks 1, 11.
-- Persist six prompt records: Task 1 via `SixClipPlan` JSON.
-- Existing TTS reuse: Task 7.
-- Existing storage/FFmpeg reuse: Task 2.
-- Status/checkpoint separation: Tasks 1, 3, 10.
-- Lease renewal + worker heartbeat: Tasks 1, 3, 10, 13.
-- Local worker/storage Preflight: Tasks 5, 10, 13.
-- Session Preflight before TTS: Tasks 5, 10, 13.
-- Safe Auto Re-login/HUMAN_REQUIRED: Tasks 5, 8, 9, 10, 13.
-- Manual Check/Open Browser: Tasks 6, 11, 12, 13.
+- Existing FastAPI reuse: Tasks 6, 13.
+- Existing state reviewed without unsafe reuse: completed Task 1.
+- Existing LLM + SixClipPlan reuse: completed Task 1, Tasks 8, 12.
+- One canonical production TTS: Tasks 3C, 7, 11, 14.
+- Decimal duration without early ceil: Tasks 3B–3C, 14.
+- Durable timing fields and SQLite evolution: Task 3A.
+- Adaptive formula / 0.85 floor: Tasks 3B–3C.
+- Reject over-policy narration before Flow credit: Tasks 3C, 11, 14.
+- Exactly six Flow clips in MVP: Tasks 8, 11, 14.
+- Canva owns final assembly; no legacy pre-concat: Tasks 9–11, 14.
+- Real Canva Playback hard gate: Task 9.
+- Uniform six-clip playback + post-action verification: Tasks 9–10.
+- Final duration/narration truncation gate: Tasks 3C, 10–11, 14.
+- Restart/resume without duplicate paid steps: completed Task 3 plus Tasks 3C, 11, 14.
 - Process-safe browser profile ownership: Task 4.
-- Headed Xvfb/noVNC recovery: Tasks 4, 12, 13.
-- Re-check before Flow/Canva: Tasks 8, 9, 10.
-- Six Flow clips/selective retry: Task 8.
-- Canva timeline/narration/captions/export: Task 9.
-- Final validation before cleanup: Tasks 2, 10, 13.
-- Pause/Resume/Cancel without losing checkpoint: Tasks 3, 6, 10, 11.
-- Restart-resume without repeating paid steps: Tasks 3, 10, 13.
-- UI independent from worker: Task 11.
-- Existing WebUI systemd reuse + separate API service: Task 12.
-- Ubuntu 24/7 operation: Tasks 12–13.
-- Legacy code retained until real E2E: Task 14 gate.
-- Secrets/profile isolation: Tasks 4, 6, 12.
+- Local/session Preflight: Task 5.
+- Safe Auto Re-login/HUMAN_REQUIRED: Tasks 5, 10–11, 14.
+- Manual Check/Open Browser: Tasks 6, 12–14.
+- Headed Xvfb/noVNC recovery: Tasks 9, 13–14.
+- UI timing/error explanation: Tasks 6, 12.
+- Legacy code retained until real E2E: Task 15 gate.
 
-No task requires a live third-party session in CI. Live Google Flow and Canva behavior is verified only at Task 13.
+## Placeholder / Consistency Self-Review
 
-## Placeholder / consistency self-review
-
-- No `TBD`, `TODO`, or “implement later” steps remain.
-- `status`, `checkpoint`, and `control_request` names are consistent across tasks.
-- `SixClipPlan` is reused rather than duplicated.
-- `renew_lease` and worker heartbeat are defined before worker/workflow tasks consume them.
-- Flow/Canva browser locking is process-safe because API and worker are separate processes.
-- Deployment includes all three runtime processes: API, WebUI, Worker.
-- No generic `RUNNING` state is referenced.
+- No `TBD`, `TODO`, “implement later”, or undefined variable-N clip tasks are part of MVP.
+- `status`, `checkpoint`, `control_request`, `audio_duration_seconds`, `canva_playback_speed`, and `target_final_duration_seconds` use consistent names throughout.
+- `SixClipPlan` remains the MVP planning model; Dynamic Clip Timeline is not partially introduced.
+- `cloud_agent_tts_max_duration_seconds` is explicitly obsolete for Cloud Agent v2.2 and is not used as a fixed narration gate.
+- Browser dependency lock work uses a generated `uv lock` result, never fabricated package hashes.
+- Canva Playback Spike occurs before production Canva assembly code.
 - Cleanup remains after `FINAL_VALIDATED` only.
+- Deployment still has three runtime processes: API, WebUI, Worker.
+- No generic `RUNNING` status is introduced.
