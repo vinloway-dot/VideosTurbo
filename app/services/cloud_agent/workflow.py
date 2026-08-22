@@ -7,10 +7,15 @@ from app.models.cloud_agent import (
     CloudJobRecord,
     CloudJobStatus,
 )
-from app.services.cloud_agent.errors import HumanRequiredError, MediaValidationError
+from app.services.cloud_agent.errors import (
+    HumanRequiredError,
+    MediaValidationError,
+    NarrationTooLongError,
+)
 from app.services.cloud_agent.job_store import CloudJobStore
-from app.services.cloud_agent.media_probe import validate_audio, validate_video
+from app.services.cloud_agent.media_probe import MediaProbe, validate_audio, validate_video
 from app.services.cloud_agent.storage import CloudJobStorage, JobPaths
+from app.services.cloud_agent.timing import calculate_adaptive_timing
 
 
 class PreflightClient(Protocol):
@@ -56,7 +61,8 @@ class CloudAgentWorkflow:
         canva: CanvaClient,
         *,
         tts_min_duration: float,
-        tts_max_duration: float,
+        canva_min_playback_speed: float,
+        final_duration_tolerance_seconds: float,
         final_min_size_bytes: int,
         expected_width: int,
         expected_height: int,
@@ -68,7 +74,8 @@ class CloudAgentWorkflow:
         self.flow = flow
         self.canva = canva
         self.tts_min_duration = tts_min_duration
-        self.tts_max_duration = tts_max_duration
+        self.canva_min_playback_speed = canva_min_playback_speed
+        self.final_duration_tolerance_seconds = final_duration_tolerance_seconds
         self.final_min_size_bytes = final_min_size_bytes
         self.expected_width = expected_width
         self.expected_height = expected_height
@@ -101,21 +108,34 @@ class CloudAgentWorkflow:
             )
         return None
 
-    def _validate_audio_checkpoint(self, checkpoint: CloudJobCheckpoint, paths: JobPaths) -> None:
+    def _timing_from_probe(self, job_id: str, probe: MediaProbe) -> CloudJobRecord:
+        timing = calculate_adaptive_timing(
+            probe.duration,
+            min_playback_speed=self.canva_min_playback_speed,
+        )
+        return self.store.patch_job(
+            job_id,
+            audio_duration_seconds=timing.audio_duration_seconds,
+            canva_playback_speed=timing.canva_playback_speed,
+            target_final_duration_seconds=timing.target_final_duration_seconds,
+        )
+
+    def _validate_audio_checkpoint(self, job: CloudJobRecord, paths: JobPaths) -> CloudJobRecord:
+        checkpoint = job.checkpoint
         if not paths.voice_file.is_file():
             raise MediaValidationError(
                 f"checkpoint {checkpoint.value} requires audio artifact: {paths.voice_file}"
             )
         try:
-            validate_audio(
+            probe = validate_audio(
                 paths.voice_file,
                 min_duration=self.tts_min_duration,
-                max_duration=self.tts_max_duration,
             )
         except MediaValidationError as exc:
             raise MediaValidationError(
                 f"checkpoint {checkpoint.value} has invalid audio artifact: {exc}"
             ) from exc
+        return self._timing_from_probe(job.id, probe)
 
     def _validate_flow_checkpoint(self, checkpoint: CloudJobCheckpoint, paths: JobPaths) -> None:
         missing = [path for path in paths.flow_files if not path.is_file()]
@@ -136,19 +156,30 @@ class CloudAgentWorkflow:
                     f"checkpoint {checkpoint.value} has invalid Flow artifact {path.name}: {exc}"
                 ) from exc
 
-    def _validate_final_checkpoint(self, checkpoint: CloudJobCheckpoint, paths: JobPaths) -> None:
+    def _validate_final_duration(self, job: CloudJobRecord, probe: MediaProbe) -> None:
+        difference = abs(probe.duration - job.target_final_duration_seconds)
+        if difference > self.final_duration_tolerance_seconds:
+            raise MediaValidationError(
+                f"final media duration {probe.duration:.3f}s differs from target "
+                f"{job.target_final_duration_seconds:.3f}s by {difference:.3f}s; "
+                f"tolerance is {self.final_duration_tolerance_seconds:.3f}s"
+            )
+
+    def _validate_final_checkpoint(self, job: CloudJobRecord, paths: JobPaths) -> None:
+        checkpoint = job.checkpoint
         if not paths.final_file.is_file():
             raise MediaValidationError(
                 f"checkpoint {checkpoint.value} requires final artifact: {paths.final_file}"
             )
         try:
-            validate_video(
+            probe = validate_video(
                 paths.final_file,
                 require_audio=True,
                 min_size_bytes=self.final_min_size_bytes,
                 expected_width=self.expected_width,
                 expected_height=self.expected_height,
             )
+            self._validate_final_duration(job, probe)
         except MediaValidationError as exc:
             raise MediaValidationError(
                 f"checkpoint {checkpoint.value} has invalid final artifact: {exc}"
@@ -157,11 +188,11 @@ class CloudAgentWorkflow:
     def _validate_checkpoint_artifacts(self, job: CloudJobRecord, paths: JobPaths) -> None:
         checkpoint = job.checkpoint
         if self._at_least(checkpoint, CloudJobCheckpoint.TTS_READY):
-            self._validate_audio_checkpoint(checkpoint, paths)
+            job = self._validate_audio_checkpoint(job, paths)
         if self._at_least(checkpoint, CloudJobCheckpoint.FLOW_READY):
             self._validate_flow_checkpoint(checkpoint, paths)
         if self._at_least(checkpoint, CloudJobCheckpoint.FINAL_VALIDATED):
-            self._validate_final_checkpoint(checkpoint, paths)
+            self._validate_final_checkpoint(job, paths)
 
     def run(self, job_id: str, *, worker_id: str) -> CloudJobRecord:
         del worker_id  # Ownership is enforced by the durable lease in CloudJobStore.
@@ -211,10 +242,13 @@ class CloudAgentWorkflow:
                 self.tts.generate(job, paths.voice_file)
                 if not paths.voice_file.is_file():
                     raise MediaValidationError("TTS step did not produce the canonical audio artifact")
-                validate_audio(
+                probe = validate_audio(
                     paths.voice_file,
                     min_duration=self.tts_min_duration,
-                    max_duration=self.tts_max_duration,
+                )
+                timing = calculate_adaptive_timing(
+                    probe.duration,
+                    min_playback_speed=self.canva_min_playback_speed,
                 )
                 job = self.store.patch_job(
                     job.id,
@@ -223,6 +257,9 @@ class CloudAgentWorkflow:
                     current_step="tts_ready",
                     progress=30,
                     voice_file=str(paths.voice_file),
+                    audio_duration_seconds=timing.audio_duration_seconds,
+                    canva_playback_speed=timing.canva_playback_speed,
+                    target_final_duration_seconds=timing.target_final_duration_seconds,
                 )
                 stopped = self._control_boundary(job.id)
                 if stopped is not None:
@@ -230,7 +267,6 @@ class CloudAgentWorkflow:
 
             job = self._get_job(job.id)
             if job.checkpoint is CloudJobCheckpoint.TTS_READY:
-                self._validate_audio_checkpoint(job.checkpoint, paths)
                 self.store.patch_job(
                     job.id,
                     status=CloudJobStatus.FLOW_GENERATING,
@@ -267,8 +303,6 @@ class CloudAgentWorkflow:
 
             job = self._get_job(job.id)
             if job.checkpoint is CloudJobCheckpoint.FLOW_READY:
-                self._validate_audio_checkpoint(job.checkpoint, paths)
-                self._validate_flow_checkpoint(job.checkpoint, paths)
                 stopped = self._control_boundary(job.id)
                 if stopped is not None:
                     return stopped
@@ -292,13 +326,14 @@ class CloudAgentWorkflow:
                     current_step="validating",
                     progress=90,
                 )
-                validate_video(
+                probe = validate_video(
                     paths.final_file,
                     require_audio=True,
                     min_size_bytes=self.final_min_size_bytes,
                     expected_width=self.expected_width,
                     expected_height=self.expected_height,
                 )
+                self._validate_final_duration(job, probe)
                 job = self.store.patch_job(
                     job.id,
                     status=CloudJobStatus.FINAL_VALIDATED,
@@ -313,7 +348,7 @@ class CloudAgentWorkflow:
 
             job = self._get_job(job.id)
             if job.checkpoint is CloudJobCheckpoint.FINAL_VALIDATED:
-                self._validate_final_checkpoint(job.checkpoint, paths)
+                self._validate_final_checkpoint(job, paths)
                 return self.store.patch_job(
                     job.id,
                     status=CloudJobStatus.COMPLETED,
@@ -324,6 +359,14 @@ class CloudAgentWorkflow:
                 )
 
             return self._get_job(job.id)
+        except NarrationTooLongError as exc:
+            return self.store.patch_job(
+                job.id,
+                status=CloudJobStatus.FAILED,
+                current_step="failed",
+                error_code=exc.error_code,
+                error_message=str(exc),
+            )
         except HumanRequiredError as exc:
             return self.store.patch_job(
                 job.id,
