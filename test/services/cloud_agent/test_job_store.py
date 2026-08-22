@@ -1,0 +1,151 @@
+from app.models.cloud_agent import (
+    CloudControlRequest,
+    CloudJobCheckpoint,
+    CloudJobCreate,
+    CloudJobStatus,
+)
+from app.models.six_clip import empty_six_clip_plan
+from app.services.cloud_agent.job_store import CloudJobStore
+
+
+def _request(subject: str = "Why Saturn Has a Hexagon") -> CloudJobCreate:
+    return CloudJobCreate(
+        subject=subject,
+        script="A valid narration script.",
+        master_prompt="Create six videos from this narration.",
+        clip_plan=empty_six_clip_plan(target_words=130),
+        language="English",
+        target_words=130,
+        tts_provider="azure-tts-v1",
+        voice_id="en-US-JennyNeural-Female",
+        voice_speed=1.0,
+    )
+
+
+def test_create_job_persists_defaults_and_six_clip_plan_across_reopen(tmp_path):
+    db_path = tmp_path / "agent.sqlite3"
+    store = CloudJobStore(str(db_path))
+
+    created = store.create_job(_request())
+
+    assert created.status is CloudJobStatus.QUEUED
+    assert created.checkpoint is CloudJobCheckpoint.NONE
+    assert created.control_request is CloudControlRequest.NONE
+    assert created.current_step == "queued"
+    assert created.progress == 0
+    assert created.clip_plan.model_dump() == _request().clip_plan.model_dump()
+
+    reopened = CloudJobStore(str(db_path))
+    loaded = reopened.get_job(created.id)
+
+    assert loaded is not None
+    assert loaded.id == created.id
+    assert loaded.script == created.script
+    assert loaded.master_prompt == created.master_prompt
+    assert loaded.clip_plan.model_dump() == created.clip_plan.model_dump()
+
+
+def test_patch_job_updates_status_checkpoint_and_progress(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    created = store.create_job(_request())
+
+    updated = store.patch_job(
+        created.id,
+        status=CloudJobStatus.TTS_READY,
+        checkpoint=CloudJobCheckpoint.TTS_READY,
+        current_step="tts_ready",
+        progress=25,
+        voice_file="storage/jobs/job/audio/voice.mp3",
+    )
+
+    assert updated.status is CloudJobStatus.TTS_READY
+    assert updated.checkpoint is CloudJobCheckpoint.TTS_READY
+    assert updated.current_step == "tts_ready"
+    assert updated.progress == 25
+    assert updated.voice_file.endswith("voice.mp3")
+
+
+def test_claim_is_exclusive_until_owner_releases_lease(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    created = store.create_job(_request())
+
+    claimed = store.claim_next_job("worker-a", lease_seconds=60)
+
+    assert claimed is not None
+    assert claimed.id == created.id
+    assert claimed.worker_id == "worker-a"
+    assert claimed.lease_until
+    assert store.claim_next_job("worker-b", lease_seconds=60) is None
+    assert store.release_lease(created.id, "worker-b") is False
+    assert store.release_lease(created.id, "worker-a") is True
+
+
+def test_renew_lease_only_succeeds_for_current_owner(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    created = store.create_job(_request())
+    claimed = store.claim_next_job("worker-a", lease_seconds=60)
+    assert claimed is not None
+    first_lease = claimed.lease_until
+
+    assert store.renew_lease(created.id, "worker-b", lease_seconds=120) is False
+    assert store.renew_lease(created.id, "worker-a", lease_seconds=120) is True
+
+    renewed = store.get_job(created.id)
+    assert renewed is not None
+    assert renewed.worker_id == "worker-a"
+    assert renewed.lease_until > first_lease
+
+
+def test_expired_lease_can_be_reclaimed_by_another_worker(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    created = store.create_job(_request())
+    claimed = store.claim_next_job("worker-a", lease_seconds=60)
+    assert claimed is not None
+
+    store.patch_job(
+        created.id,
+        status=CloudJobStatus.FLOW_DOWNLOADING,
+        checkpoint=CloudJobCheckpoint.TTS_READY,
+        current_step="flow_downloading",
+        lease_until="2000-01-01T00:00:00+00:00",
+    )
+
+    reclaimed = store.claim_next_job("worker-b", lease_seconds=60)
+
+    assert reclaimed is not None
+    assert reclaimed.id == created.id
+    assert reclaimed.worker_id == "worker-b"
+    assert reclaimed.status is CloudJobStatus.FLOW_DOWNLOADING
+    assert reclaimed.checkpoint is CloudJobCheckpoint.TTS_READY
+
+
+def test_paused_human_required_and_terminal_jobs_are_never_auto_claimed(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    blocked_statuses = [
+        CloudJobStatus.DRAFT,
+        CloudJobStatus.SCRIPT_READY,
+        CloudJobStatus.PROMPT_READY,
+        CloudJobStatus.PAUSED,
+        CloudJobStatus.HUMAN_REQUIRED,
+        CloudJobStatus.COMPLETED,
+        CloudJobStatus.FAILED,
+        CloudJobStatus.CANCELLED,
+    ]
+
+    for status in blocked_statuses:
+        job = store.create_job(_request(subject=status.value))
+        store.patch_job(job.id, status=status)
+
+    assert store.claim_next_job("worker-a", lease_seconds=60) is None
+
+
+def test_worker_heartbeat_persists_and_can_return_latest_worker(tmp_path):
+    db_path = tmp_path / "agent.sqlite3"
+    store = CloudJobStore(str(db_path))
+
+    store.update_worker_heartbeat("worker-a", now="2026-08-22T06:30:00+00:00")
+    store.update_worker_heartbeat("worker-b", now="2026-08-22T06:31:00+00:00")
+
+    reopened = CloudJobStore(str(db_path))
+    assert reopened.get_worker_last_seen("worker-a") == "2026-08-22T06:30:00+00:00"
+    assert reopened.get_worker_last_seen() == "2026-08-22T06:31:00+00:00"
