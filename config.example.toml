@@ -47,6 +47,37 @@ edge_tts_timeout = 30
 tls_verify = true
 
 # -----------------------------------------------------------------------------
+# Cloud Video Agent / 云端视频 Agent
+# -----------------------------------------------------------------------------
+
+# Cloud Agent is opt-in while implementation and deployment gates are completed.
+cloud_agent_enabled = false
+# Durable job/checkpoint database. Production may override this to /var/lib.
+cloud_agent_db_path = "storage/cloud-agent.sqlite3"
+cloud_agent_worker_poll_seconds = 2
+cloud_agent_worker_lease_seconds = 120
+cloud_agent_worker_heartbeat_seconds = 10
+cloud_agent_max_retries = 3
+cloud_agent_min_free_disk_gb = 10
+# Expected narration and final-video validation boundaries.
+cloud_agent_tts_min_duration_seconds = 58
+cloud_agent_tts_max_duration_seconds = 62
+cloud_agent_final_min_size_bytes = 1048576
+cloud_agent_expected_width = 1080
+cloud_agent_expected_height = 1920
+# Development defaults to headless. Ubuntu production uses false with Xvfb/noVNC.
+cloud_agent_browser_headless = true
+# Dedicated automation profiles only. Never point these at a personal Chrome profile.
+cloud_agent_google_profile_dir = "storage/browser-profiles/google-flow"
+cloud_agent_canva_profile_dir = "storage/browser-profiles/canva"
+cloud_agent_browser_lock_dir = "storage/browser-locks"
+# noVNC operator URL used when a browser session requires manual recovery.
+cloud_agent_remote_browser_url = "http://127.0.0.1:6080/vnc.html"
+# Service URLs are intentionally blank until explicitly configured.
+cloud_agent_flow_url = ""
+cloud_agent_canva_template_url = ""
+
+# -----------------------------------------------------------------------------
 # Video Materials / 视频素材
 # -----------------------------------------------------------------------------
 
