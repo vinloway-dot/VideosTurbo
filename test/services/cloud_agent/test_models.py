@@ -115,6 +115,28 @@ def test_cloud_job_record_keeps_status_checkpoint_and_control_independent():
     assert record.progress == 70
 
 
+def test_cloud_job_record_has_restart_safe_adaptive_timing_defaults():
+    record = CloudJobRecord(**_valid_record())
+
+    assert record.audio_duration_seconds == 0.0
+    assert record.canva_playback_speed == 1.0
+    assert record.target_final_duration_seconds == 60.0
+
+
+def test_cloud_job_record_accepts_persisted_adaptive_timing_values():
+    record = CloudJobRecord(
+        **_valid_record(
+            audio_duration_seconds=63.25,
+            canva_playback_speed=60.0 / 63.25,
+            target_final_duration_seconds=63.25,
+        )
+    )
+
+    assert record.audio_duration_seconds == 63.25
+    assert record.canva_playback_speed == pytest.approx(60.0 / 63.25)
+    assert record.target_final_duration_seconds == 63.25
+
+
 def test_cloud_job_record_rejects_progress_outside_zero_to_one_hundred():
     with pytest.raises(ValidationError):
         CloudJobRecord(**_valid_record(progress=101))
