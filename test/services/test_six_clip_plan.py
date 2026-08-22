@@ -127,6 +127,38 @@ def test_master_prompt_contains_global_rules_and_all_current_clip_values():
     assert "Video Prompt:\n\nUPDATED CLIP FOUR PROMPT" in master
 
 
+def test_master_prompt_batches_use_six_items_and_absolute_indexes():
+    ranges = six_clip_plan.build_timeline_ranges(127.0)
+    plan = SixClipPlan(
+        target_words=300,
+        narration_duration_sec=127.0,
+        timeline_duration_sec=127.0,
+        narration_fingerprint="voice-fingerprint",
+        segments=[
+            SixClipSegment(
+                index=index,
+                start_sec=start,
+                end_sec=end,
+                title=f"Scene {index}",
+                narration_context=f"Narration {index}",
+                video_prompt=f"Prompt {index}",
+            )
+            for index, (start, end) in enumerate(ranges, start=1)
+        ],
+    )
+
+    batches = six_clip_plan.build_master_prompt_batches(plan)
+
+    assert len(batches) == 3
+    assert "CLIP 1 — Scene 1" in batches[0]
+    assert "CLIP 6 — Scene 6" in batches[0]
+    assert "CLIP 7 — Scene 7" in batches[1]
+    assert "CLIP 12 — Scene 12" in batches[1]
+    assert "CLIP 13 — Scene 13" in batches[2]
+    assert "CLIP 6 —" not in batches[1]
+    assert all(GLOBAL_CHARACTER_RULES in batch for batch in batches)
+
+
 def test_parse_ai_clip_plan_accepts_fenced_json_and_normalizes_timeline():
     payload = {
         "clips": [
