@@ -6,6 +6,7 @@ from app.services import voice
 ROOT_DIR = Path(__file__).parent.parent.parent
 MAIN_SOURCE = (ROOT_DIR / "webui" / "Main.py").read_text(encoding="utf-8")
 
+# Regression coverage for the current Google-recommended Gemini TTS model.
 
 def test_gemini_tts_defaults_to_31_and_keeps_legacy_fallbacks():
     assert voice.GEMINI_TTS_DEFAULT_MODEL == "gemini-3.1-flash-tts-preview"
