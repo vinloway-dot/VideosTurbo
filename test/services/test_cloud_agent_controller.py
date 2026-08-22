@@ -4,6 +4,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.config import config
 from app.models.cloud_agent import (
     CloudControlRequest,
     CloudJobCheckpoint,
@@ -15,6 +16,7 @@ from app.models.six_clip import empty_six_clip_plan
 from app.services import voice
 from app.services.cloud_agent.browser import PersistentBrowserManager
 from app.services.cloud_agent.job_store import CloudJobStore
+from app.services.cloud_agent.storage import CloudJobStorage
 
 
 EXPECTED_CLOUD_AGENT_PATHS = {
@@ -57,9 +59,11 @@ def _request_payload() -> dict:
 def _client(tmp_path):
     cloud_agent = _cloud_agent_controller()
     store = CloudJobStore(str(tmp_path / "cloud-agent.sqlite3"))
+    storage = CloudJobStorage(tmp_path / "jobs")
     app = FastAPI()
     app.include_router(cloud_agent.router)
     app.dependency_overrides[cloud_agent.get_cloud_job_store] = lambda: store
+    app.dependency_overrides[cloud_agent.get_cloud_job_storage] = lambda: storage
     return TestClient(app, raise_server_exceptions=False), store
 
 
@@ -79,6 +83,25 @@ def test_cloud_agent_router_contract_is_registered_on_existing_root_router():
 
     assert cloud_agent.router.prefix == "/api/v1"
     assert registered == EXPECTED_CLOUD_AGENT_PATHS
+
+
+def test_health_reports_enabled_worker_storage_and_free_space(monkeypatch, tmp_path):
+    client, store = _client(tmp_path)
+    last_seen = "2026-08-22T15:00:00+00:00"
+    store.update_worker_heartbeat("worker-health", now=last_seen)
+    monkeypatch.setitem(config.app, "cloud_agent_enabled", True)
+    monkeypatch.setitem(config.app, "cloud_agent_min_free_disk_gb", 0)
+
+    response = client.get("/api/v1/cloud-agent/health")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["enabled"] is True
+    assert data["worker_last_seen"] == last_seen
+    assert data["worker_online"] is True
+    assert data["storage_writable"] is True
+    assert data["free_space_bytes"] > 0
+    assert data["free_space_ok"] is True
 
 
 def test_create_job_persists_queue_without_running_tts_or_browser(monkeypatch, tmp_path):
@@ -253,3 +276,55 @@ def test_resume_rejects_job_that_is_not_paused_or_human_required(tmp_path):
         cloud_agent.resume_cloud_agent_job(created.id, None, store=store)
 
     assert exc_info.value.status_code == 409
+
+
+def test_final_download_requires_final_validated_checkpoint(tmp_path):
+    client, store = _client(tmp_path)
+    created = _created_job(store)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare(created.id)
+    paths.final_file.write_bytes(b"validated-video")
+    store.patch_job(created.id, final_video=str(paths.final_file))
+
+    response = client.get(f"/api/v1/cloud-agent/jobs/{created.id}/final")
+
+    assert response.status_code == 409
+
+
+def test_final_download_serves_only_canonical_job_owned_file(tmp_path):
+    client, store = _client(tmp_path)
+    created = _created_job(store)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare(created.id)
+    expected = b"validated-video-bytes"
+    paths.final_file.write_bytes(expected)
+    store.patch_job(
+        created.id,
+        status=CloudJobStatus.FINAL_VALIDATED,
+        checkpoint=CloudJobCheckpoint.FINAL_VALIDATED,
+        current_step="final_validated",
+        final_video=str(paths.final_file),
+    )
+
+    response = client.get(f"/api/v1/cloud-agent/jobs/{created.id}/final")
+
+    assert response.status_code == 200
+    assert response.content == expected
+    assert response.headers["content-type"].startswith("video/mp4")
+
+
+def test_final_download_rejects_external_or_mismatched_artifact_path(tmp_path):
+    client, store = _client(tmp_path)
+    created = _created_job(store)
+    outside = tmp_path / "outside.mp4"
+    outside.write_bytes(b"must-not-be-served")
+    store.patch_job(
+        created.id,
+        status=CloudJobStatus.FINAL_VALIDATED,
+        checkpoint=CloudJobCheckpoint.FINAL_VALIDATED,
+        current_step="final_validated",
+        final_video=str(outside),
+    )
+
+    response = client.get(f"/api/v1/cloud-agent/jobs/{created.id}/final")
+
+    assert response.status_code == 409
+    assert response.content != outside.read_bytes()
