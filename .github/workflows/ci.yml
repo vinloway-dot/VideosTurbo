@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+      # Temporary direct verification while the PR base is being developed concurrently.
+      - feature/cloud-video-agent
 
 jobs:
   tests:
