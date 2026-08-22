@@ -57,6 +57,9 @@ def _as_int(value) -> int | None:
 
 def probe_media(path: Path) -> MediaProbe:
     media_path = Path(path)
+    if not media_path.exists():
+        raise MediaValidationError(f"media file does not exist: {media_path}")
+
     command = [
         _ffprobe_binary(),
         "-v",
@@ -135,6 +138,8 @@ def validate_audio(
     probe = probe_media(path)
     if not probe.has_audio:
         raise MediaValidationError("media does not contain an audio stream")
+    if not probe.audio_codec:
+        raise MediaValidationError("media audio codec is missing")
     _validate_duration(
         probe,
         min_duration=min_duration,
@@ -160,8 +165,12 @@ def validate_video(
         )
     if not probe.has_video:
         raise MediaValidationError("media does not contain a video stream")
+    if not probe.video_codec:
+        raise MediaValidationError("media video codec is missing")
     if require_audio and not probe.has_audio:
         raise MediaValidationError("media does not contain an audio stream")
+    if require_audio and not probe.audio_codec:
+        raise MediaValidationError("media audio codec is missing")
     _validate_duration(
         probe,
         min_duration=min_duration,
