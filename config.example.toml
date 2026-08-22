@@ -59,9 +59,12 @@ cloud_agent_worker_lease_seconds = 120
 cloud_agent_worker_heartbeat_seconds = 10
 cloud_agent_max_retries = 3
 cloud_agent_min_free_disk_gb = 10
-# Expected narration and final-video validation boundaries.
-cloud_agent_tts_min_duration_seconds = 58
-cloud_agent_tts_max_duration_seconds = 62
+# Generated narration must contain a meaningful positive audio duration.
+cloud_agent_tts_min_duration_seconds = 1
+# Product-quality floor. Slower required playback is rejected before Flow.
+cloud_agent_canva_min_playback_speed = 0.85
+# Allowed final-export duration difference from the narration-derived target.
+cloud_agent_final_duration_tolerance_seconds = 1.0
 cloud_agent_final_min_size_bytes = 1048576
 cloud_agent_expected_width = 1080
 cloud_agent_expected_height = 1920
@@ -307,7 +310,7 @@ max_concurrent_tasks = 5
 max_queued_tasks = 100
 
 # -----------------------------------------------------------------------------
-# Cross-platform Publishing / 跨平台发布
+# Cross-platform Publishing / 跨แพลตฟอร์ม Publishing
 # -----------------------------------------------------------------------------
 
 # Upload-Post can publish generated videos to TikTok, Instagram, and YouTube.
