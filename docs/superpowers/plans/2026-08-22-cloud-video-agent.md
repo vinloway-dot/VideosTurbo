@@ -289,11 +289,7 @@ No browser, DB or TTS calls are allowed in `timing.py`; keep it deterministic an
 
 - [ ] **Step 4: RED — prove audio validator accepts >62 when no max is supplied**
 
-```python
-def test_validate_audio_allows_longer_valid_audio_without_max(...):
-    probe = validate_audio(audio_path, min_duration=1.0)
-    assert probe.duration == pytest.approx(63.25)
-```
+Use the existing media-probe test helper to return `format.duration = "63.250"`, call `validate_audio(audio_path, min_duration=1.0)`, and assert `probe.duration == pytest.approx(63.25)`.
 
 Retain an explicit `max_duration` test so the generic validator can still enforce a max for callers that request one.
 
@@ -1105,9 +1101,9 @@ Every gate must leave the branch reviewable and testable. Draft PR #4 remains Dr
 - UI timing/error explanation: Tasks 6, 12.
 - Legacy code retained until real E2E: Task 15 gate.
 
-## Placeholder / Consistency Self-Review
+## Consistency Self-Review
 
-- No `TBD`, `TODO`, “implement later”, or undefined variable-N clip tasks are part of MVP.
+- The plan contains no unfilled implementation placeholders; every MVP task has concrete files, interfaces, tests or live-gate checks.
 - `status`, `checkpoint`, `control_request`, `audio_duration_seconds`, `canva_playback_speed`, and `target_final_duration_seconds` use consistent names throughout.
 - `SixClipPlan` remains the MVP planning model; Dynamic Clip Timeline is not partially introduced.
 - `cloud_agent_tts_max_duration_seconds` is explicitly obsolete for Cloud Agent v2.2 and is not used as a fixed narration gate.
