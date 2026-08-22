@@ -7,6 +7,47 @@ on:
       - main
 
 jobs:
+  sync-generated-lock:
+    name: Sync generated uv.lock
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.head_ref == 'feature/cloud-video-agent' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Generate lock
+        run: uv lock
+
+      - name: Write generated lock to feature branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_BRANCH: feature/cloud-video-agent
+        shell: bash
+        run: |
+          current_sha="$(gh api "repos/${GITHUB_REPOSITORY}/contents/uv.lock?ref=${TARGET_BRANCH}" --jq .sha)"
+          jq -Rs \
+            --arg message "build: sync uv lock for Playwright" \
+            --arg sha "$current_sha" \
+            --arg branch "$TARGET_BRANCH" \
+            '{message: $message, content: (@base64), sha: $sha, branch: $branch}' \
+            uv.lock > /tmp/uv-lock-update.json
+          gh api \
+            --method PUT \
+            "repos/${GITHUB_REPOSITORY}/contents/uv.lock" \
+            --input /tmp/uv-lock-update.json
+
   tests:
     name: Python ${{ matrix.python-version }} tests
     runs-on: ubuntu-latest
