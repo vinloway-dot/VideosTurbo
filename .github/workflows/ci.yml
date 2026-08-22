@@ -47,6 +47,18 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Install Task 3A test dependencies
+        if: matrix.python-version == '3.11'
+        run: uv sync --frozen --python ${{ matrix.python-version }}
+
+      - name: Verify Task 3A RED
+        if: matrix.python-version == '3.11'
+        run: >-
+          uv run --no-sync python -X utf8 -m pytest -v
+          test/services/cloud_agent/test_models.py
+          test/services/cloud_agent/test_adaptive_config.py
+          test/services/cloud_agent/test_job_store.py
+
       - name: Diagnose stale dependency lock
         if: matrix.python-version == '3.11'
         shell: bash
