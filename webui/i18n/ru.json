@@ -297,6 +297,10 @@
     "Custom Position (% from top)": "Пользовательское положение (% от верхнего края)",
     "Please enter a value between 0 and 100": "Введите значение от 0 до 100",
     "Please enter a valid number": "Введите корректное число",
-    "Please Select a Valid Video Source": "Выберите поддерживаемый источник материалов"
+    "Please Select a Valid Video Source": "Выберите поддерживаемый источник материалов",
+    "Refresh ElevenLabs Voices": "Refresh ElevenLabs Voices",
+    "ElevenLabs Voices Load Failed": "Unable to load ElevenLabs voices: {error}",
+    "ElevenLabs Voices Loaded": "Loaded {count} ElevenLabs voices.",
+    "ElevenLabs Voices Empty": "ElevenLabs returned 0 voices for this account. Add a voice to My Voices, or check the account plan and voice permissions."
   }
 }

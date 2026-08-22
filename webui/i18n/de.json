@@ -297,6 +297,10 @@
     "Video Source Settings": "**Videoquellen-Einstellungen**",
     "Coverr": "Coverr",
     "Coverr API Key": "Coverr API-Schlüssel ([API-Schlüssel holen](https://coverr.co/developers?ctx=header_navigation))",
-    "Please Enter the Coverr API Key": "Bitte geben Sie den **Coverr API-Schlüssel** ein"
+    "Please Enter the Coverr API Key": "Bitte geben Sie den **Coverr API-Schlüssel** ein",
+    "Refresh ElevenLabs Voices": "Refresh ElevenLabs Voices",
+    "ElevenLabs Voices Load Failed": "Unable to load ElevenLabs voices: {error}",
+    "ElevenLabs Voices Loaded": "Loaded {count} ElevenLabs voices.",
+    "ElevenLabs Voices Empty": "ElevenLabs returned 0 voices for this account. Add a voice to My Voices, or check the account plan and voice permissions."
   }
 }
