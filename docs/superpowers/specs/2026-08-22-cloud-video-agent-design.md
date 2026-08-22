@@ -1,20 +1,29 @@
 # VideosTurbo Cloud Video Agent Design
 
-> Draft v2 for review — Session Preflight / Auto Re-login / Manual Session Check integrated.
+> **Status:** Design Spec v2.1 — repository-aligned planning baseline.  
+> **Implementation gate:** No production coding starts until this spec, the implementation plan, and Draft PR #4 have been reviewed as a complete planning set.
 
-## Goal
+## 1. Goal
 
-เปลี่ยน VideosTurbo จากระบบที่ Render วิดีโอเองเป็น **Video Production Orchestrator** ที่ให้ผู้ใช้สร้าง/แก้ Script แล้วกด `Start Auto Production` จากนั้นปิด Browser หรือปิดคอมได้ โดย Ubuntu Cloud Server ทำงานต่อจนได้ `final.mp4`.
-
-Final target experience:
+เปลี่ยน VideosTurbo จากระบบที่ Render วิดีโอเองเป็น **Video Production Orchestrator (ระบบควบคุมการผลิตวิดีโอ)** ที่ให้ผู้ใช้:
 
 ```text
 Video Subject
 → Generate Script
 → Review/Edit Script
+→ Generate/View Master Prompt
 → Start Auto Production
 → user may close browser/computer
-→ Session Preflight
+→ Cloud Agent continues on Ubuntu
+→ final.mp4 validated
+→ user returns to Preview / Download
+```
+
+Production flow:
+
+```text
+Start Auto Production
+→ Session + Local Preflight
 → TTS API
 → Google Flow
 → Canva
@@ -23,419 +32,173 @@ Video Subject
 → COMPLETED
 ```
 
-## Core Responsibilities
+## 2. Baseline and migration boundary
 
-### VideosTurbo Web
+Cloud Agent work is isolated on:
 
-- Video Subject
-- Target Words
-- Language
-- Script generation/editing
-- Six-clip analysis + Master Prompt generation
-- TTS settings
-- Start/Pause/Resume/Cancel production
-- Service/session status
-- Job progress/history
-- Final video preview/download
+```text
+feature/cloud-video-agent
+```
 
-### Cloud Agent
+The recoverable working baseline remains:
 
-- Persist jobs and checkpoints
-- Session Preflight
-- Auto Re-login when safe
-- TTS API orchestration
-- Google Flow browser automation
-- Canva browser automation
-- Downloads/uploads
-- Retry/Resume
-- Human Required handoff
-- Audio/video validation
-- Cleanup
+```text
+feature/six-clip-media-timeline
+7b17cbe9519d543b5b6eb42674de559e74d6280c
+```
 
-### External Services
+Do not merge or modify the baseline as part of this feature. Do not remove the legacy stock/local-render path until the Cloud Agent passes the real Ubuntu End-to-End smoke gate.
 
-- TTS: API only; no browser automation for TTS
-- Google Flow: Browser Automation via Playwright
-- Canva: Browser Automation via Playwright
+## 3. Repository-aligned reuse decisions
 
-## Deployment Target
+The design intentionally reuses existing implementation where it already provides the required behavior.
+
+### 3.1 FastAPI foundation — reuse
+
+Reuse:
+
+- `app/asgi.py` FastAPI application.
+- `app/router.py` root API router.
+- `app/controllers/v1/base.py::new_router()` so Cloud Agent endpoints remain under `/api/v1`.
+- Existing response/error conventions such as `utils.get_response(...)`, `HttpException`, `FileResponse`, and existing path-security helpers where applicable.
+
+Cloud Agent must not create a second FastAPI application.
+
+### 3.2 Existing task state — reviewed, not used as Cloud Agent durable store
+
+`app/services/state.py` already provides `MemoryState` and optional `RedisState`. Existing task managers also provide an in-process/thread queue and an optional Redis queue for the legacy video flow.
+
+These are useful reference patterns, but they are **not** the Cloud Agent durable job database because:
+
+- `MemoryState` is process-local and is lost on restart.
+- Redis is optional in the current application.
+- The existing task manager is coupled to the legacy `tm.start`/`VideoParams` flow.
+- Cloud Agent must resume durable checkpoints after worker/server restart even when Redis is disabled.
+
+MVP therefore uses a separate SQLite-backed `CloudJobStore`, while preserving the old state/task paths unchanged for legacy features.
+
+### 3.3 TTS — reuse existing API-backed voice routing
+
+Reuse `app/services/voice.py::tts(...)`:
+
+```python
+tts(
+    text: str,
+    voice_name: str,
+    voice_rate: float,
+    voice_file: str,
+    voice_volume: float = 1.0,
+)
+```
+
+Cloud Agent adds only a thin adapter plus validation. It must not duplicate ElevenLabs/Azure/Gemini/MiniMax/MiMo/SiliconFlow/Chatterbox routing already owned by `voice.py`.
+
+`tts_provider` remains persisted for UI/history, but server-side validation must ensure it matches the selected `voice_id` routing. The workflow must not maintain a second independent provider registry.
+
+TTS remains API/backend-only. Do not automate a TTS website.
+
+### 3.4 LLM and six-clip planning — reuse
+
+Reuse:
+
+- `app/services/llm.py::generate_script(...)` and existing provider/retry/config behavior.
+- `app/services/six_clip_plan.py` for six fixed 10-second sections.
+- `build_script_generation_requirements(...)`.
+- `generate_six_clip_plan(...)`.
+- `build_master_prompt(...)`.
+- `app/models/six_clip.py::SixClipPlan` / `SixClipSegment`.
+
+The Cloud Agent job persists the complete `SixClipPlan` as JSON in SQLite instead of defining another six-clip schema. This preserves all six `narration_context` and `video_prompt` records as well as the Master Prompt.
+
+### 3.5 Storage and FFmpeg helpers — reuse
+
+Reuse:
+
+- `utils.storage_dir(sub_dir, create=True)` as the repository-aware default storage root.
+- `utils.get_ffmpeg_binary()` as the FFmpeg resolution source.
+- Existing path-security patterns before serving/download paths.
+
+A Cloud Agent media-probe helper may resolve `ffprobe` beside the selected FFmpeg executable or from `PATH`, but must not duplicate general storage-root logic.
+
+### 3.6 Configuration — reuse existing `[app]`
+
+All non-secret Cloud Agent configuration belongs in existing `config.app` / `[app]` in `config.example.toml`.
+
+Do not create a second config loader or a second TOML file.
+
+## 4. Runtime architecture
+
+MVP uses three independent server processes plus protected remote-desktop infrastructure:
+
+```text
+Nginx / TLS
+   ├── VideosTurbo Streamlit WebUI
+   │      └── loopback/public-proxied Cloud Agent API
+   └── FastAPI API
+             └── SQLite CloudJobStore
+                    ▲
+                    │
+             Cloud Agent Worker
+                    │
+          Playwright + FFmpeg + files
+```
+
+Processes:
+
+1. **WebUI service (บริการหน้าเว็บ)** — reuse/update `deploy/systemd/videosturbo-webui.service.example`.
+2. **API service (บริการ FastAPI)** — add `videosturbo-api.service.example`, running the existing `app.asgi:app`/`main.py` stack on loopback behind Nginx.
+3. **Worker service (บริการงานเบื้องหลัง)** — add `videosturbo-worker.service.example`.
+4. **Xvfb/noVNC (จอเสมือน/รีโมตเบราว์เซอร์)** — protected by Nginx authentication, VPN, private network, or equivalent control; never anonymous public access.
+
+Long-running production work never runs inside a Streamlit rerun or normal FastAPI request.
+
+The Streamlit Cloud Agent UI uses the FastAPI control contract instead of independently mutating SQLite, so browser UI, future clients, and automation share one control surface.
+
+## 5. Deployment target
 
 Primary production environment:
 
-- Ubuntu 24.04 LTS Cloud Server
+- Ubuntu 24.04 LTS
+- x86-64
 - 4 vCPU
 - 8 GB RAM
 - 100 GB SSD/NVMe
-- x86-64
 - GPU not required for MVP
+- Python >=3.11, matching the repository requirement
 
-Server software:
+Primary software:
 
-- Python 3.11+
 - FastAPI
-- Streamlit/VideosTurbo WebUI
+- Streamlit
+- SQLite
 - Playwright
 - Chromium/Chrome
 - FFmpeg + ffprobe
-- SQLite for initial Cloud Agent persistence
 - Nginx
 - systemd
-- virtual display/noVNC for human login/debug
+- Xvfb/noVNC
 
-## UI Direction
+## 6. Persistent job model
 
-Main Create Video screen should be simple and modern.
+### 6.1 Job status vs checkpoint
 
-### Create Video
+`status` is the current observable workflow state. `checkpoint` is the last durable completed boundary safe to resume from.
 
-```text
-Video Subject: [ Why Saturn Has a Hexagon ]
-Target Words:  [ 130 ]
-Language:      [ English ]
+They are intentionally separate.
 
-[ Generate Script ] [ View Master Prompt ]
-```
-
-### Script Editor
-
-- editable script
-- Regenerate
-- Shorten
-- Expand
-- Copy
-
-### Voice Settings
-
-- TTS Provider
-- Voice
-- Speed
-
-Primary action:
+Examples:
 
 ```text
-[ Start Auto Production ]
+status=HUMAN_REQUIRED, checkpoint=FLOW_READY
+status=PAUSED,         checkpoint=TTS_READY
+status=CANVA_EDITING,  checkpoint=FLOW_READY
 ```
 
-### Service Connections
+This prevents `PAUSED` or `HUMAN_REQUIRED` from destroying the information needed to resume safely.
 
-This section remains visible even though Start performs automatic checks.
+### 6.2 Job states
 
-```text
-SERVICE CONNECTIONS
-
-Google Flow
-🟢 Ready
-Last checked: 2 min ago
-[ Check ] [ Open Browser ]
-
-Canva
-🟢 Ready
-Last checked: 2 min ago
-[ Check ] [ Open Browser ]
-
-[ Check All Sessions ]
-```
-
-Supported session states:
-
-```text
-CHECKING
-READY
-SESSION_EXPIRED
-AUTO_RELOGIN
-LOGIN_REQUIRED
-CAPTCHA_REQUIRED
-2FA_REQUIRED
-VERIFICATION_REQUIRED
-ERROR
-```
-
-### Production Status
-
-Example:
-
-```text
-Script Ready             ✅
-Voice Generated          ✅
-Google Flow: 6/6 Clips   ✅
-Canva Upload             ✅
-Captions                 ⏳
-Export MP4               Waiting
-Final Validation         Waiting
-```
-
-Current Job also exposes:
-
-- Job ID
-- Duration target
-- Output resolution
-- current step/progress
-- Pause / Resume / Cancel
-
-Final result exposes:
-
-- Preview
-- Duration
-- Resolution
-- Subtitle status
-- Voice
-- Download MP4
-
-## Workflow
-
-### Step 1 — Generate Script
-
-User supplies Subject, Target Words and Language. Existing LLM/script generation logic remains the content-generation source.
-
-Persist:
-
-```text
-subject
-script
-target_words
-language
-```
-
-State: `SCRIPT_READY`.
-
-### Step 2 — Generate Master Prompt
-
-Reuse six-clip logic to divide the narration into:
-
-```text
-Clip 1: 0–10 sec
-Clip 2: 10–20 sec
-Clip 3: 20–30 sec
-Clip 4: 30–40 sec
-Clip 5: 40–50 sec
-Clip 6: 50–60 sec
-```
-
-Each clip keeps:
-
-- Narration Context
-- Video Prompt
-
-Then combine the six prompts into one Master Prompt for Google Flow Agent Mode.
-
-Persist `master_prompt` and six clip prompt records. State: `PROMPT_READY`.
-
-### Step 3 — Start Auto Production + Session Preflight
-
-Immediately after `Start Auto Production`, create/persist the job but **do not start TTS or spend generation credits yet**.
-
-Initial state:
-
-```text
-PREFLIGHT
-```
-
-Agent checks:
-
-1. Cloud Agent/worker health
-2. Storage health/free space
-3. Google Flow session
-4. Canva session
-
-Playwright must open the real service and verify authenticated functionality. Cookie existence alone is not sufficient.
-
-#### Auto Re-login
-
-If the Flow/Canva service session expired but the saved Google account session is still valid, Agent should try normal re-authentication automatically, such as:
-
-```text
-SESSION_EXPIRED
-→ Continue with Google / choose saved Google account
-→ return to service
-→ verify authenticated page
-→ READY
-```
-
-Successful Auto Re-login must continue automatically without asking the user.
-
-#### Human Required
-
-Do not bypass or automate security challenges that require a human, including:
-
-- new password entry
-- CAPTCHA
-- 2FA
-- Google Prompt
-- Verify it's you
-- other security challenge
-
-Use:
-
-```text
-HUMAN_REQUIRED
-```
-
-The UI must show the affected service and an `Open Browser` action. The user resolves the challenge through the remote server browser/noVNC, then uses `Check Again` or `Resume`.
-
-Resume must run Session Preflight again before continuing.
-
-#### Preflight gate
-
-Production may start only when required services are verified:
-
-```text
-Google Flow   READY
-Canva         READY
-Cloud Agent   READY
-Storage       READY
-```
-
-Then transition:
-
-```text
-PREFLIGHT_PASSED
-→ RUNNING
-```
-
-#### Re-check before each service
-
-Passing initial Preflight does not guarantee a session stays valid. Re-check:
-
-- Google Flow immediately before Flow work
-- Canva immediately before Canva work
-
-If a session expired, run the same Auto Re-login → Verify → Human Required fallback.
-
-### Step 4 — TTS via API
-
-TTS is a backend/API operation, not browser automation.
-
-```text
-script
-→ configured TTS provider
-→ audio bytes/file
-→ storage/jobs/<job_id>/audio/voice.mp3
-```
-
-The architecture must allow existing/API providers to be reused behind one Cloud Agent interface.
-
-States:
-
-```text
-TTS_GENERATING
-TTS_READY
-```
-
-### Step 5 — Validate TTS Audio
-
-Use ffprobe to verify:
-
-- file exists
-- non-zero/meaningful size
-- readable audio stream
-- readable codec
-- duration
-
-Target is approximately 60 seconds. Duration tolerance must be configurable; an initial operational target may be 58–62 seconds.
-
-Do not continue blindly when duration falls outside the configured policy.
-
-### Step 6 — Google Flow Automation
-
-Before using Flow, re-check/recover session.
-
-Then:
-
-```text
-Open Google Flow
-→ Agent Mode
-→ paste Master Prompt
-→ Generate
-→ monitor actual generation state
-```
-
-Do not rely on a fixed `sleep` as the only readiness signal.
-
-### Step 7 — Download Flow Clips
-
-Expected output: six clips.
-
-```text
-clip_01.mp4
-clip_02.mp4
-clip_03.mp4
-clip_04.mp4
-clip_05.mp4
-clip_06.mp4
-```
-
-For every downloaded clip verify:
-
-- file exists
-- non-zero/meaningful size
-- video stream readable
-- duration readable
-
-Retry only the failed clip/download when possible rather than recreating all six.
-
-Persist checkpoint `FLOW_READY` only when all required clips are valid.
-
-### Step 8 — Canva Automation
-
-Before Canva work, re-check/recover session.
-
-Prefer a prepared Canva video template for MVP to reduce browser automation surface. Template may predefine:
-
-- 1080 × 1920 canvas
-- caption style
-- caption position
-- font/style
-- base audio/video layout
-
-Agent workflow:
-
-```text
-Open Canva
-→ upload six clips
-→ upload voice.mp3
-→ arrange clips 1→6
-→ mute source video audio when narration should be primary
-→ generate Auto Captions
-→ apply template caption style
-→ export MP4 1080p
-→ download final.mp4
-```
-
-MVP should use simple straight cuts and avoid unnecessary timeline effects/transitions.
-
-### Step 9 — Final Validation
-
-A browser “download complete” event is not sufficient. Before cleanup, validate `final.mp4` with ffprobe/filesystem checks:
-
-- file exists
-- size above configured minimum
-- readable video stream
-- readable audio stream
-- duration readable/within policy
-- expected portrait resolution when configured (1080 × 1920)
-- file is not corrupt
-
-Only then set `FINAL_VALIDATED`.
-
-### Step 10 — Cleanup
-
-Never delete Flow source clips before Final Validation succeeds.
-
-After `FINAL_VALIDATED`, temporary Flow/browser/upload/export files may be removed.
-
-Retain by default:
-
-- script
-- Master Prompt
-- voice audio
-- final MP4
-- job metadata
-
-Then mark `COMPLETED`.
-
-## Job States
-
-Cloud Agent job states must include at least:
+Supported job states include:
 
 ```text
 DRAFT
@@ -455,6 +218,7 @@ CAPTIONING
 EXPORTING
 DOWNLOADING_FINAL
 VALIDATING
+FINAL_VALIDATED
 COMPLETED
 PAUSED
 HUMAN_REQUIRED
@@ -462,39 +226,89 @@ FAILED
 CANCELLED
 ```
 
-Service/session sub-status must support:
+There is no generic `RUNNING` state. After `PREFLIGHT_PASSED`, the workflow moves to the next concrete state, normally `TTS_GENERATING`.
+
+### 6.3 Control request
+
+Persist a control request separate from status:
 
 ```text
-CHECKING
-READY
-SESSION_EXPIRED
-AUTO_RELOGIN
-LOGIN_REQUIRED
-CAPTCHA_REQUIRED
-2FA_REQUIRED
-VERIFICATION_REQUIRED
-ERROR
+NONE
+PAUSE
+CANCEL
 ```
 
-## Persistence, Queue and Resume
+Pause/cancel is checked at safe workflow boundaries. Resume clears the control request, verifies the durable checkpoint/artifacts, runs required Preflight/session checks, then requeues safely.
 
-MVP uses one Worker and one active production at a time. Additional jobs remain queued.
+### 6.4 Required persisted data
 
-Job state/checkpoints must be persistent so closing the web UI or restarting the server does not lose workflow position.
-
-Examples:
+Persist at least:
 
 ```text
-Job 1001 Running
-Job 1002 Waiting
-Job 1003 Waiting
+id
+subject
+script
+master_prompt
+clip_plan_json
+language
+target_words
+
+tts_provider
+voice_id
+voice_speed
+
+status
+checkpoint
+control_request
+current_step
+progress
+
+flow_status
+canva_status
+
+voice_file
+final_video
+
+error_code
+error_message
+
+worker_id
+lease_until
+
+created_at
+started_at
+completed_at
+updated_at
 ```
 
-Resume must continue from the latest safe checkpoint. Example: if TTS and Flow completed before Canva authentication failed, Resume starts from Canva after validating retained artifacts; it must not regenerate TTS or Flow unnecessarily.
+Store `clip_plan_json` from existing `SixClipPlan`; do not create duplicate clip models.
 
-Each external step should have bounded retry (default operational policy: up to 3 attempts) before moving to `FAILED` or `HUMAN_REQUIRED` based on error type.
+## 7. Queue, lease, heartbeat and restart recovery
 
-## Storage Layout
+MVP executes one active production at a time. Other jobs remain `QUEUED`.
+
+`CloudJobStore` owns atomic claiming with a worker lease. Long external operations must renew the lease so another worker cannot reclaim the same job while Google Flow or Canva is legitimately still running.
+
+A worker heartbeat is persisted separately from individual job leases so the API/UI can report `Cloud Agent Online` without inspecting systemd directly.
+
+Auto-claim rules:
+
+- claim `QUEUED` work and explicitly resumable work whose lease is absent/expired;
+- never auto-claim `DRAFT`, `SCRIPT_READY`, `PROMPT_READY`, `PAUSED`, `HUMAN_REQUIRED`, `COMPLETED`, `FAILED`, or `CANCELLED`;
+- Resume is an explicit transition that returns a paused/human-required job to a resumable queued state only after required validation.
+
+After server restart:
+
+```text
+API/WebUI start
+→ Worker starts
+→ Worker heartbeat updates
+→ expired active lease becomes recoverable
+→ validate checkpoint artifacts
+→ resume at next safe step
+```
+
+## 8. File layout
 
 ```text
 storage/
@@ -518,174 +332,508 @@ storage/
             └── final.mp4
 ```
 
-## Job Data
+`prepare(job_id)` creates directories and returns deterministic paths. It does **not** create empty placeholder media files. `write_inputs(...)` writes script/Master Prompt after validated input exists.
 
-Persist at least:
+## 9. Local + Session Preflight
+
+Immediately after the user presses `Start Auto Production`, persist a job and queue it. Before TTS or any paid generation work, the worker runs Preflight.
+
+Required checks:
+
+1. Worker is executing and has a valid worker identity/heartbeat.
+2. Job storage root exists, is writable, and satisfies configured minimum free space.
+3. Google Flow session is usable by opening the real service.
+4. Canva session is usable by opening the real service.
+
+Flow/Canva checks must verify authenticated functionality, not just Cookie existence.
+
+### 9.1 Session states
 
 ```text
-id
+CHECKING
+READY
+SESSION_EXPIRED
+AUTO_RELOGIN
+LOGIN_REQUIRED
+CAPTCHA_REQUIRED
+2FA_REQUIRED
+VERIFICATION_REQUIRED
+ERROR
+```
+
+### 9.2 Auto Re-login
+
+If a service session expired but an already-authenticated Google account is offered by the service:
+
+```text
+SESSION_EXPIRED
+→ AUTO_RELOGIN
+→ Continue with Google / choose saved account
+→ verify service page
+→ READY
+```
+
+Do not store a Google password in application config/database.
+
+### 9.3 Human Required boundary
+
+Never bypass:
+
+- password challenge
+- CAPTCHA
+- 2FA
+- Google Prompt
+- Verify-it's-you
+- equivalent security challenge
+
+Use:
+
+```text
+HUMAN_REQUIRED
+```
+
+The worker preserves `checkpoint`, current evidence, and the browser state needed for manual recovery when safe.
+
+### 9.4 Browser/noVNC model
+
+Production Playwright runs in a virtual display environment compatible with noVNC. The production deployment uses a headed browser on Xvfb so `Open Browser` can display the same server-side browser session during `HUMAN_REQUIRED`.
+
+`cloud_agent_browser_headless` remains configurable for tests/development, but the Ubuntu human-recovery deployment uses headed mode.
+
+Persistent profiles are configurable server-side paths. Recommended production locations are outside the repository, for example:
+
+```text
+/var/lib/videosturbo/browser-profiles/google-flow
+/var/lib/videosturbo/browser-profiles/canva
+```
+
+Only one process may use a service profile at a time. Browser profile access must use a process-safe lock/lease, not only a Python `threading.Lock`, because API and worker are separate processes.
+
+The normal job worker owns profiles during production. Manual API session checks must acquire the same service lock; if the service is busy, they return a bounded busy response rather than opening a competing persistent context.
+
+## 10. Workflow
+
+### Step 1 — Script and six-clip plan
+
+Reuse existing LLM and six-clip modules.
+
+Persist:
+
+```text
 subject
 script
-master_prompt
 language
 target_words
-tts_provider
-voice_id
-voice_speed
-status
-current_step
-progress
-flow_status
-canva_status
-voice_file
-final_video
-error_code
-error_message
-created_at
-started_at
-completed_at
-updated_at
+SixClipPlan JSON
+master_prompt
 ```
 
-## API Surface
+User may edit Script and view Master Prompt before Start.
 
-Cloud Agent API should expose equivalent operations to:
+### Step 2 — Start and Preflight
 
 ```text
-POST /jobs
-GET /jobs/{job_id}
-POST /jobs/{job_id}/pause
-POST /jobs/{job_id}/resume
-POST /jobs/{job_id}/cancel
-GET /jobs/{job_id}/final
-
-POST /sessions/check
-POST /sessions/google-flow/check
-POST /sessions/canva/check
-POST /sessions/google-flow/repair
-POST /sessions/canva/repair
-POST /sessions/{service}/open-browser
+QUEUED
+→ PREFLIGHT
+→ local health + Flow + Canva checks
+→ PREFLIGHT_PASSED
+→ TTS_GENERATING
 ```
 
-Project routes should remain under the existing `/api/v1` convention.
+No TTS/Flow credit should be consumed before Preflight passes.
 
-## Browser Profiles
-
-Use persistent server-side browser profiles and keep service concerns separated, e.g.:
+### Step 3 — TTS
 
 ```text
-/data/browser/google-profile/
-/data/browser/canva-profile/
+script
+→ existing voice.tts API-backed routing
+→ voice.mp3
+→ ffprobe validation
+→ TTS_READY checkpoint
 ```
 
-Profiles must not be publicly exposed. Credentials and API secrets must never be committed to Git or sent to the client UI.
+Validate:
 
-## Error Evidence
+- file exists
+- meaningful non-zero size
+- readable audio stream
+- codec readable
+- duration readable
+- configured duration policy
 
-Browser automation errors must capture enough evidence for maintenance:
+Initial operational duration target may be 58–62 seconds, but limits are configuration, not hard-coded constants.
 
-- screenshot
-- service
-- job id
+### Step 4 — Flow re-check and generation
+
+Before Flow work:
+
+```text
+check Flow session
+→ repair if safe
+→ verify READY
+→ generate
+```
+
+Then:
+
+```text
+Open configured Flow URL
+→ Agent Mode
+→ paste Master Prompt
+→ Generate
+→ monitor observable state
+→ obtain six clips
+```
+
+Do not rely on a fixed `sleep` as the only readiness signal.
+
+### Step 5 — Flow downloads and checkpoint
+
+Expected durable files:
+
+```text
+clip_01.mp4 ... clip_06.mp4
+```
+
+Each clip must pass video validation. Retry only failed download/item where possible. Persist `FLOW_READY` only after all six artifacts validate.
+
+### Step 6 — Canva re-check and final assembly
+
+Before Canva:
+
+```text
+check Canva session
+→ repair if safe
+→ verify READY
+```
+
+MVP prefers a prepared Canva template.
+
+Sequence:
+
+```text
+upload six validated clips
+→ upload voice.mp3
+→ order clips 1→6
+→ straight cuts
+→ mute source video audio when narration is primary
+→ place narration
+→ generate Auto Captions
+→ use template caption style
+→ export MP4 1080p
+→ download final.mp4
+```
+
+Do not add unnecessary effects/transitions in MVP.
+
+### Step 7 — Final Validation
+
+A browser download-complete event is not enough.
+
+Validate:
+
+- file exists
+- configured minimum size
+- readable video stream
+- readable audio stream
+- readable duration
+- expected resolution when configured (MVP target 1080x1920)
+- ffprobe can read the file without corruption error
+
+Only then persist:
+
+```text
+FINAL_VALIDATED
+```
+
+### Step 8 — Cleanup and completion
+
+Only after `FINAL_VALIDATED`:
+
+- delete temporary Flow source clips according to policy;
+- delete upload/browser/export temporary files according to policy;
+- retain Script, Master Prompt, `voice.mp3`, `final.mp4`, and job metadata by default.
+
+Then:
+
+```text
+COMPLETED
+```
+
+If Final Validation fails, source clips remain available for retry/debug.
+
+## 11. Retry and Resume
+
+Each external step has bounded retry. Default operational policy is 3 attempts, configurable.
+
+Classify failures:
+
+- transient network/browser timeout → retry;
+- deterministic invalid artifact → `FAILED` unless a step-specific retry can fix only that artifact;
+- password/CAPTCHA/2FA/security challenge → `HUMAN_REQUIRED` immediately;
+- user pause → preserve checkpoint and `PAUSED`;
+- user cancel → `CANCELLED` at a safe boundary.
+
+Resume must validate artifacts required by the checkpoint before skipping a paid step.
+
+Example:
+
+```text
+checkpoint=FLOW_READY
+voice.mp3 valid
+six clips valid
+→ re-check Canva
+→ continue at Canva
+```
+
+Never regenerate TTS/Flow merely because Canva required human login.
+
+## 12. API surface
+
+Use existing `new_router()` so the effective prefix remains `/api/v1`.
+
+Cloud Agent routes:
+
+```text
+GET  /api/v1/cloud-agent/health
+
+POST /api/v1/cloud-agent/jobs
+GET  /api/v1/cloud-agent/jobs
+GET  /api/v1/cloud-agent/jobs/{job_id}
+POST /api/v1/cloud-agent/jobs/{job_id}/pause
+POST /api/v1/cloud-agent/jobs/{job_id}/resume
+POST /api/v1/cloud-agent/jobs/{job_id}/cancel
+GET  /api/v1/cloud-agent/jobs/{job_id}/final
+
+POST /api/v1/cloud-agent/sessions/check
+POST /api/v1/cloud-agent/sessions/google-flow/check
+POST /api/v1/cloud-agent/sessions/canva/check
+POST /api/v1/cloud-agent/sessions/google-flow/repair
+POST /api/v1/cloud-agent/sessions/canva/repair
+GET  /api/v1/cloud-agent/sessions/{service}/open-browser
+```
+
+`open-browser` is `GET` because it returns the configured protected noVNC URL; it does not bypass login or perform a security action itself.
+
+Long-running production work is never executed inline in these handlers. Explicit manual session check/repair endpoints are bounded operations and must respect the shared browser-profile lock.
+
+`GET /health` reports at least:
+
+- Cloud Agent enabled/disabled
+- worker last-seen timestamp / online status
+- storage writable status
+- free-space status
+
+## 13. UI
+
+### Create Video
+
+- Video Subject
+- Target Words
+- Language
+- Generate Script
+- Script Editor
+- Regenerate / Shorten / Expand / Copy
+- View Master Prompt
+- TTS Provider
+- Voice
+- Speed
+- Start Auto Production
+
+Reuse current script/six-clip logic. The Cloud Agent Start path must not require the legacy six-media Upload/URL fields.
+
+### Service Connections
+
+```text
+Google Flow
+Status / Last checked
+[ Check ] [ Open Browser ]
+
+Canva
+Status / Last checked
+[ Check ] [ Open Browser ]
+
+[ Check All Sessions ]
+```
+
+### Cloud Agent status
+
+Show worker Online/Offline using the persisted heartbeat/health endpoint.
+
+### Production status
+
+Show concrete workflow states and progress, with:
+
+- Job ID
 - current step
-- current URL when safe
+- checkpoint
+- Pause / Resume / Cancel
+- Human Required reason/evidence link when safe
+- Job History
+
+### Final result
+
+- Preview
+- Duration
+- Resolution
+- subtitle/caption status
+- voice
+- Download MP4
+
+## 14. Configuration baseline
+
+Cloud Agent settings live under `[app]`. Initial defaults/configuration include equivalents of:
+
+```text
+cloud_agent_enabled = false
+cloud_agent_db_path = storage/cloud-agent.sqlite3
+cloud_agent_worker_poll_seconds = 2
+cloud_agent_worker_lease_seconds = configurable and longer than poll interval
+cloud_agent_worker_heartbeat_seconds = configurable
+cloud_agent_max_retries = 3
+cloud_agent_min_free_disk_gb = configurable
+cloud_agent_tts_min_duration_seconds = 58
+cloud_agent_tts_max_duration_seconds = 62
+cloud_agent_final_min_size_bytes = configurable
+cloud_agent_expected_width = 1080
+cloud_agent_expected_height = 1920
+cloud_agent_browser_headless = configurable
+cloud_agent_google_profile_dir = server-local path
+cloud_agent_canva_profile_dir = server-local path
+cloud_agent_remote_browser_url = protected noVNC URL
+cloud_agent_flow_url = configured service URL
+cloud_agent_canva_template_url = configured template URL
+```
+
+Never commit real credentials, cookies, browser profiles, signed download URLs, or API keys.
+
+## 15. Error evidence
+
+Browser failures record:
+
+- service
+- job id when applicable
+- current step
 - timestamp
+- current URL when safe
 - sanitized error message
+- screenshot when it does not expose credentials/security secrets
 
 Example:
 
 ```text
 storage/jobs/<job_id>/screenshots/flow_generate_error.png
-storage/jobs/<job_id>/screenshots/canva_upload_error.png
 storage/jobs/<job_id>/logs/agent.log
 ```
 
-## Production Services
+## 16. Security boundaries
 
-Production should run independently from the user's browser through system services, e.g.:
+- No CAPTCHA/2FA/security-challenge bypass.
+- No passwords in config/SQLite.
+- API keys stay server-side.
+- Browser profiles stay outside public static directories.
+- Final-file endpoint must resolve the job-owned validated path; reject path traversal.
+- noVNC must not be anonymous on the public internet.
+- Nginx/TLS/authentication or equivalent access control is required for production exposure.
+
+## 17. TDD and test strategy
+
+All implementation follows **TDD (Test-Driven Development — เขียนการทดสอบก่อน)**:
 
 ```text
-videosturbo-web.service
-videosturbo-worker.service
+RED: write one failing behavior test
+→ verify the failure is for the missing behavior
+→ GREEN: minimal production code
+→ verify focused tests
+→ REFACTOR while green
+→ run relevant regression tests
+→ commit
 ```
 
-After Ubuntu restart:
+CI/unit tests do not depend on a live Google Flow/Canva account. Provider adapters use deterministic local HTML fixtures/page-object tests for state detection. Real third-party behavior is verified only at the explicit Ubuntu smoke gate.
 
-```text
-web starts
-→ worker starts
-→ worker reads persisted jobs
-→ verifies last checkpoint/artifacts
-→ resumes safe incomplete job
-```
-
-## Migration Strategy
-
-Do not remove the current working generation path before the new workflow passes real End-to-End tests.
-
-Recommended migration:
-
-1. Freeze working six-clip baseline.
-2. Build Cloud Agent architecture on a separate branch.
-3. Add persistent Job Manager/Worker.
-4. Add Session Preflight + manual session controls.
-5. Reuse API-based TTS through Cloud Agent.
-6. Add Google Flow adapter.
-7. Add Canva adapter.
-8. Add Retry/Resume/Human Required.
-9. Add simplified modern WebUI.
-10. Deploy and smoke-test on Ubuntu Cloud Server.
-11. Only after E2E success, remove legacy stock/render/UI code in small tested groups.
-
-Potential later cleanup includes Pexels/Pixabay/Coverr stock paths, material-type UI, old six-media upload/URL controls, Ken Burns/image processing, and legacy local render paths that are no longer referenced.
-
-Keep useful existing components such as LLM providers, script generation, six-clip prompt logic, configuration, logging, API foundation and reusable task/history concepts.
-
-## MVP Acceptance Criteria
+## 18. MVP acceptance criteria
 
 MVP is complete only when all are demonstrated:
 
-1. Script can be generated, edited and saved.
-2. User can manually check Google Flow/Canva sessions from the web UI.
-3. `Start Auto Production` always runs Session Preflight first.
-4. Ordinary expired service sessions can Auto Re-login using an already-authenticated Google account when possible.
-5. CAPTCHA/2FA/verification pauses as `HUMAN_REQUIRED` and provides Open Browser/Resume flow.
-6. TTS is generated via API and stored on the server.
-7. TTS duration/file validity is checked.
-8. Google Flow receives the Master Prompt and produces six clips.
-9. Six clips are downloaded and validated.
-10. Canva uploads/arranges the six clips and narration audio.
-11. Canva generates captions.
-12. Canva exports and the Agent downloads final MP4.
-13. Server validates final MP4 before deleting sources.
-14. Temporary source clips are cleaned only after validation.
-15. Web UI shows completion/history and allows final video download.
-16. The user's local computer/browser can be closed while production continues.
-17. Retry/Resume works without repeating already successful paid generation steps unnecessarily.
-18. Ubuntu restart does not permanently lose persistent job state.
+1. Script can be generated, edited and saved using existing LLM behavior.
+2. Existing six-clip logic produces/persists six prompt records and Master Prompt.
+3. User can manually check Flow/Canva sessions.
+4. Start always performs local + session Preflight before TTS.
+5. Ordinary expired session can Auto Re-login when an already-authenticated account is offered.
+6. CAPTCHA/2FA/verification becomes `HUMAN_REQUIRED` without bypass.
+7. noVNC shows the server-side browser for human recovery.
+8. TTS uses existing API-backed voice routing and passes audio validation.
+9. Flow generates six clips; all six are downloaded and validated.
+10. Only failed Flow items/downloads are retried when possible.
+11. Canva uploads/arranges six clips plus narration.
+12. Canva generates captions and exports MP4.
+13. `final.mp4` passes server-side validation before source cleanup.
+14. User can Pause/Resume/Cancel at defined safe boundaries.
+15. Resume validates checkpoint artifacts and does not repeat successful paid steps unnecessarily.
+16. Worker lease/heartbeat prevents duplicate execution and exposes Cloud Agent online status.
+17. Closing the local browser/computer does not stop production.
+18. Worker/server restart preserves the job and resumes from a safe checkpoint.
+19. WebUI shows history/status/final Preview/Download.
+20. Legacy stock/render code remains available until this E2E gate passes.
 
-## Future Scope (not MVP)
+## 19. Real Ubuntu smoke gate
 
-- multiple concurrent workers
-- batch/scheduled production
-- additional video generators (Kling/Sora/etc.)
-- additional editors (CapCut/etc.)
-- publishing to YouTube/Facebook/TikTok
-- notification channels
-- multi-user tenancy
-- cloud object storage
+Before declaring production-ready or starting legacy cleanup, demonstrate on Ubuntu 24.04:
 
-## Baseline Principle
+```text
+Generate/Edit Script
+→ SixClipPlan + Master Prompt
+→ Start
+→ Preflight
+→ TTS + validation
+→ Flow session re-check
+→ 6 Flow clips + validation
+→ FLOW_READY checkpoint
+→ Canva session re-check
+→ upload/arrange/narration/captions
+→ export/download
+→ Final Validation
+→ cleanup after validation only
+→ COMPLETED
+```
+
+Also verify:
+
+- Auto Re-login scenario.
+- HUMAN_REQUIRED + noVNC + Resume scenario.
+- local browser/computer closed during production.
+- worker/server restart at a safe checkpoint.
+- no duplicate TTS/Flow after resume from `FLOW_READY`.
+
+## 20. Legacy cleanup gate
+
+Legacy cleanup is a separate follow-up phase after the smoke gate passes. Remove one category at a time, with regression tests and commits between categories.
+
+Candidates may include:
+
+- Pexels/Pixabay/Coverr paths no longer used by retained features.
+- material-type/mixed image-video controls.
+- old six-media Upload/URL controls from the main production path.
+- Ken Burns/image processing used only by the removed path.
+- legacy local render code with no retained references.
+- dependencies proven unused after source cleanup.
+
+Do not remove Music Batch or other retained features merely because the new Create Video path no longer calls them.
+
+## 21. Final baseline principle
 
 ```text
 VideosTurbo = Content + Control + Status
-Cloud Agent = Workflow + Session Preflight + Auto Re-login + Retry + Resume
-TTS = API
-Google Flow = Browser Automation
-Canva = Browser Automation
+FastAPI = shared control contract
+Cloud Agent Worker = durable workflow execution
+SQLite = Cloud Agent durable jobs/checkpoints/leases/heartbeat
+TTS = existing API-backed voice service
+Google Flow = Playwright browser automation
+Canva = Playwright browser automation
 Ubuntu Cloud Server = 24/7 execution environment
 ```
 
-The product goal is:
+Product target:
 
 > **ใส่หัวข้อ → ตรวจ Script → กด Start → ปิดคอม → กลับมารับ Final Video**
