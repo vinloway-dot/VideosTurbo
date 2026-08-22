@@ -59,6 +59,7 @@ jobs:
           test/services/cloud_agent/test_adaptive_config.py
           test/services/cloud_agent/test_job_store.py
           test/services/cloud_agent/test_timing.py
+          test/services/cloud_agent/test_media_probe.py
           test/services/test_config.py
 
       - name: Verify Gate A2 Ruff
@@ -67,12 +68,15 @@ jobs:
           uv run --no-sync ruff check
           app/models/cloud_agent.py
           app/services/cloud_agent/job_store.py
-          app/config/config.py
+          app/services/cloud_agent/media_probe.py
+          app/services/cloud_agent/errors.py
           app/services/cloud_agent/timing.py
+          app/config/config.py
           test/services/cloud_agent/test_models.py
           test/services/cloud_agent/test_adaptive_config.py
           test/services/cloud_agent/test_job_store.py
           test/services/cloud_agent/test_timing.py
+          test/services/cloud_agent/test_media_probe.py
           test/services/test_config.py
 
       - name: Diagnose stale dependency lock
