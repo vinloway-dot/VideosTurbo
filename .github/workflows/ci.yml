@@ -7,47 +7,6 @@ on:
       - main
 
 jobs:
-  sync-generated-lock:
-    name: Sync generated uv.lock
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.head_ref == 'feature/cloud-video-agent' &&
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-
-    steps:
-      - name: Check out feature branch
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-
-      - name: Generate lock
-        run: uv lock
-
-      - name: Write generated lock to feature branch
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TARGET_BRANCH: feature/cloud-video-agent
-        shell: bash
-        run: |
-          current_sha="$(gh api "repos/${GITHUB_REPOSITORY}/contents/uv.lock?ref=${TARGET_BRANCH}" --jq .sha)"
-          jq -Rs \
-            --arg message "build: sync uv lock for Playwright" \
-            --arg sha "$current_sha" \
-            --arg branch "$TARGET_BRANCH" \
-            '{message: $message, content: (@base64), sha: $sha, branch: $branch}' \
-            uv.lock > /tmp/uv-lock-update.json
-          gh api \
-            --method PUT \
-            "repos/${GITHUB_REPOSITORY}/contents/uv.lock" \
-            --input /tmp/uv-lock-update.json
-
   tests:
     name: Python ${{ matrix.python-version }} tests
     runs-on: ubuntu-latest
@@ -88,52 +47,9 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install Gate A2 test dependencies
+      - name: Check dependency lock
         if: matrix.python-version == '3.11'
-        run: uv sync --frozen --python ${{ matrix.python-version }}
-
-      - name: Verify Gate A2 focused tests
-        if: matrix.python-version == '3.11'
-        run: >-
-          uv run --no-sync python -X utf8 -m pytest -v
-          test/services/cloud_agent/test_models.py
-          test/services/cloud_agent/test_adaptive_config.py
-          test/services/cloud_agent/test_job_store.py
-          test/services/cloud_agent/test_timing.py
-          test/services/cloud_agent/test_media_probe.py
-          test/services/cloud_agent/test_workflow.py
-          test/services/test_config.py
-
-      - name: Verify Gate A2 Ruff
-        if: matrix.python-version == '3.11'
-        run: >-
-          uv run --no-sync ruff check
-          app/models/cloud_agent.py
-          app/services/cloud_agent/job_store.py
-          app/services/cloud_agent/media_probe.py
-          app/services/cloud_agent/errors.py
-          app/services/cloud_agent/timing.py
-          app/services/cloud_agent/workflow.py
-          app/config/config.py
-          test/services/cloud_agent/test_models.py
-          test/services/cloud_agent/test_adaptive_config.py
-          test/services/cloud_agent/test_job_store.py
-          test/services/cloud_agent/test_timing.py
-          test/services/cloud_agent/test_media_probe.py
-          test/services/cloud_agent/test_workflow.py
-          test/services/test_config.py
-
-      - name: Generate dependency lock artifact
-        if: matrix.python-version == '3.11'
-        run: uv lock
-
-      - name: Upload generated dependency lock
-        if: matrix.python-version == '3.11'
-        uses: actions/upload-artifact@v4
-        with:
-          name: generated-uv-lock
-          path: uv.lock
-          retention-days: 1
+        run: uv lock --check
 
       - name: Install dependencies
         run: uv sync --frozen --python ${{ matrix.python-version }}
