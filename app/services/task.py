@@ -1364,6 +1364,7 @@ def _run_pipeline(
             six_clip_combined_video = six_clip_render.concat_six_clip_timeline(
                 downloaded_videos,
                 path.join(utils.task_dir(task_id), "combined-six-clip.mp4"),
+                timeline_duration_sec=params.six_clip_plan.timeline_duration_sec,
                 threads=params.n_threads or 2,
             )
         except six_clip_render.SixClipRenderError as exc:

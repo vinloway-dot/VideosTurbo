@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -14,7 +15,6 @@ from app.utils import utils
 
 
 SEGMENT_DURATION_SECONDS = 10.0
-TIMELINE_DURATION_SECONDS = 60.0
 
 
 class SixClipRenderError(RuntimeError):
@@ -119,9 +119,6 @@ def prepare_six_clip_timeline(
     threads: int = 2,
     output_dir: str | os.PathLike | None = None,
 ) -> list[str]:
-    if len(plan.segments) != 6:
-        raise SixClipRenderError("six-clip timeline requires exactly six segments")
-
     destination = Path(output_dir or (Path(utils.task_dir(task_id)) / "six-clips"))
     destination.mkdir(parents=True, exist_ok=True)
     prepared: list[str] = []
@@ -145,7 +142,7 @@ def prepare_six_clip_timeline(
                     f"failed to prepare image media for clip {segment.index}"
                 )
             generated = Path(image_outputs[0])
-            stable_output = destination / f"six-clip-{segment.index:02d}.mp4"
+            stable_output = destination / f"six-clip-{segment.index:03d}.mp4"
             if generated.resolve() != stable_output.resolve():
                 stable_output.unlink(missing_ok=True)
                 shutil.move(str(generated), str(stable_output))
@@ -157,7 +154,7 @@ def prepare_six_clip_timeline(
                 f"clip {segment.index} has unsupported media kind {segment.media_kind!r}"
             )
 
-        output_path = destination / f"six-clip-{segment.index:02d}.mp4"
+        output_path = destination / f"six-clip-{segment.index:03d}.mp4"
         output_path.unlink(missing_ok=True)
         prepared.append(
             _normalize_video_segment(
@@ -171,14 +168,43 @@ def prepare_six_clip_timeline(
     return prepared
 
 
+def probe_video_duration(video_path: str | os.PathLike) -> float:
+    """Measure an output video and always release the MoviePy reader."""
+    clip = None
+    try:
+        clip = video._open_video_clip_quietly(str(video_path), audio=False)
+        duration = float(clip.duration)
+    except Exception as exc:
+        raise SixClipRenderError("failed to measure combined timeline duration") from exc
+    finally:
+        if clip is not None:
+            close = getattr(clip, "close", None)
+            if callable(close):
+                close()
+            else:
+                video.close_clip(clip)
+    if not math.isfinite(duration) or duration <= 0:
+        raise SixClipRenderError("combined timeline duration is invalid")
+    return duration
+
+
 def concat_six_clip_timeline(
     clip_paths: list[str],
     output_file: str | os.PathLike,
     *,
+    timeline_duration_sec: float,
     threads: int = 2,
+    duration_tolerance_sec: float = 0.5,
 ) -> str:
-    if len(clip_paths) != 6:
-        raise SixClipRenderError("six-clip timeline requires exactly six prepared clips")
+    if not clip_paths:
+        raise SixClipRenderError("timeline requires prepared clips")
+    expected_duration = float(timeline_duration_sec)
+    tolerance = float(duration_tolerance_sec)
+    if not math.isfinite(expected_duration) or expected_duration <= 0:
+        raise SixClipRenderError("timeline duration must be a finite positive number")
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise SixClipRenderError("duration tolerance must be finite and non-negative")
+
     output = Path(output_file)
     output.parent.mkdir(parents=True, exist_ok=True)
     video.concat_video_clips_with_ffmpeg(
@@ -186,8 +212,14 @@ def concat_six_clip_timeline(
         output_file=str(output),
         threads=threads or 2,
         output_dir=str(output.parent),
-        max_duration=TIMELINE_DURATION_SECONDS,
+        max_duration=expected_duration,
     )
     if not output.is_file() or output.stat().st_size <= 0:
-        raise SixClipRenderError("failed to concatenate six-clip timeline")
+        raise SixClipRenderError("failed to concatenate timeline")
+    actual_duration = probe_video_duration(output)
+    if abs(actual_duration - expected_duration) > tolerance:
+        raise SixClipRenderError(
+            f"combined timeline duration is {actual_duration:.3f}s; "
+            f"expected {expected_duration:.1f}s within {tolerance:.1f}s"
+        )
     return str(output)

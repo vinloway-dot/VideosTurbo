@@ -1,12 +1,15 @@
 from pathlib import Path
 
+import pytest
+
 from app.models.six_clip import SixClipPlan, SixClipSegment
-from app.services import six_clip_render
+from app.services import six_clip_plan, six_clip_render
 
 
-def _plan(tmp_path: Path) -> SixClipPlan:
+def _plan(tmp_path: Path, duration: float = 60.0) -> SixClipPlan:
     segments = []
-    for index in range(1, 7):
+    ranges = six_clip_plan.build_timeline_ranges(duration)
+    for index, (start, end) in enumerate(ranges, start=1):
         source = tmp_path / (
             f"source-{index}.jpg" if index == 2 else f"source-{index}.mp4"
         )
@@ -19,8 +22,8 @@ def _plan(tmp_path: Path) -> SixClipPlan:
         segments.append(
             SixClipSegment(
                 index=index,
-                start_sec=(index - 1) * 10,
-                end_sec=index * 10,
+                start_sec=start,
+                end_sec=end,
                 title=f"Clip {index}",
                 narration_context=f"Narration {index}",
                 video_prompt=f"Prompt {index}",
@@ -28,13 +31,19 @@ def _plan(tmp_path: Path) -> SixClipPlan:
                 media_path=str(source),
             )
         )
-    return SixClipPlan(target_words=130, segments=segments)
+    return SixClipPlan(
+        target_words=300 if duration > 60 else 130,
+        narration_duration_sec=duration,
+        timeline_duration_sec=max(60.0, duration),
+        narration_fingerprint="voice-fingerprint" if duration > 60 else "",
+        segments=segments,
+    )
 
 
-def test_prepare_timeline_keeps_fixed_order_and_uses_ten_second_video_loop(
+def test_prepare_dynamic_timeline_keeps_order_and_ten_second_sources(
     monkeypatch, tmp_path
 ):
-    plan = _plan(tmp_path)
+    plan = _plan(tmp_path, 63.0)
     commands = []
 
     def fake_run(command, capture_output, text, check):
@@ -75,28 +84,28 @@ def test_prepare_timeline_keeps_fixed_order_and_uses_ten_second_video_loop(
         output_dir=tmp_path / "prepared",
     )
 
-    assert len(prepared) == 6
+    assert len(prepared) == 7
     assert [Path(value).name for value in prepared] == [
-        "six-clip-01.mp4",
-        "six-clip-02.mp4",
-        "six-clip-03.mp4",
-        "six-clip-04.mp4",
-        "six-clip-05.mp4",
-        "six-clip-06.mp4",
+        "six-clip-001.mp4",
+        "six-clip-002.mp4",
+        "six-clip-003.mp4",
+        "six-clip-004.mp4",
+        "six-clip-005.mp4",
+        "six-clip-006.mp4",
+        "six-clip-007.mp4",
     ]
     video_commands = [command for command in commands if "-stream_loop" in command]
-    assert len(video_commands) == 5
+    assert len(video_commands) == 6
     assert all(
         command[command.index("-t") + 1] == "10.000" for command in video_commands
     )
     assert all("-an" in command for command in video_commands)
 
 
-def test_concat_timeline_passes_all_six_clips_in_order_and_caps_at_sixty(
-    monkeypatch, tmp_path
-):
+@pytest.mark.parametrize(("duration", "count"), [(63.0, 7), (127.0, 13)])
+def test_concat_uses_dynamic_timeline_duration(monkeypatch, tmp_path, duration, count):
     clips = []
-    for index in range(1, 7):
+    for index in range(1, count + 1):
         clip = tmp_path / f"clip-{index}.mp4"
         clip.write_bytes(b"x")
         clips.append(str(clip))
@@ -112,13 +121,67 @@ def test_concat_timeline_passes_all_six_clips_in_order_and_caps_at_sixty(
         "concat_video_clips_with_ffmpeg",
         fake_concat,
     )
+    monkeypatch.setattr(
+        six_clip_render,
+        "probe_video_duration",
+        lambda _: duration,
+    )
 
     output = six_clip_render.concat_six_clip_timeline(
         clips,
         tmp_path / "combined.mp4",
+        timeline_duration_sec=duration,
         threads=2,
     )
 
     assert captured["clip_files"] == clips
-    assert captured["max_duration"] == 60.0
+    assert captured["max_duration"] == duration
     assert output.endswith("combined.mp4")
+
+
+def test_concat_rejects_duration_outside_half_second(monkeypatch, tmp_path):
+    clips = []
+    for index in range(1, 8):
+        clip = tmp_path / f"clip-{index}.mp4"
+        clip.write_bytes(b"x")
+        clips.append(str(clip))
+
+    def fake_concat(**kwargs):
+        Path(kwargs["output_file"]).write_bytes(b"combined")
+
+    monkeypatch.setattr(
+        six_clip_render.video,
+        "concat_video_clips_with_ffmpeg",
+        fake_concat,
+    )
+    monkeypatch.setattr(
+        six_clip_render,
+        "probe_video_duration",
+        lambda _: 61.9,
+    )
+
+    with pytest.raises(six_clip_render.SixClipRenderError, match="expected 63.0"):
+        six_clip_render.concat_six_clip_timeline(
+            clips,
+            tmp_path / "combined.mp4",
+            timeline_duration_sec=63.0,
+        )
+
+
+def test_probe_video_duration_closes_clip_and_rejects_invalid(monkeypatch):
+    class FakeClip:
+        duration = 63.25
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    clip = FakeClip()
+    monkeypatch.setattr(
+        six_clip_render.video,
+        "_open_video_clip_quietly",
+        lambda *args, **kwargs: clip,
+    )
+
+    assert six_clip_render.probe_video_duration("combined.mp4") == 63.25
+    assert clip.closed
