@@ -46,7 +46,8 @@ class RecordingPreflight:
         self.error = error
         self.calls: list[str] = []
 
-    def ensure_ready(self, job_id: str) -> None:
+    def ensure_ready(self, job_id: str, *, worker_id: str) -> None:
+        del worker_id
         self.calls.append(job_id)
         if self.error is not None:
             raise self.error
@@ -57,8 +58,8 @@ class PausingPreflight(RecordingPreflight):
         super().__init__()
         self.store = store
 
-    def ensure_ready(self, job_id: str) -> None:
-        super().ensure_ready(job_id)
+    def ensure_ready(self, job_id: str, *, worker_id: str) -> None:
+        super().ensure_ready(job_id, worker_id=worker_id)
         self.store.patch_job(job_id, control_request=CloudControlRequest.PAUSE)
 
 
