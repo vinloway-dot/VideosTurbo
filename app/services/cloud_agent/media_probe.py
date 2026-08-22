@@ -133,7 +133,7 @@ def validate_audio(
     path: Path,
     *,
     min_duration: float,
-    max_duration: float,
+    max_duration: float | None = None,
 ) -> MediaProbe:
     probe = probe_media(path)
     if not probe.has_audio:
