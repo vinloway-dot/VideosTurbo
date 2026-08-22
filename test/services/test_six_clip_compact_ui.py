@@ -13,11 +13,20 @@ def test_timeline_uses_three_column_cards_and_one_active_editor():
 
 
 def test_active_editor_uses_compact_text_areas():
-    assert '"Narration Context",\n            height=90,' in TIMELINE_SOURCE
-    assert '"Video Prompt (English)",\n            height=140,' in TIMELINE_SOURCE
+    narration_block = TIMELINE_SOURCE.split("narration = st.text_area(", 1)[1].split(
+        "prompt = st.text_area(", 1
+    )[0]
+    prompt_block = TIMELINE_SOURCE.split("prompt = st.text_area(", 1)[1].split(
+        "media_mode = st.radio(", 1
+    )[0]
+
+    assert '"Narration Context"' in narration_block
+    assert "height=90" in narration_block
+    assert '"Video Prompt (English)"' in prompt_block
+    assert "height=140" in prompt_block
 
 
 def test_master_prompt_batches_are_collapsed_by_default():
-    assert 'with st.expander(' in TIMELINE_SOURCE
+    assert "with st.expander(" in TIMELINE_SOURCE
     assert 'f"Master Prompt — Batch {batch_index}"' in TIMELINE_SOURCE
     assert "expanded=False" in TIMELINE_SOURCE
