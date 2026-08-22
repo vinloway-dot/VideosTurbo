@@ -1,7 +1,7 @@
 # VideosTurbo Cloud Video Agent Design
 
-> **Status:** Design Spec v2.1 — repository-aligned planning baseline.  
-> **Implementation gate:** No production coding starts until this spec, the implementation plan, and Draft PR #4 have been reviewed as a complete planning set.
+> **Status:** Design Spec v2.2 — Adaptive Six-Clip + Canva playback architecture correction.  
+> **Implementation gate:** Production coding is paused until this corrected spec is reviewed, the implementation plan is re-baselined against it, and Draft PR #4 reflects the same architecture.
 
 ## 1. Goal
 
@@ -19,18 +19,28 @@ Video Subject
 → user returns to Preview / Download
 ```
 
+MVP ยังคงใช้ **SixClipPlan จำนวน 6 คลิป** แต่เปลี่ยนนโยบายเวลาเป็น **Adaptive Six-Clip (หกคลิปแบบปรับความยาวใน Canva)** เพื่อรองรับเสียงบรรยายที่ยาวเกิน 60 วินาทีเล็กน้อยโดยไม่สร้าง TTS ซ้ำและไม่เพิ่มจำนวนคลิปใน Google Flow
+
 Production flow:
 
 ```text
 Start Auto Production
 → Session + Local Preflight
-→ TTS API
-→ Google Flow
-→ Canva
-→ Final Validation
+→ create real TTS once
+→ probe exact narration duration
+→ calculate required Canva playback speed
+→ reject before Flow if speed would exceed the configured safety policy
+→ Google Flow generates six clips
+→ Canva uploads/arranges six clips
+→ Canva adjusts clip playback speed when required
+→ Canva adds narration + captions
+→ Canva exports final.mp4
+→ Final Validation against the narration-derived target duration
 → Cleanup
 → COMPLETED
 ```
+
+**Cloud Agent does not concatenate the six production clips inside VideosTurbo.** Final assembly is owned by Canva. FFmpeg/ffprobe remain local utilities for media probing, validation, and other retained legacy paths, not the Cloud Agent's primary final-assembly engine.
 
 ## 2. Baseline and migration boundary
 
@@ -48,6 +58,8 @@ feature/six-clip-media-timeline
 ```
 
 Do not merge or modify the baseline as part of this feature. Do not remove the legacy stock/local-render path until the Cloud Agent passes the real Ubuntu End-to-End smoke gate.
+
+The current feature implementation completed Tasks 1–3 against the earlier v2.1 six-clip assumptions. Those components are retained where compatible, but any v2.1 duration rule that rejects narration merely because it exceeds 60/62 seconds is superseded by this v2.2 spec.
 
 ## 3. Repository-aligned reuse decisions
 
@@ -97,30 +109,56 @@ Cloud Agent adds only a thin adapter plus validation. It must not duplicate Elev
 
 TTS remains API/backend-only. Do not automate a TTS website.
 
-### 3.4 LLM and six-clip planning — reuse
+### 3.4 No extra Full Voice Preview in the Cloud Agent start path
 
-Reuse:
+Cloud Agent does **not** synthesize a disposable full-length preview and then synthesize production audio again.
+
+After Preflight passes, it creates the canonical production artifact exactly once:
+
+```text
+script + selected voice/rate
+→ existing voice.tts(...)
+→ storage/jobs/<job_id>/audio/voice.mp3
+→ ffprobe exact duration
+→ reuse the same voice.mp3 through Canva and final output
+```
+
+A previously generated reusable voice artifact may be reused only when its script/voice/rate identity is proven current by the existing cache/fingerprint rules. A stale preview must never control a new job.
+
+### 3.5 LLM and six-clip planning — reuse
+
+MVP continues to reuse:
 
 - `app/services/llm.py::generate_script(...)` and existing provider/retry/config behavior.
-- `app/services/six_clip_plan.py` for six fixed 10-second sections.
+- `app/services/six_clip_plan.py` for six visual sections.
 - `build_script_generation_requirements(...)`.
 - `generate_six_clip_plan(...)`.
 - `build_master_prompt(...)`.
 - `app/models/six_clip.py::SixClipPlan` / `SixClipSegment`.
 
-The Cloud Agent job persists the complete `SixClipPlan` as JSON in SQLite instead of defining another six-clip schema. This preserves all six `narration_context` and `video_prompt` records as well as the Master Prompt.
+The Cloud Agent job persists the complete `SixClipPlan` as JSON in SQLite instead of defining another clip schema. Google Flow still produces exactly six source clips in MVP.
 
-### 3.5 Storage and FFmpeg helpers — reuse
+The fixed `0–10`, `10–20`, ... `50–60` segment ranges remain the **planning/reference timeline**, not a hard assertion that final narration must end at exactly 60 seconds. When narration exceeds 60 seconds within policy, Canva stretches the visual playback uniformly while preserving six chronological visual sections.
+
+Dynamic clip counts are explicitly deferred to a later phase for materially longer videos.
+
+### 3.6 Storage and FFmpeg helpers — reuse, but not Cloud Agent final assembly
 
 Reuse:
 
 - `utils.storage_dir(sub_dir, create=True)` as the repository-aware default storage root.
 - `utils.get_ffmpeg_binary()` as the FFmpeg resolution source.
 - Existing path-security patterns before serving/download paths.
+- Cloud Agent `ffprobe` media validation.
 
-A Cloud Agent media-probe helper may resolve `ffprobe` beside the selected FFmpeg executable or from `PATH`, but must not duplicate general storage-root logic.
+For the Cloud Agent production path:
 
-### 3.6 Configuration — reuse existing `[app]`
+- FFprobe measures exact audio/video duration and validates streams/codecs/resolution.
+- Google Flow creates the six source clips.
+- Canva owns ordering, playback-speed adjustment, narration placement, captions, and final export.
+- Do **not** pre-concatenate the six Cloud Agent clips with the legacy `six_clip_render.py` path before Canva.
+
+### 3.7 Configuration — reuse existing `[app]`
 
 All non-secret Cloud Agent configuration belongs in existing `config.app` / `[app]` in `config.example.toml`.
 
@@ -140,7 +178,9 @@ Nginx / TLS
                     │
              Cloud Agent Worker
                     │
-          Playwright + FFmpeg + files
+          Playwright + ffprobe + files
+                    │
+       Google Flow → Canva → final.mp4
 ```
 
 Processes:
@@ -256,6 +296,10 @@ target_words
 tts_provider
 voice_id
 voice_speed
+voice_file
+audio_duration_seconds
+canva_playback_speed
+target_final_duration_seconds
 
 status
 checkpoint
@@ -266,7 +310,6 @@ progress
 flow_status
 canva_status
 
-voice_file
 final_video
 
 error_code
@@ -283,7 +326,104 @@ updated_at
 
 Store `clip_plan_json` from existing `SixClipPlan`; do not create duplicate clip models.
 
-## 7. Queue, lease, heartbeat and restart recovery
+`audio_duration_seconds` must preserve the measured decimal duration from ffprobe. Do not `ceil()` it before timing-policy calculations.
+
+`canva_playback_speed` is the approved playback factor for all six Flow clips for that job. Persisting it makes restart/resume deterministic.
+
+`target_final_duration_seconds` is:
+
+```text
+max(60.0, audio_duration_seconds)
+```
+
+for the Adaptive Six-Clip MVP.
+
+## 7. Adaptive Six-Clip timing policy
+
+### 7.1 Base visual duration
+
+Google Flow still produces:
+
+```text
+6 clips × approximately 10 seconds = approximately 60 seconds of source visuals
+```
+
+The narration duration measured from the canonical `voice.mp3` determines whether Canva must slow the visuals.
+
+### 7.2 Playback-speed calculation
+
+Let:
+
+```text
+D = measured narration duration in seconds
+B = 60.0 seconds base six-clip visual duration
+```
+
+Then:
+
+```text
+if D <= B:
+    canva_playback_speed = 1.0
+    target_final_duration_seconds = B
+else:
+    canva_playback_speed = B / D
+    target_final_duration_seconds = D
+```
+
+Examples:
+
+| Narration | Required speed | Target final duration |
+| ---: | ---: | ---: |
+| 55.0 s | 1.000x | 60.0 s |
+| 60.0 s | 1.000x | 60.0 s |
+| 63.0 s | 0.952x | 63.0 s |
+| 66.0 s | 0.909x | 66.0 s |
+| 70.0 s | 0.857x | 70.0 s |
+
+### 7.3 Safety floor
+
+Do not slow six clips without limit. MVP defines a configurable product safety floor:
+
+```text
+cloud_agent_canva_min_playback_speed = 0.85
+```
+
+The value is a product-quality policy, not Canva's technical minimum.
+
+After TTS is created and measured:
+
+```text
+required speed >= configured minimum
+→ continue to Google Flow
+
+required speed < configured minimum
+→ stop before consuming Google Flow generation credit
+→ persist an actionable validation failure
+```
+
+Recommended error code:
+
+```text
+NARRATION_TOO_LONG_FOR_SIX_CLIP
+```
+
+The error tells the user to shorten the script, reduce Target Words, select a faster Voice Rate, or use a future long-video mode.
+
+With the initial `0.85x` policy, the practical narration ceiling is approximately 70.6 seconds. This ceiling is configuration-driven and must not be reintroduced as a hard-coded `> 60` or `> 62` rule.
+
+### 7.4 Why the policy is based on real audio
+
+Word count alone is not authoritative because duration varies with:
+
+- language;
+- selected provider and voice;
+- punctuation and pauses;
+- Voice Rate;
+- numbers, abbreviations, and mixed-language text.
+
+Target Words may provide UI guidance, but the Cloud Agent timing gate uses the measured production audio.
+
+## 8. Queue, lease, heartbeat and restart recovery
 
 MVP executes one active production at a time. Other jobs remain `QUEUED`.
 
@@ -305,10 +445,14 @@ API/WebUI start
 → Worker heartbeat updates
 → expired active lease becomes recoverable
 → validate checkpoint artifacts
+→ re-probe voice.mp3 when TTS_READY or later
+→ verify persisted/calculated timing policy
 → resume at next safe step
 ```
 
-## 8. File layout
+A restart must never cause a successful TTS or Flow step to be repeated merely to recover timing information.
+
+## 9. File layout
 
 ```text
 storage/
@@ -334,7 +478,7 @@ storage/
 
 `prepare(job_id)` creates directories and returns deterministic paths. It does **not** create empty placeholder media files. `write_inputs(...)` writes script/Master Prompt after validated input exists.
 
-## 9. Local + Session Preflight
+## 10. Local + Session Preflight
 
 Immediately after the user presses `Start Auto Production`, persist a job and queue it. Before TTS or any paid generation work, the worker runs Preflight.
 
@@ -347,7 +491,7 @@ Required checks:
 
 Flow/Canva checks must verify authenticated functionality, not just Cookie existence.
 
-### 9.1 Session states
+### 10.1 Session states
 
 ```text
 CHECKING
@@ -361,7 +505,7 @@ VERIFICATION_REQUIRED
 ERROR
 ```
 
-### 9.2 Auto Re-login
+### 10.2 Auto Re-login
 
 If a service session expired but an already-authenticated Google account is offered by the service:
 
@@ -375,16 +519,16 @@ SESSION_EXPIRED
 
 Do not store a Google password in application config/database.
 
-### 9.3 Human Required boundary
+### 10.3 Human Required boundary
 
 Never bypass:
 
-- password challenge
-- CAPTCHA
-- 2FA
-- Google Prompt
-- Verify-it's-you
-- equivalent security challenge
+- password challenge;
+- CAPTCHA;
+- 2FA;
+- Google Prompt;
+- Verify-it's-you;
+- equivalent security challenge.
 
 Use:
 
@@ -394,7 +538,7 @@ HUMAN_REQUIRED
 
 The worker preserves `checkpoint`, current evidence, and the browser state needed for manual recovery when safe.
 
-### 9.4 Browser/noVNC model
+### 10.4 Browser/noVNC model
 
 Production Playwright runs in a virtual display environment compatible with noVNC. The production deployment uses a headed browser on Xvfb so `Open Browser` can display the same server-side browser session during `HUMAN_REQUIRED`.
 
@@ -411,7 +555,7 @@ Only one process may use a service profile at a time. Browser profile access mus
 
 The normal job worker owns profiles during production. Manual API session checks must acquire the same service lock; if the service is busy, they return a bounded busy response rather than opening a competing persistent context.
 
-## 10. Workflow
+## 11. Workflow
 
 ### Step 1 — Script and six-clip plan
 
@@ -430,6 +574,8 @@ master_prompt
 
 User may edit Script and view Master Prompt before Start.
 
+The plan remains six chronological visual sections. It is not converted into a variable-N clip plan for this MVP.
+
 ### Step 2 — Start and Preflight
 
 ```text
@@ -442,28 +588,36 @@ QUEUED
 
 No TTS/Flow credit should be consumed before Preflight passes.
 
-### Step 3 — TTS
+### Step 3 — Production TTS once + exact timing
 
 ```text
 script
 → existing voice.tts API-backed routing
-→ voice.mp3
+→ canonical voice.mp3
 → ffprobe validation
+→ read decimal audio_duration_seconds
+→ calculate canva_playback_speed
+→ apply safety-floor gate
+→ persist timing values
 → TTS_READY checkpoint
 ```
 
 Validate:
 
-- file exists
-- meaningful non-zero size
-- readable audio stream
-- codec readable
-- duration readable
-- configured duration policy
+- file exists;
+- meaningful non-zero size;
+- readable audio stream;
+- audio codec readable;
+- finite positive duration;
+- required Canva playback speed is at or above configured minimum.
 
-Initial operational duration target may be 58–62 seconds, but limits are configuration, not hard-coded constants.
+Do not reject merely because narration exceeds 60 or 62 seconds.
+
+Do not create a second production TTS after this point. `voice.mp3` is reused by Canva and after restart/resume.
 
 ### Step 4 — Flow re-check and generation
+
+The safety-floor gate from Step 3 must pass **before** Flow generation.
 
 Before Flow work:
 
@@ -497,7 +651,7 @@ clip_01.mp4 ... clip_06.mp4
 
 Each clip must pass video validation. Retry only failed download/item where possible. Persist `FLOW_READY` only after all six artifacts validate.
 
-### Step 6 — Canva re-check and final assembly
+### Step 6 — Canva re-check and Adaptive Six-Clip final assembly
 
 Before Canva:
 
@@ -512,33 +666,62 @@ MVP prefers a prepared Canva template.
 Sequence:
 
 ```text
-upload six validated clips
-→ upload voice.mp3
+upload six validated Flow clips
+→ upload canonical voice.mp3
 → order clips 1→6
-→ straight cuts
-→ mute source video audio when narration is primary
-→ place narration
+→ keep straight cuts
+→ if canva_playback_speed < 1.0, apply the same custom playback speed to all six clips
+→ verify the Canva timeline changed as expected
+→ mute source-video audio when narration is primary
+→ place narration from time 0
+→ trim the final visual end only when required to correct UI rounding/overshoot
 → generate Auto Captions
 → use template caption style
 → export MP4 1080p
 → download final.mp4
 ```
 
-Do not add unnecessary effects/transitions in MVP.
+Uniform playback adjustment is preferred over slowing only the last clip because it preserves consistent motion and chronology across the video.
 
-### Step 7 — Final Validation
+The Cloud Agent must not use coordinate-only clicks as its primary Canva automation strategy. Prefer role/text/accessible-label/input selectors plus observable post-action verification.
+
+If Canva changes UI, the playback control cannot be located reliably, or the resulting timeline cannot be verified, do not guess. Preserve `checkpoint=FLOW_READY` and transition to `HUMAN_REQUIRED` when manual recovery is appropriate.
+
+### Step 7 — Canva Playback Automation Spike gate
+
+Before the production Canva adapter is considered implementation-ready, run a real Canva Editor spike on the target workflow and demonstrate all of the following:
+
+1. Playwright can select an uploaded video clip reliably.
+2. Playwright can open the Playback control without coordinate-only automation.
+3. A custom playback speed such as approximately `0.95x` can be entered/applied.
+4. The UI exposes an observable result sufficient to verify that duration/playback changed.
+5. The action can be repeated across all six clips.
+6. The final clip/timeline can be trimmed or otherwise bounded so the export ends at the narration-derived target duration within configured tolerance.
+7. The same operation works in the headed Xvfb/noVNC production-style browser environment.
+
+If the spike cannot satisfy these requirements reliably, stop and revise the assembly strategy before implementing deeper Canva automation. Do not silently move clip concatenation back into VideosTurbo without an explicit design revision.
+
+### Step 8 — Final Validation
 
 A browser download-complete event is not enough.
 
 Validate:
 
-- file exists
-- configured minimum size
-- readable video stream
-- readable audio stream
-- readable duration
-- expected resolution when configured (MVP target 1080x1920)
-- ffprobe can read the file without corruption error
+- file exists;
+- configured minimum size;
+- readable video stream;
+- readable audio stream;
+- readable duration;
+- expected resolution when configured (MVP target 1080x1920);
+- ffprobe can read the file without corruption error;
+- final duration is within configured tolerance of `target_final_duration_seconds`;
+- final duration is not shorter than the narration by more than the configured tolerance.
+
+The target is:
+
+```text
+target_final_duration_seconds = max(60.0, audio_duration_seconds)
+```
 
 Only then persist:
 
@@ -546,7 +729,7 @@ Only then persist:
 FINAL_VALIDATED
 ```
 
-### Step 8 — Cleanup and completion
+### Step 9 — Cleanup and completion
 
 Only after `FINAL_VALIDATED`:
 
@@ -562,7 +745,7 @@ COMPLETED
 
 If Final Validation fails, source clips remain available for retry/debug.
 
-## 11. Retry and Resume
+## 12. Retry and Resume
 
 Each external step has bounded retry. Default operational policy is 3 attempts, configurable.
 
@@ -570,7 +753,9 @@ Classify failures:
 
 - transient network/browser timeout → retry;
 - deterministic invalid artifact → `FAILED` unless a step-specific retry can fix only that artifact;
+- narration requires playback below the configured safety floor → `FAILED` before Flow with `NARRATION_TOO_LONG_FOR_SIX_CLIP`;
 - password/CAPTCHA/2FA/security challenge → `HUMAN_REQUIRED` immediately;
+- Canva UI cannot be safely controlled/verified → `HUMAN_REQUIRED` when manual recovery is appropriate;
 - user pause → preserve checkpoint and `PAUSED`;
 - user cancel → `CANCELLED` at a safe boundary.
 
@@ -582,13 +767,15 @@ Example:
 checkpoint=FLOW_READY
 voice.mp3 valid
 six clips valid
+→ re-probe voice.mp3
+→ verify audio_duration_seconds / canva_playback_speed policy
 → re-check Canva
 → continue at Canva
 ```
 
-Never regenerate TTS/Flow merely because Canva required human login.
+Never regenerate TTS/Flow merely because Canva required human login or a worker/server restart occurred.
 
-## 12. API surface
+## 13. API surface
 
 Use existing `new_router()` so the effective prefix remains `/api/v1`.
 
@@ -619,12 +806,14 @@ Long-running production work is never executed inline in these handlers. Explici
 
 `GET /health` reports at least:
 
-- Cloud Agent enabled/disabled
-- worker last-seen timestamp / online status
-- storage writable status
-- free-space status
+- Cloud Agent enabled/disabled;
+- worker last-seen timestamp / online status;
+- storage writable status;
+- free-space status.
 
-## 13. UI
+Job detail responses should expose the measured narration duration, approved Canva playback speed, and target final duration so the UI can explain timing decisions without recomputing them client-side.
+
+## 14. UI
 
 ### Create Video
 
@@ -641,6 +830,8 @@ Long-running production work is never executed inline in these handlers. Explici
 - Start Auto Production
 
 Reuse current script/six-clip logic. The Cloud Agent Start path must not require the legacy six-media Upload/URL fields.
+
+Target Words remains guidance, not an authoritative duration gate.
 
 ### Service Connections
 
@@ -664,12 +855,16 @@ Show worker Online/Offline using the persisted heartbeat/health endpoint.
 
 Show concrete workflow states and progress, with:
 
-- Job ID
-- current step
-- checkpoint
-- Pause / Resume / Cancel
-- Human Required reason/evidence link when safe
-- Job History
+- Job ID;
+- current step;
+- checkpoint;
+- narration duration after TTS is ready;
+- Canva playback speed when below `1.0x`;
+- Pause / Resume / Cancel;
+- Human Required reason/evidence link when safe;
+- Job History.
+
+For `NARRATION_TOO_LONG_FOR_SIX_CLIP`, show the measured duration, required playback speed, configured minimum speed, and actionable options such as shortening the script or increasing Voice Rate.
 
 ### Final result
 
@@ -680,7 +875,7 @@ Show concrete workflow states and progress, with:
 - voice
 - Download MP4
 
-## 14. Configuration baseline
+## 15. Configuration baseline
 
 Cloud Agent settings live under `[app]`. Initial defaults/configuration include equivalents of:
 
@@ -688,45 +883,58 @@ Cloud Agent settings live under `[app]`. Initial defaults/configuration include 
 cloud_agent_enabled = false
 cloud_agent_db_path = storage/cloud-agent.sqlite3
 cloud_agent_worker_poll_seconds = 2
-cloud_agent_worker_lease_seconds = configurable and longer than poll interval
-cloud_agent_worker_heartbeat_seconds = configurable
+cloud_agent_worker_lease_seconds = 120
+cloud_agent_worker_heartbeat_seconds = 10
 cloud_agent_max_retries = 3
-cloud_agent_min_free_disk_gb = configurable
-cloud_agent_tts_min_duration_seconds = 58
-cloud_agent_tts_max_duration_seconds = 62
-cloud_agent_final_min_size_bytes = configurable
+cloud_agent_min_free_disk_gb = 10
+cloud_agent_tts_min_duration_seconds = 1
+cloud_agent_canva_min_playback_speed = 0.85
+cloud_agent_final_duration_tolerance_seconds = 1.0
+cloud_agent_final_min_size_bytes = 1048576
 cloud_agent_expected_width = 1080
 cloud_agent_expected_height = 1920
-cloud_agent_browser_headless = configurable
-cloud_agent_google_profile_dir = server-local path
-cloud_agent_canva_profile_dir = server-local path
-cloud_agent_remote_browser_url = protected noVNC URL
-cloud_agent_flow_url = configured service URL
-cloud_agent_canva_template_url = configured template URL
+cloud_agent_browser_headless = true
+cloud_agent_google_profile_dir = storage/browser-profiles/google-flow
+cloud_agent_canva_profile_dir = storage/browser-profiles/canva
+cloud_agent_browser_lock_dir = storage/browser-locks
+cloud_agent_remote_browser_url = http://127.0.0.1:6080/vnc.html
+cloud_agent_flow_url = ""
+cloud_agent_canva_template_url = ""
 ```
+
+The former v2.1 default:
+
+```text
+cloud_agent_tts_max_duration_seconds = 62
+```
+
+is obsolete under this design and must be removed/replaced during implementation rather than used to reject valid Adaptive Six-Clip narration.
+
+`cloud_agent_tts_min_duration_seconds` is now a sanity floor for a valid generated audio artifact, not a target-duration preference.
 
 Never commit real credentials, cookies, browser profiles, signed download URLs, or API keys.
 
-## 15. Error evidence
+## 16. Error evidence
 
 Browser failures record:
 
-- service
-- job id when applicable
-- current step
-- timestamp
-- current URL when safe
-- sanitized error message
-- screenshot when it does not expose credentials/security secrets
+- service;
+- job id when applicable;
+- current step;
+- timestamp;
+- current URL when safe;
+- sanitized error message;
+- screenshot when it does not expose credentials/security secrets.
 
 Example:
 
 ```text
 storage/jobs/<job_id>/screenshots/flow_generate_error.png
+storage/jobs/<job_id>/screenshots/canva_playback_error.png
 storage/jobs/<job_id>/logs/agent.log
 ```
 
-## 16. Security boundaries
+## 17. Security boundaries
 
 - No CAPTCHA/2FA/security-challenge bypass.
 - No passwords in config/SQLite.
@@ -736,7 +944,7 @@ storage/jobs/<job_id>/logs/agent.log
 - noVNC must not be anonymous on the public internet.
 - Nginx/TLS/authentication or equivalent access control is required for production exposure.
 
-## 17. TDD and test strategy
+## 18. TDD and test strategy
 
 All implementation follows **TDD (Test-Driven Development — เขียนการทดสอบก่อน)**:
 
@@ -750,9 +958,22 @@ RED: write one failing behavior test
 → commit
 ```
 
-CI/unit tests do not depend on a live Google Flow/Canva account. Provider adapters use deterministic local HTML fixtures/page-object tests for state detection. Real third-party behavior is verified only at the explicit Ubuntu smoke gate.
+CI/unit tests do not depend on a live Google Flow/Canva account. Provider adapters use deterministic local HTML fixtures/page-object tests for state detection.
 
-## 18. MVP acceptance criteria
+Timing-policy unit tests must cover at least:
+
+- 55 s → `1.0x`, target 60 s;
+- 60 s → `1.0x`, target 60 s;
+- 63 s → approximately `0.95238x`, target 63 s;
+- 70 s → approximately `0.85714x`, target 70 s;
+- duration requiring `<0.85x` → reject before Flow;
+- decimal duration is not ceiled before calculation;
+- resume from `TTS_READY` re-probes/validates the existing audio instead of creating TTS again;
+- resume from `FLOW_READY` does not recreate TTS or Flow.
+
+Real third-party behavior is verified only at explicit smoke/spike gates.
+
+## 19. MVP acceptance criteria
 
 MVP is complete only when all are demonstrated:
 
@@ -763,21 +984,27 @@ MVP is complete only when all are demonstrated:
 5. Ordinary expired session can Auto Re-login when an already-authenticated account is offered.
 6. CAPTCHA/2FA/verification becomes `HUMAN_REQUIRED` without bypass.
 7. noVNC shows the server-side browser for human recovery.
-8. TTS uses existing API-backed voice routing and passes audio validation.
-9. Flow generates six clips; all six are downloaded and validated.
-10. Only failed Flow items/downloads are retried when possible.
-11. Canva uploads/arranges six clips plus narration.
-12. Canva generates captions and exports MP4.
-13. `final.mp4` passes server-side validation before source cleanup.
-14. User can Pause/Resume/Cancel at defined safe boundaries.
-15. Resume validates checkpoint artifacts and does not repeat successful paid steps unnecessarily.
-16. Worker lease/heartbeat prevents duplicate execution and exposes Cloud Agent online status.
-17. Closing the local browser/computer does not stop production.
-18. Worker/server restart preserves the job and resumes from a safe checkpoint.
-19. WebUI shows history/status/final Preview/Download.
-20. Legacy stock/render code remains available until this E2E gate passes.
+8. TTS uses existing API-backed voice routing and creates the canonical production `voice.mp3` once.
+9. Exact decimal narration duration is measured and persisted without an early `ceil()` timing calculation.
+10. Narration longer than 60/62 seconds is not rejected solely for exceeding the old fixed timeline.
+11. Required Canva playback speed is calculated from real narration duration and checked before Flow credit is consumed.
+12. Narration requiring playback below the configured minimum is rejected before Flow with an actionable error.
+13. Flow generates six clips; all six are downloaded and validated.
+14. Only failed Flow items/downloads are retried when possible.
+15. Canva uploads and arranges six clips plus the same canonical narration file.
+16. When narration exceeds 60 seconds within policy, Canva applies uniform playback adjustment across all six clips.
+17. Canva playback automation has passed the real Editor spike including observable post-action verification.
+18. Canva generates captions and exports MP4.
+19. `final.mp4` passes stream/resolution/size and narration-derived duration validation before source cleanup.
+20. User can Pause/Resume/Cancel at defined safe boundaries.
+21. Resume validates checkpoint artifacts and does not repeat successful paid steps unnecessarily.
+22. Worker lease/heartbeat prevents duplicate execution and exposes Cloud Agent online status.
+23. Closing the local browser/computer does not stop production.
+24. Worker/server restart preserves the job and resumes from a safe checkpoint.
+25. WebUI shows history/status/timing/final Preview/Download.
+26. Legacy stock/render code remains available until this E2E gate passes.
 
-## 19. Real Ubuntu smoke gate
+## 20. Real Ubuntu smoke gate
 
 Before declaring production-ready or starting legacy cleanup, demonstrate on Ubuntu 24.04:
 
@@ -786,27 +1013,33 @@ Generate/Edit Script
 → SixClipPlan + Master Prompt
 → Start
 → Preflight
-→ TTS + validation
+→ one production TTS + exact duration
+→ timing policy / playback-speed calculation
 → Flow session re-check
 → 6 Flow clips + validation
 → FLOW_READY checkpoint
 → Canva session re-check
-→ upload/arrange/narration/captions
+→ upload/arrange six clips
+→ adaptive playback adjustment when required
+→ narration/captions
 → export/download
-→ Final Validation
+→ Final Validation against target duration
 → cleanup after validation only
 → COMPLETED
 ```
 
 Also verify:
 
-- Auto Re-login scenario.
-- HUMAN_REQUIRED + noVNC + Resume scenario.
-- local browser/computer closed during production.
-- worker/server restart at a safe checkpoint.
-- no duplicate TTS/Flow after resume from `FLOW_READY`.
+- a narration around 63 seconds completes through Adaptive Six-Clip without a second TTS;
+- a narration beyond the configured playback safety floor stops before Flow generation;
+- Auto Re-login scenario;
+- HUMAN_REQUIRED + noVNC + Resume scenario;
+- local browser/computer closed during production;
+- worker/server restart at `TTS_READY` and `FLOW_READY`;
+- no duplicate TTS/Flow after resume;
+- final exported duration does not truncate the narration outside configured tolerance.
 
-## 20. Legacy cleanup gate
+## 21. Legacy cleanup gate
 
 Legacy cleanup is a separate follow-up phase after the smoke gate passes. Remove one category at a time, with regression tests and commits between categories.
 
@@ -821,19 +1054,35 @@ Candidates may include:
 
 Do not remove Music Batch or other retained features merely because the new Create Video path no longer calls them.
 
-## 21. Final baseline principle
+## 22. Deferred long-video mode
+
+MVP Adaptive Six-Clip is intentionally optimized for narration near one minute. It is not a claim that six clips should be stretched to arbitrary length.
+
+A later long-video phase may introduce Dynamic Clip Timeline with:
+
+- clip counts derived from narration duration;
+- batched LLM/Flow generation;
+- per-clip durable progress;
+- paginated UI;
+- cost/time estimation;
+- backward-compatible data versioning.
+
+That phase requires its own design/implementation gate. Do not partially introduce variable clip counts into this MVP.
+
+## 23. Final baseline principle
 
 ```text
 VideosTurbo = Content + Control + Status
 FastAPI = shared control contract
 Cloud Agent Worker = durable workflow execution
-SQLite = Cloud Agent durable jobs/checkpoints/leases/heartbeat
-TTS = existing API-backed voice service
-Google Flow = Playwright browser automation
-Canva = Playwright browser automation
+SQLite = Cloud Agent durable jobs/checkpoints/leases/heartbeat/timing data
+TTS = existing API-backed voice service; production audio created once
+Google Flow = six AI source clips through Playwright browser automation
+Canva = playback adjustment + final assembly + narration + captions + export
+FFprobe = local timing/media validation, not Cloud Agent final concatenation
 Ubuntu Cloud Server = 24/7 execution environment
 ```
 
 Product target:
 
-> **ใส่หัวข้อ → ตรวจ Script → กด Start → ปิดคอม → กลับมารับ Final Video**
+> **ใส่หัวข้อ → ตรวจ Script → กด Start → ปิดคอม → Cloud Agent วัดเสียงจริงและปรับ Canva ให้เหมาะสม → กลับมารับ Final Video**
