@@ -109,3 +109,7 @@ jobs:
           test/services/test_task_manager.py
           test/services/test_upload_post.py
           test/services/test_controller_video.py
+          test/services/test_six_clip_plan.py
+          test/services/test_six_clip_render.py
+          test/services/test_six_clip_task_pipeline.py
+          test/services/test_six_clip_history.py
