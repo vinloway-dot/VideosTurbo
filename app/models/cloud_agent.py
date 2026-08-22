@@ -94,6 +94,9 @@ class CloudJobRecord(CloudJobCreate):
     flow_status: str
     canva_status: str
     voice_file: str
+    audio_duration_seconds: float = Field(default=0.0, ge=0)
+    canva_playback_speed: float = Field(default=1.0, gt=0, le=1.0)
+    target_final_duration_seconds: float = Field(default=60.0, gt=0)
     final_video: str
     error_code: str
     error_message: str
