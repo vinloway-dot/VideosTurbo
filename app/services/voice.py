@@ -173,8 +173,19 @@ def get_minimax_voices(voice_id: str | None = None) -> list[str]:
     return [f"minimax:{voice_id}"]
 
 
-def get_elevenlabs_voices(api_key: str) -> list[str]:
+class ElevenLabsVoiceCatalogError(RuntimeError):
+    """Raised when the ElevenLabs voice catalog cannot be loaded."""
+
+
+def get_elevenlabs_voices(
+    api_key: str,
+    *,
+    raise_on_error: bool = False,
+) -> list[str]:
     if not api_key:
+        message = "ElevenLabs API key is not configured"
+        if raise_on_error:
+            raise ElevenLabsVoiceCatalogError(message)
         return []
     try:
         url = "https://api.elevenlabs.io/v2/voices"
@@ -182,9 +193,13 @@ def get_elevenlabs_voices(api_key: str) -> list[str]:
         headers = {"xi-api-key": api_key}
         response = requests.get(url, params=params, headers=headers, timeout=10)
         if response.status_code != 200:
-            logger.warning(
-                f"ElevenLabs voices fetch failed with status {response.status_code}: {response.text}"
+            message = (
+                f"ElevenLabs voices request failed (HTTP {response.status_code}): "
+                f"{response.text}"
             )
+            logger.warning(message)
+            if raise_on_error:
+                raise ElevenLabsVoiceCatalogError(message)
             return []
         data = response.json()
         voices = data.get("voices", [])
@@ -193,8 +208,13 @@ def get_elevenlabs_voices(api_key: str) -> list[str]:
             for v in voices
             if v.get("voice_id") and v.get("name") and v.get("status") != "disabled"
         ]
+    except ElevenLabsVoiceCatalogError:
+        raise
     except Exception as e:
-        logger.warning(f"ElevenLabs voices fetch failed: {str(e)}")
+        message = f"ElevenLabs voices request failed: {str(e)}"
+        logger.warning(message)
+        if raise_on_error:
+            raise ElevenLabsVoiceCatalogError(message) from e
         return []
 
 
