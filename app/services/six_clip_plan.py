@@ -230,11 +230,11 @@ def build_script_generation_requirements(
         target = int(target_words)
     except (TypeError, ValueError) as exc:
         raise ValueError("target_words must be an integer") from exc
-    if target < 40 or target > 400:
-        raise ValueError("target_words must be between 40 and 400")
+    if target < 40:
+        raise ValueError("target_words must be at least 40")
 
     requirements = [
-        f"Write approximately {target} words so the narration is suitable for about 60 seconds.",
+        f"Write approximately {target} words.",
         (
             "The first 0–3 seconds must function as a strong hook that immediately "
             "creates curiosity or communicates the most compelling point."

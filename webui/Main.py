@@ -213,8 +213,8 @@ def _saved_ui_choice(key, options, default):
     return default
 
 
-def _saved_ui_number(key, default, minimum, maximum, number_type=float):
-    """读取并限幅持久化数值，避免非法配置破坏 Streamlit slider。"""
+def _saved_ui_number(key, default, minimum, maximum=None, number_type=float):
+    """读取并限幅持久化数值，避免非法配置破坏 Streamlit 数值控件。"""
     try:
         saved = config.ui.get(key, default)
         if isinstance(saved, bool):
@@ -224,7 +224,8 @@ def _saved_ui_number(key, default, minimum, maximum, number_type=float):
             raise ValueError("non-finite value")
     except (TypeError, ValueError, OverflowError):
         value = default
-    return min(maximum, max(minimum, value))
+    value = max(minimum, value)
+    return value if maximum is None else min(maximum, value)
 
 
 def _saved_ui_bool(key, default):
@@ -3144,11 +3145,13 @@ def _render_script_settings(panel, params):
             params.target_words = st.number_input(
                 "Target Words",
                 min_value=40,
-                max_value=400,
-                value=_saved_ui_number("target_words", 130, 40, 400, int),
+                value=_saved_ui_number("target_words", 130, 40, None, int),
                 step=5,
                 key="target_words_input",
-                help="Approximate narration word count for the 60-second script.",
+                help=(
+                    "Approximate narration word count. "
+                    "Longer scripts automatically build longer timelines."
+                ),
             )
             _set_runtime_config("ui", "target_words", int(params.target_words))
 
