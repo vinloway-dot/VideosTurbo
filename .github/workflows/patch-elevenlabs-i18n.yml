@@ -1,0 +1,76 @@
+name: Patch ElevenLabs Diagnostic Translations
+
+on:
+  push:
+    branches:
+      - ui/six-clip-compact-sections
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ui/six-clip-compact-sections
+
+      - name: Add required ElevenLabs diagnostic translation keys
+        shell: python
+        run: |
+          from pathlib import Path
+          import json
+
+          paths = [
+              Path("webui/i18n/de.json"),
+              Path("webui/i18n/es.json"),
+              Path("webui/i18n/id.json"),
+              Path("webui/i18n/pt.json"),
+              Path("webui/i18n/ru.json"),
+              Path("webui/i18n/tr.json"),
+              Path("webui/i18n/vi.json"),
+          ]
+          additions = {
+              "Refresh ElevenLabs Voices": "Refresh ElevenLabs Voices",
+              "ElevenLabs Voices Load Failed": "Unable to load ElevenLabs voices: {error}",
+              "ElevenLabs Voices Loaded": "Loaded {count} ElevenLabs voices.",
+              "ElevenLabs Voices Empty": "ElevenLabs returned 0 voices for this account. Add a voice to My Voices, or check the account plan and voice permissions.",
+          }
+
+          for path in paths:
+              text = path.read_text(encoding="utf-8")
+              data = json.loads(text)
+              translations = data["Translation"]
+              if all(key in translations for key in additions):
+                  continue
+              marker = "\n  }\n}"
+              if marker not in text:
+                  raise SystemExit(f"unexpected JSON layout: {path}")
+              prefix, suffix = text.rsplit(marker, 1)
+              if not prefix.rstrip().endswith(","):
+                  prefix = prefix.rstrip() + ","
+              new_lines = []
+              for key, value in additions.items():
+                  if key not in translations:
+                      new_lines.append(
+                          "    " + json.dumps(key, ensure_ascii=False) + ": "
+                          + json.dumps(value, ensure_ascii=False)
+                      )
+              insertion = "\n" + ",\n".join(new_lines)
+              updated = prefix + insertion + marker + suffix
+              json.loads(updated)
+              path.write_text(updated, encoding="utf-8")
+
+      - name: Commit translations
+        run: |
+          if git diff --quiet; then
+            echo "No translation patch needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add webui/i18n/de.json webui/i18n/es.json webui/i18n/id.json webui/i18n/pt.json webui/i18n/ru.json webui/i18n/tr.json webui/i18n/vi.json
+          git commit -m "fix: complete ElevenLabs diagnostic translations"
+          git push origin HEAD:ui/six-clip-compact-sections
