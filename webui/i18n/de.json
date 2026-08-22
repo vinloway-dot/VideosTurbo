@@ -218,6 +218,7 @@
     "Voice Example": "Dies ist ein Beispieltext zum Testen der Sprachsynthese",
     "Synthesizing Voice": "Sprachsynthese läuft, bitte warten...",
     "Generate Full Voiceover Preview": "Ganz anhören",
+    "Confirm Script & Build Timeline": "Skript bestätigen und Timeline erstellen",
     "Estimated Voiceover Duration": "Geschätzte Gesamtdauer: ca. {min}–{max} Sek. (lokal, ohne API-Aufruf)",
     "Voiceover Script Required": "Fügen Sie ein Videoskript hinzu, um die vollständige Vertonung zu schätzen und zu testen.",
     "Full Voiceover Preview Cost Hint": "Die vollständige Vorschau ruft den TTS-Dienst auf und kann API-Guthaben verbrauchen.",

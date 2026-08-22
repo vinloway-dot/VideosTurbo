@@ -215,6 +215,7 @@
     "Voice Example": "Đây là văn bản mẫu để kiểm tra tổng hợp giọng nói",
     "Synthesizing Voice": "Đang tổng hợp giọng nói, vui lòng đợi...",
     "Generate Full Voiceover Preview": "Nghe Toàn Bộ",
+    "Confirm Script & Build Timeline": "Xác nhận kịch bản và tạo dòng thời gian",
     "Estimated Voiceover Duration": "Thời lượng ước tính: {min}–{max} giây (tính cục bộ, không gọi API)",
     "Voiceover Script Required": "Thêm kịch bản để ước tính và nghe toàn bộ lời thoại.",
     "Full Voiceover Preview Cost Hint": "Bản nghe đầy đủ gọi dịch vụ TTS và có thể dùng tín dụng API.",

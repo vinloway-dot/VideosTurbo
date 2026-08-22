@@ -211,6 +211,7 @@
     "Voice Example": "Пример текста для проверки озвучки",
     "Synthesizing Voice": "Генерируется голос, подождите...",
     "Generate Full Voiceover Preview": "Вся озвучка",
+    "Confirm Script & Build Timeline": "Подтвердить сценарий и создать таймлайн",
     "Estimated Voiceover Duration": "Примерная длительность: {min}–{max} сек. (локально, без API)",
     "Voiceover Script Required": "Добавьте сценарий, чтобы оценить и прослушать полную озвучку.",
     "Full Voiceover Preview Cost Hint": "Полная проверка вызывает TTS и может расходовать API-кредиты.",

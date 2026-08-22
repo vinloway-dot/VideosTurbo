@@ -226,6 +226,7 @@
     "Voice Example": "这是一段测试语音合成的示例文本",
     "Synthesizing Voice": "语音合成中，请稍候...",
     "Generate Full Voiceover Preview": "完整试听",
+    "Confirm Script & Build Timeline": "确认文案并创建时间轴",
     "Estimated Voiceover Duration": "预计完整配音时长：约 {min}–{max} 秒（本地估算，不调用 API）",
     "Voiceover Script Required": "填写视频文案后，可估算并预览完整配音。",
     "Full Voiceover Preview Cost Hint": "完整预览会调用当前配音服务，并可能消耗 API 额度。",
