@@ -234,18 +234,6 @@ class CloudJobStore:
             ).fetchone()
         return self._row_to_record(row) if row is not None else None
 
-    def list_jobs(self, limit: int = 50, offset: int = 0) -> list[CloudJobRecord]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM cloud_agent_jobs
-                ORDER BY created_at DESC, id DESC
-                LIMIT ? OFFSET ?
-                """,
-                (limit, offset),
-            ).fetchall()
-        return [self._row_to_record(row) for row in rows]
-
     def patch_job(self, job_id: str, **changes) -> CloudJobRecord:
         if not changes:
             existing = self.get_job(job_id)
