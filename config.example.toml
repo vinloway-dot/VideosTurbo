@@ -42,6 +42,11 @@ loomloom_video_run_timeout_seconds = 1800
 # 单次 Edge TTS 流式请求超时时间。慢网络可适当调大，设置为 0 表示禁用超时。
 edge_tts_timeout = 30
 
+# Optional operational limit for narration-driven timeline slots.
+# 0 disables the limit; a positive value blocks confirmation before clip-plan
+# generation when the measured narration would require more clips.
+max_dynamic_clip_count = 0
+
 # Verify TLS certificates for external APIs and material downloads.
 # 默认应保持开启；仅在可信代理或自签名证书环境中临时关闭。
 tls_verify = true

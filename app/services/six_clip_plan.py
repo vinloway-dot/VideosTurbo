@@ -1,4 +1,5 @@
 import json
+import math
 import re
 
 from app.models.six_clip import SIX_CLIP_RANGES, SixClipPlan, SixClipSegment
@@ -30,21 +31,70 @@ def _strip_code_fence(text: str) -> str:
     return value.strip()
 
 
-def validate_six_clip_plan(plan: SixClipPlan) -> SixClipPlan:
-    if len(plan.segments) != 6:
-        raise ValueError("six-clip plan must contain exactly six segments")
+def build_timeline_ranges(
+    narration_duration_sec: float,
+    *,
+    slot_duration_sec: float = 10.0,
+    minimum_clip_count: int = 6,
+    maximum_clip_count: int = 0,
+) -> tuple[tuple[float, float], ...]:
+    duration = float(narration_duration_sec)
+    slot_duration = float(slot_duration_sec)
+    minimum_count = int(minimum_clip_count)
+    maximum_count = int(maximum_clip_count)
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError("narration duration must be a finite positive number")
+    if not math.isfinite(slot_duration) or slot_duration <= 0:
+        raise ValueError("slot duration must be a finite positive number")
+    if minimum_count < 1:
+        raise ValueError("minimum clip count must be positive")
+    if maximum_count < 0:
+        raise ValueError("maximum clip count cannot be negative")
 
+    clip_count = max(minimum_count, math.ceil(duration / slot_duration))
+    if maximum_count > 0 and clip_count > maximum_count:
+        raise ValueError(
+            f"narration requires {clip_count} clips; configured maximum is "
+            f"{maximum_count}"
+        )
+    timeline_duration = max(minimum_count * slot_duration, duration)
+    return tuple(
+        (
+            index * slot_duration,
+            min((index + 1) * slot_duration, timeline_duration),
+        )
+        for index in range(clip_count)
+    )
+
+
+def validate_timeline_plan(plan: SixClipPlan) -> SixClipPlan:
+    expected_ranges = build_timeline_ranges(
+        plan.narration_duration_sec,
+        slot_duration_sec=plan.slot_duration_sec,
+    )
     actual = [
         (segment.index, segment.start_sec, segment.end_sec)
         for segment in plan.segments
     ]
     expected = [
         (index, start, end)
-        for index, (start, end) in enumerate(SIX_CLIP_RANGES, start=1)
+        for index, (start, end) in enumerate(expected_ranges, start=1)
     ]
     if actual != expected:
-        raise ValueError("six-clip plan must use the fixed six-clip timeline")
+        raise ValueError("timeline plan must use the narration-driven ranges")
     return plan
+
+
+def validate_six_clip_plan(plan: SixClipPlan) -> SixClipPlan:
+    return validate_timeline_plan(plan)
+
+
+def is_timeline_current(
+    plan: SixClipPlan,
+    narration_fingerprint: str,
+) -> bool:
+    expected = str(narration_fingerprint or "").strip()
+    return bool(expected and plan.narration_fingerprint == expected)
 
 
 def parse_ai_clip_plan(text: str, target_words: int = 130) -> SixClipPlan:

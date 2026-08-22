@@ -1,3 +1,4 @@
+import math
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -16,9 +17,9 @@ SUPPORTED_MEDIA_KINDS = {"", "video", "image"}
 
 
 class SixClipSegment(BaseModel):
-    index: int = Field(ge=1, le=6)
-    start_sec: int = Field(ge=0, le=50)
-    end_sec: int = Field(ge=10, le=60)
+    index: int = Field(ge=1)
+    start_sec: float = Field(ge=0, allow_inf_nan=False)
+    end_sec: float = Field(gt=0, allow_inf_nan=False)
     title: str = Field(default="", max_length=200)
     narration_context: str = Field(default="", max_length=4000)
     video_prompt: str = Field(default="", max_length=12000)
@@ -32,11 +33,8 @@ class SixClipSegment(BaseModel):
 
     @model_validator(mode="after")
     def _validate_range(self):
-        expected = SIX_CLIP_RANGES[self.index - 1]
-        if (self.start_sec, self.end_sec) != expected:
-            raise ValueError(
-                f"clip {self.index} must use fixed range {expected[0]}-{expected[1]} seconds"
-            )
+        if self.end_sec <= self.start_sec:
+            raise ValueError("end_sec must be greater than start_sec")
         if self.media_kind and not self.media_path:
             raise ValueError("media_kind requires media_path")
         if self.media_path and not self.media_kind:
@@ -46,13 +44,67 @@ class SixClipSegment(BaseModel):
 
 class SixClipPlan(BaseModel):
     target_words: int = Field(default=130, ge=40, le=400)
-    segments: list[SixClipSegment] = Field(min_length=6, max_length=6)
+    narration_duration_sec: float = Field(
+        default=60.0,
+        gt=0,
+        allow_inf_nan=False,
+    )
+    timeline_duration_sec: float = Field(
+        default=60.0,
+        gt=0,
+        allow_inf_nan=False,
+    )
+    slot_duration_sec: float = Field(
+        default=10.0,
+        gt=0,
+        allow_inf_nan=False,
+    )
+    narration_fingerprint: str = Field(default="", max_length=256)
+    segments: list[SixClipSegment] = Field(min_length=6)
 
     @model_validator(mode="after")
-    def _validate_fixed_timeline(self):
+    def _validate_timeline(self):
         indexes = [segment.index for segment in self.segments]
-        if indexes != [1, 2, 3, 4, 5, 6]:
-            raise ValueError("segments must be ordered exactly 1 through 6")
+        expected_indexes = list(range(1, len(self.segments) + 1))
+        if indexes != expected_indexes:
+            raise ValueError("segments must use consecutive indexes starting at 1")
+
+        expected_timeline = max(
+            6 * self.slot_duration_sec,
+            self.narration_duration_sec,
+        )
+        if not math.isclose(
+            self.timeline_duration_sec,
+            expected_timeline,
+            abs_tol=1e-6,
+        ):
+            raise ValueError(
+                "timeline_duration_sec must match the narration-driven timeline"
+            )
+
+        expected_count = max(
+            6,
+            math.ceil(self.narration_duration_sec / self.slot_duration_sec),
+        )
+        if len(self.segments) != expected_count:
+            raise ValueError(
+                f"timeline requires exactly {expected_count} ordered segments"
+            )
+
+        for segment in self.segments:
+            expected_start = (segment.index - 1) * self.slot_duration_sec
+            expected_end = min(
+                segment.index * self.slot_duration_sec,
+                self.timeline_duration_sec,
+            )
+            if not (
+                math.isclose(segment.start_sec, expected_start, abs_tol=1e-6)
+                and math.isclose(segment.end_sec, expected_end, abs_tol=1e-6)
+            ):
+                raise ValueError(
+                    f"clip {segment.index} must use range "
+                    f"{expected_start:g}-{expected_end:g} seconds"
+                )
         return self
 
 

@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.models.six_clip import SixClipPlan, SixClipSegment
+from app.services import six_clip_plan
 from app.services.six_clip_plan import (
     GLOBAL_CHARACTER_RULES,
     build_master_prompt,
@@ -29,7 +30,27 @@ def _segment(index: int) -> SixClipSegment:
     )
 
 
-def test_plan_requires_exact_fixed_six_clip_timeline():
+@pytest.mark.parametrize(
+    ("duration", "count", "last_range"),
+    [
+        (55.0, 6, (50.0, 60.0)),
+        (60.0, 6, (50.0, 60.0)),
+        (60.1, 7, (60.0, 60.1)),
+        (63.0, 7, (60.0, 63.0)),
+        (88.0, 9, (80.0, 88.0)),
+        (127.0, 13, (120.0, 127.0)),
+    ],
+)
+def test_build_timeline_ranges_uses_exact_narration_duration(
+    duration, count, last_range
+):
+    ranges = six_clip_plan.build_timeline_ranges(duration)
+
+    assert len(ranges) == count
+    assert ranges[-1] == last_range
+
+
+def test_plan_keeps_legacy_six_clip_timeline_compatible():
     plan = SixClipPlan(target_words=130, segments=[_segment(i) for i in range(1, 7)])
 
     validate_six_clip_plan(plan)
@@ -41,6 +62,34 @@ def test_plan_requires_exact_fixed_six_clip_timeline():
         (40, 50),
         (50, 60),
     ]
+    assert plan.narration_duration_sec == 60.0
+    assert plan.timeline_duration_sec == 60.0
+    assert plan.slot_duration_sec == 10.0
+    assert plan.narration_fingerprint == ""
+
+
+def test_plan_accepts_dynamic_ranges_and_checks_current_fingerprint():
+    ranges = six_clip_plan.build_timeline_ranges(63.0)
+    plan = SixClipPlan(
+        target_words=150,
+        narration_duration_sec=63.0,
+        timeline_duration_sec=63.0,
+        narration_fingerprint="voice-fingerprint",
+        segments=[
+            SixClipSegment(
+                index=index,
+                start_sec=start,
+                end_sec=end,
+                title=f"Scene {index}",
+            )
+            for index, (start, end) in enumerate(ranges, start=1)
+        ],
+    )
+
+    assert len(plan.segments) == 7
+    assert six_clip_plan.is_timeline_current(plan, "voice-fingerprint")
+    assert not six_clip_plan.is_timeline_current(plan, "")
+    assert not six_clip_plan.is_timeline_current(plan, "changed")
 
 
 def test_plan_rejects_missing_or_shifted_segments():
@@ -49,8 +98,19 @@ def test_plan_rejects_missing_or_shifted_segments():
 
     shifted = [_segment(i) for i in range(1, 7)]
     shifted[2] = shifted[2].model_copy(update={"start_sec": 21})
-    with pytest.raises(ValueError, match="fixed range 20-30 seconds"):
+    with pytest.raises(ValueError, match="range 20.*30 seconds"):
         SixClipPlan(target_words=130, segments=shifted)
+
+
+def test_configured_maximum_rejects_required_clip_count():
+    with pytest.raises(ValueError, match="requires 13 clips.*maximum is 12"):
+        six_clip_plan.build_timeline_ranges(127.0, maximum_clip_count=12)
+
+
+@pytest.mark.parametrize("duration", [0, -1, float("inf"), float("nan")])
+def test_timeline_ranges_reject_invalid_duration(duration):
+    with pytest.raises(ValueError, match="finite positive"):
+        six_clip_plan.build_timeline_ranges(duration)
 
 
 def test_master_prompt_contains_global_rules_and_all_current_clip_values():

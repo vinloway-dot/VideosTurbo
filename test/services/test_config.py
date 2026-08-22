@@ -48,6 +48,7 @@ class TestConfigPersistence:
         assert app_config["script_generation_backend"] == "local"
         assert app_config["loomloom_api_token"] == ""
         assert app_config["loomloom_video_run_timeout_seconds"] == 1800
+        assert app_config["max_dynamic_clip_count"] == 0
         assert "loomloom_market_listing_id" not in app_config
         assert "loomloom_video_market_listing_id" not in app_config
         assert app_config["shengsuanyun_api_key"] == ""
