@@ -139,6 +139,10 @@ def _normalize_restored_plan(
     try:
         return SixClipPlan(
             target_words=restored_target_words,
+            narration_duration_sec=plan.narration_duration_sec,
+            timeline_duration_sec=plan.timeline_duration_sec,
+            slot_duration_sec=plan.slot_duration_sec,
+            narration_fingerprint=plan.narration_fingerprint,
             segments=normalized_segments,
         )
     except Exception:

@@ -1132,6 +1132,13 @@ def _apply_pending_task_restore():
     if not payload:
         return False
 
+    # History persists timeline metadata, not the in-memory authoritative audio
+    # bytes or SubMaker timing object. Clear previews from the previously open
+    # task so a matching-looking historical fingerprint can never become
+    # Current without an explicit confirmation in this restored task.
+    st.session_state.pop("voice_preview_audio", None)
+    st.session_state.pop("voice_sample_preview_audio", None)
+
     params = payload["params"]
     video_terms = params.get("video_terms") or ""
     if isinstance(video_terms, list):

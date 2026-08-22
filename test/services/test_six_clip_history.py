@@ -3,22 +3,28 @@ from pathlib import Path
 
 from app.models.schema import VideoParams
 from app.models.six_clip import SixClipPlan, SixClipSegment
-from app.services import task_artifacts
+from app.services import six_clip_plan, task_artifacts
 from app.services import task as task_service
 from webui import six_clip_timeline
 
 
-def _plan(tmp_path: Path, *, missing_index: int | None = None) -> SixClipPlan:
+def _plan(
+    tmp_path: Path,
+    *,
+    missing_index: int | None = None,
+    duration: float = 60.0,
+) -> SixClipPlan:
     segments = []
-    for index in range(1, 7):
+    ranges = six_clip_plan.build_timeline_ranges(duration)
+    for index, (start, end) in enumerate(ranges, start=1):
         media_path = tmp_path / f"clip-{index}.mp4"
         if index != missing_index:
             media_path.write_bytes(b"local-media")
         segments.append(
             SixClipSegment(
                 index=index,
-                start_sec=(index - 1) * 10,
-                end_sec=index * 10,
+                start_sec=start,
+                end_sec=end,
                 title=f"Title {index}",
                 narration_context=f"Narration {index}",
                 video_prompt=f"Prompt {index}",
@@ -26,7 +32,13 @@ def _plan(tmp_path: Path, *, missing_index: int | None = None) -> SixClipPlan:
                 media_path=str(media_path),
             )
         )
-    return SixClipPlan(target_words=145, segments=segments)
+    return SixClipPlan(
+        target_words=300 if duration > 60 else 145,
+        narration_duration_sec=duration,
+        timeline_duration_sec=max(60.0, duration),
+        narration_fingerprint="saved-fingerprint" if duration > 60 else "",
+        segments=segments,
+    )
 
 
 def test_history_persists_target_words_prompts_and_local_media_only(monkeypatch, tmp_path):
@@ -92,6 +104,26 @@ def test_restore_plan_keeps_prompts_and_existing_local_media(tmp_path):
     assert restored.segments[0].media_path == str(tmp_path / "clip-1.mp4")
 
 
+def test_dynamic_history_restores_all_segments_and_exact_metadata(tmp_path):
+    plan = _plan(tmp_path, duration=127.0)
+    params = {
+        "target_words": 300,
+        "six_clip_mode": True,
+        "six_clip_plan": plan.model_dump(mode="json"),
+    }
+
+    restored = six_clip_timeline.restore_plan_from_task_params(params)
+
+    assert restored is not None
+    assert len(restored.segments) == 13
+    assert restored.narration_duration_sec == 127.0
+    assert restored.timeline_duration_sec == 127.0
+    assert restored.slot_duration_sec == 10.0
+    assert restored.narration_fingerprint == "saved-fingerprint"
+    assert restored.segments[-1].end_sec == 127.0
+    assert restored.segments[-1].media_path == str(tmp_path / "clip-13.mp4")
+
+
 def test_restore_plan_marks_deleted_media_missing_instead_of_falling_back(tmp_path):
     plan = _plan(tmp_path, missing_index=3)
     params = {
@@ -119,3 +151,4 @@ def test_main_restore_wires_target_words_and_six_clip_plan():
     assert "six_clip_timeline.set_session_plan(" in source
     assert '"six_clip_video_aspect_select"' in source
     assert '"six_clip_image_motion_select"' in source
+    assert 'st.session_state.pop("voice_preview_audio", None)' in source
