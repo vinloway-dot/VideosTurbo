@@ -25,12 +25,18 @@ class SessionProvider(Protocol):
 class SessionManager:
     """Apply bounded Check -> safe Repair -> Verify policy across services."""
 
-    def __init__(self, providers: Mapping[str, SessionProvider]) -> None:
+    def __init__(
+        self,
+        providers: Mapping[str, SessionProvider],
+        *,
+        headed: bool = False,
+    ) -> None:
         self.providers = dict(providers)
+        self.headed = bool(headed)
 
     def check_all(self) -> dict[str, SessionCheckResult]:
         return {
-            service: provider.check_session(headed=False)
+            service: provider.check_session(headed=self.headed)
             for service, provider in self.providers.items()
         }
 
@@ -40,17 +46,17 @@ class SessionManager:
         job_id: str,
     ) -> SessionCheckResult:
         provider = self._provider(service)
-        initial = provider.check_session(headed=False, job_id=job_id)
+        initial = provider.check_session(headed=self.headed, job_id=job_id)
         if initial.status is ServiceSessionStatus.READY:
             return initial
 
         if initial.status is ServiceSessionStatus.SESSION_EXPIRED:
-            repair = provider.repair_session(headed=False, job_id=job_id)
+            repair = provider.repair_session(headed=self.headed, job_id=job_id)
             if repair.status in {
                 ServiceSessionStatus.AUTO_RELOGIN,
                 ServiceSessionStatus.READY,
             }:
-                verified = provider.check_session(headed=False, job_id=job_id)
+                verified = provider.check_session(headed=self.headed, job_id=job_id)
                 if verified.status is ServiceSessionStatus.READY:
                     return verified
                 self._raise_unready(service, job_id, verified)

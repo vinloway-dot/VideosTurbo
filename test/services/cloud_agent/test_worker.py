@@ -2,6 +2,7 @@ import threading
 
 from app.models.cloud_agent import CloudJobCheckpoint, CloudJobCreate, CloudJobStatus
 from app.models.six_clip import empty_six_clip_plan
+from app.services.cloud_agent import factory, worker as worker_module
 from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.worker import CloudAgentWorker
 
@@ -170,3 +171,17 @@ def test_default_worker_id_contains_hostname_pid_and_random_suffix(tmp_path):
     assert pid.isdigit()
     assert len(suffix) == 32
     int(suffix, 16)
+
+
+def test_worker_module_main_builds_and_runs_production_worker(monkeypatch):
+    calls = []
+
+    class FakeProductionWorker:
+        def run_forever(self):
+            calls.append("run_forever")
+
+    monkeypatch.setattr(factory, "build_worker", FakeProductionWorker)
+
+    worker_module.main()
+
+    assert calls == ["run_forever"]

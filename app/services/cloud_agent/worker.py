@@ -77,3 +77,14 @@ class CloudAgentWorker:
         while True:
             if not self.run_once():
                 time.sleep(self.poll_seconds)
+
+
+def main() -> None:
+    """Run the production worker when invoked as a module by systemd."""
+    from app.services.cloud_agent.factory import build_worker
+
+    build_worker().run_forever()
+
+
+if __name__ == "__main__":
+    main()

@@ -27,17 +27,21 @@ def classify_google_flow_session(*, url: str, html: str) -> ServiceSessionStatus
     page_url = str(url or "").lower()
     body = str(html or "").lower()
 
-    if (
-        "accounts.google.com" in page_url
-        or "sign in" in body
-        or "continue with google" in body
-    ):
+    if "accounts.google.com" in page_url:
         return ServiceSessionStatus.SESSION_EXPIRED
 
     has_agent_control = 'aria-label="agent"' in body or ">agent<" in body
     has_prompt_box = 'aria-label="prompt"' in body or "prompt box" in body
-    if has_agent_control and has_prompt_box:
+    has_project_shell = (
+        "/tools/flow/project/" in page_url
+        and "meet your agent" in body
+        and "your agent in google flow" in body
+    )
+    if (has_agent_control and has_prompt_box) or has_project_shell:
         return ServiceSessionStatus.READY
+
+    if "sign in" in body or "continue with google" in body:
+        return ServiceSessionStatus.SESSION_EXPIRED
 
     return ServiceSessionStatus.ERROR
 

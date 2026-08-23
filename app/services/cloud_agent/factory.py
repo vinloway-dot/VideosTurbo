@@ -81,7 +81,8 @@ def build_session_manager(
                 browser,
                 service_url=app_config["cloud_agent_canva_template_url"],
             ),
-        }
+        },
+        headed=not bool(app_config["cloud_agent_browser_headless"]),
     )
 
 

@@ -5,10 +5,19 @@ def classify_security_challenge(*, html: str) -> ServiceSessionStatus | None:
     """Return a conservative security-challenge state before any ready signal."""
     body = str(html or "").lower()
 
-    if any(
+    active_captcha_prompt = any(
         marker in body
-        for marker in ("recaptcha", "h-captcha", "captcha", "not a robot")
-    ):
+        for marker in (
+            "not a robot",
+            "captcha challenge",
+            "complete the captcha",
+            "solve the captcha",
+        )
+    )
+    active_hcaptcha_check = "security check" in body and any(
+        marker in body for marker in ("h-captcha", "hcaptcha")
+    )
+    if active_captcha_prompt or active_hcaptcha_check:
         return ServiceSessionStatus.CAPTCHA_REQUIRED
 
     if any(

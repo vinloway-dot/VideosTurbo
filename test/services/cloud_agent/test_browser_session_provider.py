@@ -16,6 +16,15 @@ class FakeLocator:
     def click(self):
         self.page.clicks += 1
 
+    def wait_for(self, *, state, timeout):
+        self.page.wait_calls.append((state, timeout))
+
+
+class DelayedCanvaShareLocator(FakeLocator):
+    def wait_for(self, *, state, timeout):
+        self.page.wait_calls.append((state, timeout))
+        self.page.html = _canva_ready_html()
+
 
 class FakePage:
     def __init__(self, *, url, html, continue_google=False):
@@ -24,6 +33,7 @@ class FakePage:
         self.continue_google = continue_google
         self.goto_calls = []
         self.clicks = 0
+        self.wait_calls = []
 
     def goto(self, url, **kwargs):
         self.goto_calls.append((url, kwargs))
@@ -33,9 +43,18 @@ class FakePage:
         return self.html
 
     def get_by_role(self, role, *, name):
+        if role == "menuitem":
+            return FakeLocator(self)
         assert role == "button"
         visible = self.continue_google and "continue" in str(name).lower()
         return FakeLocator(self, visible=visible)
+
+
+class DelayedCanvaPage(FakePage):
+    def get_by_role(self, role, *, name):
+        if role == "menuitem":
+            return DelayedCanvaShareLocator(self)
+        return super().get_by_role(role, name=name)
 
 
 class FakeContext:
@@ -111,6 +130,23 @@ def test_canva_provider_opens_template_and_captures_job_evidence(tmp_path):
     assert result.status is ServiceSessionStatus.READY
     assert browser.open_calls == [("canva", True)]
     assert browser.evidence_calls == [("job-2", "canva", "session-check")]
+
+
+def test_canva_provider_waits_for_observable_share_menuitem_before_classifying(tmp_path):
+    page = DelayedCanvaPage(
+        url="https://www.canva.com/design/demo/edit",
+        html="<main>Loading editor</main>",
+    )
+    browser = FakeBrowserManager(page, tmp_path)
+    provider = canva.CanvaSessionProvider(
+        browser,
+        service_url="https://www.canva.com/design/demo/edit",
+    )
+
+    result = provider.check_session(job_id="job-delayed", headed=True)
+
+    assert result.status is ServiceSessionStatus.READY
+    assert page.wait_calls == [("visible", 30_000)]
 
 
 def test_provider_safe_repair_clicks_only_continue_with_google(tmp_path):

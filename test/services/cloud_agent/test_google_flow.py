@@ -51,6 +51,54 @@ def test_google_flow_challenge_wins_over_ready_marker():
     )
 
 
+def test_google_flow_project_shell_ignores_passive_recaptcha_legal_notice():
+    html = """
+    <html><body>
+      <main>
+        <h1>Meet your agent</h1>
+        <section>Your agent in Google Flow</section>
+        <button>Agent</button>
+      </main>
+      <footer>
+        This site is protected by <a href="privacy">reCAPTCHA</a>. The Google
+        <a href="privacy">Privacy Policy</a> and
+        <a href="terms">Terms of Service</a> apply.
+      </footer>
+      <script src="recaptcha-runtime.js"></script>
+      <iframe title="reCAPTCHA" src="recaptcha-frame"></iframe>
+      <textarea class="g-recaptcha-response" hidden></textarea>
+      <template>Sign in</template>
+    </body></html>
+    """
+
+    assert (
+        classify_google_flow_session(
+            url="https://labs.google/fx/th/tools/flow/project/demo",
+            html=html,
+        )
+        is ServiceSessionStatus.READY
+    )
+
+
+def test_google_flow_active_captcha_wins_over_project_shell():
+    html = """
+    <html><body>
+      <main>
+        <h1>Meet your agent</h1>
+        <div class="g-recaptcha">Confirm you're not a robot</div>
+      </main>
+    </body></html>
+    """
+
+    assert (
+        classify_google_flow_session(
+            url="https://labs.google/fx/th/tools/flow/project/demo",
+            html=html,
+        )
+        is ServiceSessionStatus.CAPTCHA_REQUIRED
+    )
+
+
 class FakeDownload:
     def __init__(self, page, index):
         self.page = page

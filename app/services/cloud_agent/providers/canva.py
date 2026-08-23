@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Any
+
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from app.models.cloud_agent import ServiceSessionStatus
 from app.services.cloud_agent.providers._browser_session import BrowserSessionProvider
@@ -52,6 +55,8 @@ def classify_canva_session(*, url: str, html: str) -> ServiceSessionStatus:
 
 
 class CanvaSessionProvider(BrowserSessionProvider):
+    _READY_TIMEOUT_MS = 30_000
+
     def __init__(self, browser, *, service_url: str) -> None:
         super().__init__(
             browser,
@@ -59,6 +64,16 @@ class CanvaSessionProvider(BrowserSessionProvider):
             service_url=service_url,
             classifier=classify_canva_session,
         )
+
+    def _wait_for_observable_state(self, page: Any) -> None:
+        try:
+            page.get_by_role(
+                "menuitem",
+                name=re.compile(r"^\s*share\s*$", re.IGNORECASE),
+            ).wait_for(state="visible", timeout=self._READY_TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            # Classification below still distinguishes login/challenge/error states.
+            pass
 
 
 class CanvaAssemblyClient:

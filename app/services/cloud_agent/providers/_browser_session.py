@@ -39,6 +39,7 @@ class BrowserSessionProvider:
             with self.browser.open(self.service, headed=headed) as context:
                 page = self._page(context)
                 page.goto(self.service_url, wait_until="domcontentloaded")
+                self._wait_for_observable_state(page)
                 status = self.classifier(url=page.url, html=page.content())
                 evidence_path = self._capture(page, job_id, label="session-check")
                 return self._result(status, evidence_path=evidence_path)
@@ -69,6 +70,7 @@ class BrowserSessionProvider:
             with self.browser.open(self.service, headed=headed) as context:
                 page = self._page(context)
                 page.goto(self.service_url, wait_until="domcontentloaded")
+                self._wait_for_observable_state(page)
                 status = self.classifier(url=page.url, html=page.content())
                 if status is not ServiceSessionStatus.SESSION_EXPIRED:
                     evidence_path = self._capture(page, job_id, label="session-repair")
@@ -117,6 +119,9 @@ class BrowserSessionProvider:
             label=label,
         )
         return str(screenshot_path)
+
+    def _wait_for_observable_state(self, page: Any) -> None:
+        """Allow a service provider to await its proven ready-state selector."""
 
     def _result(
         self,

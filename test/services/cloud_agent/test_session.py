@@ -146,3 +146,21 @@ def test_ensure_all_ready_checks_both_services():
 
     assert set(results) == {"google_flow", "canva"}
     assert all(result.status is ServiceSessionStatus.READY for result in results.values())
+
+
+def test_headed_session_policy_applies_to_check_repair_and_verify():
+    flow = SequenceProvider(
+        "google_flow",
+        [
+            _result("google_flow", ServiceSessionStatus.SESSION_EXPIRED),
+            _result("google_flow", ServiceSessionStatus.READY),
+        ],
+        repair=_result("google_flow", ServiceSessionStatus.AUTO_RELOGIN),
+    )
+    manager = SessionManager({"google_flow": flow}, headed=True)
+
+    result = manager.ensure_service_ready("google_flow", job_id="job-1")
+
+    assert result.status is ServiceSessionStatus.READY
+    assert flow.check_calls == [True, True]
+    assert flow.repair_calls == [True]
