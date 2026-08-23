@@ -13,6 +13,7 @@ from app.models.cloud_agent import (
 )
 from app.models.six_clip import empty_six_clip_plan
 from app.services.cloud_agent.errors import (
+    FlowArchiveValidationError,
     FlowWorkspaceVerificationError,
     HumanRequiredError,
     MediaValidationError,
@@ -21,6 +22,7 @@ from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.media_probe import MediaProbe
 from app.services.cloud_agent.storage import CloudJobStorage
 from app.services.cloud_agent.workflow import CloudAgentWorkflow
+from app.services.cloud_agent.worker import CloudAgentWorker
 
 
 WORKER_ID = "worker-a"
@@ -90,10 +92,20 @@ class RecordingFlow:
         owner = self
 
         class Workspace:
+            def prepare_for_generation(self):
+                return None
+
             def generate_and_download(self, current_job, paths, expected_count=6):
                 assert current_job.id == job.id
                 assert expected_count == 6
                 owner.calls.append((current_job.id, paths.flow_dir))
+                for path in paths.flow_files:
+                    path.write_bytes(b"clip")
+                return paths.flow_files
+
+            def reconcile_and_download(self, current_job, paths, expected_count=6):
+                assert current_job.id == job.id
+                assert expected_count == 6
                 for path in paths.flow_files:
                     path.write_bytes(b"clip")
                 return paths.flow_files
@@ -116,14 +128,35 @@ class RecordingWorkspace:
         self.store = store
         self.events = events
         self.cleanup_error = cleanup_error
+        self.prepare_calls = 0
         self.generate_calls = []
+        self.reconcile_calls = []
         self.cleanup_calls = 0
         self.job_id = None
         self.control_request_on_cleanup = control_request_on_cleanup
 
+    def prepare_for_generation(self):
+        self.prepare_calls += 1
+        self.events.append("prepare")
+
     def generate_and_download(self, job, paths, expected_count=6):
-        self.events.append("generate")
+        current = self.store.get_job(job.id)
+        assert current is not None
+        self.events.append(
+            (
+                "generate",
+                current.checkpoint,
+                current.flow_generation_unresolved,
+            )
+        )
         self.generate_calls.append((job.id, paths, expected_count))
+        for path in paths.flow_files:
+            path.write_bytes(b"clip")
+        return paths.flow_files
+
+    def reconcile_and_download(self, job, paths, expected_count=6):
+        self.events.append("reconcile")
+        self.reconcile_calls.append((job.id, paths, expected_count))
         for path in paths.flow_files:
             path.write_bytes(b"clip")
         return paths.flow_files
@@ -136,6 +169,7 @@ class RecordingWorkspace:
             (
                 "cleanup",
                 current.checkpoint,
+                current.flow_generation_unresolved,
                 current.flow_cleanup_unresolved,
             )
         )
@@ -176,6 +210,88 @@ class RecordingWorkspaceFlow:
             yield self.workspace
         finally:
             self.events.append("workspace_exit")
+
+
+class FenceWorkspace:
+    def __init__(
+        self,
+        store,
+        events,
+        *,
+        prepare_error=None,
+        generate_error=None,
+        reconcile_error=None,
+        crash_before_generate=False,
+        crash_after_generate=False,
+    ):
+        self.store = store
+        self.events = events
+        self.prepare_error = prepare_error
+        self.generate_error = generate_error
+        self.reconcile_error = reconcile_error
+        self.crash_before_generate = crash_before_generate
+        self.crash_after_generate = crash_after_generate
+        self.generate_calls = 0
+        self.reconcile_calls = 0
+
+    def prepare_for_generation(self):
+        self.events.append("prepare")
+        if self.prepare_error is not None:
+            raise self.prepare_error
+
+    def generate_and_download(self, job, paths, expected_count=6):
+        current = self.store.get_job(job.id)
+        assert current is not None
+        self.events.append(
+            (
+                "generate",
+                current.checkpoint,
+                current.flow_generation_unresolved,
+            )
+        )
+        if self.crash_before_generate:
+            raise SimulatedFlowProcessCrash("before paid click")
+        self.generate_calls += 1
+        if self.crash_after_generate:
+            raise SimulatedFlowProcessCrash("after paid click")
+        if self.generate_error is not None:
+            raise self.generate_error
+        for path in paths.flow_files:
+            path.write_bytes(b"clip")
+        return paths.flow_files
+
+    def reconcile_and_download(self, job, paths, expected_count=6):
+        self.events.append("reconcile")
+        self.reconcile_calls += 1
+        if self.reconcile_error is not None:
+            raise self.reconcile_error
+        for path in paths.flow_files:
+            path.write_bytes(b"clip")
+        return paths.flow_files
+
+    def cleanup_and_verify_empty(self):
+        self.events.append("cleanup")
+
+
+class FenceFlow:
+    def __init__(self, workspace, events):
+        self.workspace = workspace
+        self.events = events
+        self.acquire_calls = 0
+
+    @contextmanager
+    def acquire_workspace(self, job):
+        del job
+        self.acquire_calls += 1
+        self.events.append("workspace_enter")
+        try:
+            yield self.workspace
+        finally:
+            self.events.append("workspace_exit")
+
+
+class SimulatedFlowProcessCrash(BaseException):
+    """Models process death so the workflow cannot convert it into a job failure."""
 
 
 class RecordingCanva:
@@ -276,6 +392,20 @@ def _media_probe(path: Path, *, duration: float, has_audio: bool, has_video: boo
     )
 
 
+def _make_tts_ready_job(store, storage, job_id, *, unresolved=False):
+    paths = storage.prepare(job_id)
+    paths.voice_file.write_bytes(b"voice")
+    job = store.patch_job(
+        job_id,
+        status=CloudJobStatus.TTS_READY,
+        checkpoint=CloudJobCheckpoint.TTS_READY,
+        current_step="tts_ready",
+        voice_file=str(paths.voice_file),
+        flow_generation_unresolved=unresolved,
+    )
+    return job, paths
+
+
 def _patch_timed_media(
     monkeypatch,
     *,
@@ -348,7 +478,7 @@ def test_workflow_progresses_from_queue_through_all_durable_checkpoints(monkeypa
     assert Path(result.final_video).is_file()
 
 
-def test_workflow_persists_flow_ready_before_cleanup_while_workspace_is_held(
+def test_generation_fence_precedes_submit_and_flow_ready_commit_is_atomic(
     monkeypatch, tmp_path
 ):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
@@ -363,13 +493,248 @@ def test_workflow_persists_flow_ready_before_cleanup_while_workspace_is_held(
 
     assert events == [
         "workspace_enter",
-        "generate",
-        ("cleanup", CloudJobCheckpoint.FLOW_READY, True),
+        "prepare",
+        ("generate", CloudJobCheckpoint.TTS_READY, True),
+        ("cleanup", CloudJobCheckpoint.FLOW_READY, False, True),
         "workspace_exit",
         "canva",
     ]
     assert result.status is CloudJobStatus.COMPLETED
+    assert result.flow_generation_unresolved is False
     assert result.flow_cleanup_unresolved is False
+
+
+@pytest.mark.parametrize(
+    ("crash_phase", "expected_generate_calls"),
+    [("before", 0), ("after", 1)],
+)
+def test_crash_around_generate_resumes_by_reconciliation_without_second_generation(
+    monkeypatch,
+    tmp_path,
+    crash_phase,
+    expected_generate_calls,
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    events = []
+    workspace = FenceWorkspace(
+        store,
+        events,
+        crash_before_generate=crash_phase == "before",
+        crash_after_generate=crash_phase == "after",
+    )
+    flow = FenceFlow(workspace, events)
+    _accept_media(monkeypatch)
+    workflow = _workflow(tmp_path, store, flow=flow)
+
+    with pytest.raises(SimulatedFlowProcessCrash):
+        workflow.run(job.id, worker_id=WORKER_ID)
+
+    durable = store.get_job(job.id)
+    assert durable is not None
+    assert durable.checkpoint is CloudJobCheckpoint.TTS_READY
+    assert durable.flow_generation_unresolved is True
+
+    workspace.crash_before_generate = False
+    workspace.crash_after_generate = False
+    resumed = workflow.run(job.id, worker_id=WORKER_ID)
+
+    assert workspace.generate_calls == expected_generate_calls
+    assert workspace.reconcile_calls == 1
+    assert events.count("prepare") == 1
+    assert resumed.status is CloudJobStatus.COMPLETED
+    assert resumed.flow_generation_unresolved is False
+
+
+def test_flow_workspace_error_before_paid_fence_fails_without_reconciliation_state(
+    monkeypatch,
+    tmp_path,
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    events = []
+    workspace = FenceWorkspace(
+        store,
+        events,
+        prepare_error=FlowWorkspaceVerificationError("editor did not settle"),
+    )
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        flow=FenceFlow(workspace, events),
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert result.status is CloudJobStatus.FAILED
+    assert result.checkpoint is CloudJobCheckpoint.TTS_READY
+    assert result.flow_generation_unresolved is False
+    assert result.error_code == "FLOW_WORKSPACE_VERIFICATION_FAILED"
+    assert workspace.generate_calls == 0
+    assert workspace.reconcile_calls == 0
+
+
+@pytest.mark.parametrize(
+    "provider_error",
+    [
+        FlowWorkspaceVerificationError("remote generation is incomplete"),
+        FlowArchiveValidationError("downloaded archive is incomplete"),
+    ],
+)
+def test_flow_error_after_paid_fence_requires_human_reconciliation(
+    monkeypatch,
+    tmp_path,
+    provider_error,
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    events = []
+    workspace = FenceWorkspace(
+        store,
+        events,
+        generate_error=provider_error,
+    )
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        flow=FenceFlow(workspace, events),
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert result.status is CloudJobStatus.HUMAN_REQUIRED
+    assert result.checkpoint is CloudJobCheckpoint.TTS_READY
+    assert result.flow_generation_unresolved is True
+    assert result.error_code == "FLOW_GENERATION_RECONCILIATION_REQUIRED"
+    assert workspace.generate_calls == 1
+    assert workspace.reconcile_calls == 0
+
+
+def test_unresolved_tts_ready_reconciles_existing_six_without_prepare_or_generate(
+    monkeypatch,
+    tmp_path,
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id, unresolved=True)
+    events = []
+    workspace = FenceWorkspace(store, events)
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        flow=FenceFlow(workspace, events),
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert workspace.reconcile_calls == 1
+    assert workspace.generate_calls == 0
+    assert "prepare" not in events
+    assert result.status is CloudJobStatus.COMPLETED
+
+
+def test_unresolved_partial_remote_results_are_retained_for_human_reconciliation(
+    monkeypatch,
+    tmp_path,
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id, unresolved=True)
+    events = []
+    workspace = FenceWorkspace(
+        store,
+        events,
+        reconcile_error=FlowWorkspaceVerificationError(
+            "only two existing product clips are observable"
+        ),
+    )
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        flow=FenceFlow(workspace, events),
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert result.status is CloudJobStatus.HUMAN_REQUIRED
+    assert result.error_code == "FLOW_GENERATION_RECONCILIATION_REQUIRED"
+    assert result.flow_generation_unresolved is True
+    assert workspace.reconcile_calls == 1
+    assert workspace.generate_calls == 0
+    assert "prepare" not in events
+    assert "cleanup" not in events
+
+
+def test_expected_flow_workspace_failure_is_contained_at_worker_boundary(
+    monkeypatch,
+    tmp_path,
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+    events = []
+    workspace = FenceWorkspace(
+        store,
+        events,
+        prepare_error=FlowWorkspaceVerificationError("editor did not settle"),
+    )
+    _accept_media(monkeypatch)
+    workflow = _workflow(
+        tmp_path,
+        store,
+        flow=FenceFlow(workspace, events),
+    )
+    worker = CloudAgentWorker(store, workflow, worker_id=WORKER_ID)
+
+    assert worker.run_once() is True
+    durable = store.get_job(job.id)
+    assert durable is not None
+    assert durable.status is CloudJobStatus.FAILED
+    assert durable.error_code == "FLOW_WORKSPACE_VERIFICATION_FAILED"
+    assert durable.worker_id == ""
+    assert durable.lease_until == ""
+    assert worker.run_once() is False
+
+
+def test_post_fence_flow_workspace_failure_is_contained_at_worker_boundary(
+    monkeypatch,
+    tmp_path,
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+    events = []
+    workspace = FenceWorkspace(
+        store,
+        events,
+        generate_error=FlowWorkspaceVerificationError(
+            "generation timed out before six clips"
+        ),
+    )
+    _accept_media(monkeypatch)
+    workflow = _workflow(
+        tmp_path,
+        store,
+        flow=FenceFlow(workspace, events),
+    )
+    worker = CloudAgentWorker(store, workflow, worker_id=WORKER_ID)
+
+    assert worker.run_once() is True
+    durable = store.get_job(job.id)
+    assert durable is not None
+    assert durable.status is CloudJobStatus.HUMAN_REQUIRED
+    assert durable.checkpoint is CloudJobCheckpoint.TTS_READY
+    assert durable.flow_generation_unresolved is True
+    assert durable.error_code == "FLOW_GENERATION_RECONCILIATION_REQUIRED"
+    assert durable.worker_id == ""
+    assert durable.lease_until == ""
+    assert worker.run_once() is False
 
 
 def test_tts_ready_valid_canonical_recovery_skips_flow_generation(monkeypatch, tmp_path):
@@ -386,6 +751,7 @@ def test_tts_ready_valid_canonical_recovery_skips_flow_generation(monkeypatch, t
         checkpoint=CloudJobCheckpoint.TTS_READY,
         current_step="tts_ready",
         voice_file=str(paths.voice_file),
+        flow_generation_unresolved=True,
     )
     flow = RecordingWorkspaceFlow(store)
     _accept_media(monkeypatch)
@@ -395,6 +761,7 @@ def test_tts_ready_valid_canonical_recovery_skips_flow_generation(monkeypatch, t
 
     assert flow.acquire_calls == [job.id]
     assert flow.workspace.generate_calls == []
+    assert flow.workspace.reconcile_calls == []
     assert flow.workspace.cleanup_calls == 1
     assert result.status is CloudJobStatus.COMPLETED
 
@@ -426,6 +793,7 @@ def test_tts_ready_partial_canonical_salvage_reconstructs_without_generation(
         checkpoint=CloudJobCheckpoint.TTS_READY,
         current_step="tts_ready",
         voice_file=str(paths.voice_file),
+        flow_generation_unresolved=True,
     )
     flow = RecordingWorkspaceFlow(store)
     _accept_media(monkeypatch)
@@ -435,6 +803,7 @@ def test_tts_ready_partial_canonical_salvage_reconstructs_without_generation(
 
     assert flow.acquire_calls == [job.id]
     assert flow.workspace.generate_calls == []
+    assert flow.workspace.reconcile_calls == []
     assert all(path.is_file() for path in paths.flow_files)
     assert list(paths.flow_quarantine_dir.rglob("clip_01.mp4"))
     assert result.status is CloudJobStatus.COMPLETED
@@ -544,9 +913,10 @@ def test_flow_ready_checkpoint_skips_tts_and_flow_then_calls_canva(monkeypatch, 
         checkpoint=CloudJobCheckpoint.FLOW_READY,
         current_step="flow_ready",
         voice_file=str(paths.voice_file),
+        flow_generation_unresolved=True,
     )
     tts = RecordingTTS()
-    flow = RecordingFlow()
+    flow = RecordingWorkspaceFlow(store)
     canva = RecordingCanva()
     _accept_media(monkeypatch)
     workflow = _workflow(tmp_path, store, tts=tts, flow=flow, canva=canva)
@@ -554,7 +924,9 @@ def test_flow_ready_checkpoint_skips_tts_and_flow_then_calls_canva(monkeypatch, 
     result = workflow.run(job.id, worker_id=WORKER_ID)
 
     assert tts.calls == []
-    assert flow.calls == []
+    assert flow.acquire_calls == []
+    assert flow.workspace.generate_calls == []
+    assert flow.workspace.reconcile_calls == []
     assert len(canva.calls) == 1
     assert result.status is CloudJobStatus.COMPLETED
     assert result.checkpoint is CloudJobCheckpoint.COMPLETED

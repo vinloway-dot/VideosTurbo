@@ -10,6 +10,8 @@ from app.models.cloud_agent import (
     CloudJobStatus,
 )
 from app.services.cloud_agent.errors import (
+    FlowArchiveValidationError,
+    FlowWorkspaceVerificationError,
     HumanRequiredError,
     MediaValidationError,
     NarrationTooLongError,
@@ -30,7 +32,16 @@ class TTSClient(Protocol):
 
 
 class FlowWorkspace(Protocol):
+    def prepare_for_generation(self) -> None: ...
+
     def generate_and_download(
+        self,
+        job: CloudJobRecord,
+        paths: JobPaths,
+        expected_count: int = 6,
+    ) -> tuple[Path, ...]: ...
+
+    def reconcile_and_download(
         self,
         job: CloudJobRecord,
         paths: JobPaths,
@@ -290,19 +301,28 @@ class CloudAgentWorkflow:
                     expected_width=self.expected_width,
                     expected_height=self.expected_height,
                 )
-                if recovered is None:
-                    self.store.patch_job(
-                        job.id,
-                        status=CloudJobStatus.FLOW_GENERATING,
-                        current_step="flow_generating",
-                        progress=35,
-                    )
                 with self.flow.acquire_workspace(job) as workspace:
-                    generated = (
-                        recovered.paths
-                        if recovered is not None
-                        else workspace.generate_and_download(job, paths)
-                    )
+                    if recovered is not None:
+                        generated = recovered.paths
+                    elif job.flow_generation_unresolved:
+                        job = self.store.patch_job(
+                            job.id,
+                            status=CloudJobStatus.FLOW_GENERATING,
+                            current_step="flow_reconciling",
+                            progress=35,
+                        )
+                        generated = workspace.reconcile_and_download(job, paths)
+                    else:
+                        workspace.prepare_for_generation()
+                        job = self.store.patch_job(
+                            job.id,
+                            status=CloudJobStatus.FLOW_GENERATING,
+                            checkpoint=CloudJobCheckpoint.TTS_READY,
+                            current_step="flow_generating",
+                            progress=35,
+                            flow_generation_unresolved=True,
+                        )
+                        generated = workspace.generate_and_download(job, paths)
                     if len(generated) != 6:
                         raise MediaValidationError(
                             f"Flow step must produce exactly six clips; got {len(generated)}"
@@ -325,6 +345,7 @@ class CloudAgentWorkflow:
                         checkpoint=CloudJobCheckpoint.FLOW_READY,
                         current_step="flow_ready",
                         progress=60,
+                        flow_generation_unresolved=False,
                         flow_cleanup_unresolved=True,
                     )
                     try:
@@ -407,6 +428,30 @@ class CloudAgentWorkflow:
                 status=CloudJobStatus.FAILED,
                 current_step="failed",
                 error_code=exc.error_code,
+                error_message=str(exc),
+            )
+        except (FlowWorkspaceVerificationError, FlowArchiveValidationError) as exc:
+            current = self._get_job(job.id)
+            if current.flow_generation_unresolved:
+                return self.store.patch_job(
+                    current.id,
+                    status=CloudJobStatus.HUMAN_REQUIRED,
+                    checkpoint=CloudJobCheckpoint.TTS_READY,
+                    current_step="human_required",
+                    error_code="FLOW_GENERATION_RECONCILIATION_REQUIRED",
+                    error_message=str(exc),
+                )
+            error_code = (
+                "FLOW_ARCHIVE_VALIDATION_FAILED"
+                if isinstance(exc, FlowArchiveValidationError)
+                else "FLOW_WORKSPACE_VERIFICATION_FAILED"
+            )
+            return self.store.patch_job(
+                current.id,
+                status=CloudJobStatus.FAILED,
+                checkpoint=CloudJobCheckpoint.TTS_READY,
+                current_step="failed",
+                error_code=error_code,
                 error_message=str(exc),
             )
         except HumanRequiredError as exc:

@@ -151,12 +151,16 @@ class FakeLocator:
             else:
                 self.page.clip_names.clear()
                 self.page.selected_clip_indexes.clear()
+                self.page.inventory_sequence = [0, 0, 0]
+                self.page.last_inventory_count = 0
             return
         if self.kind == "confirm_delete":
             self.page.actions.append(("click", "confirm_delete"))
             self.page.clip_names.clear()
             self.page.selected_clip_indexes.clear()
             self.page.confirmation_pending = False
+            self.page.inventory_sequence = [0, 0, 0]
+            self.page.last_inventory_count = 0
             return
         if self.kind == "generate":
             self.page.actions.append(("click", "generate"))
@@ -208,6 +212,20 @@ class FakeLocator:
             return int(not self.page.clip_names and self.page.last_empty_state)
         if self.kind in {"prompt", "composer", "generate", "bulk_download"}:
             return 1
+        if self.kind == "media_control":
+            return int(self.page.media_control_available)
+        if self.kind == "media_list":
+            if self.page.media_list_sequence:
+                self.page.last_media_list_available = self.page.media_list_sequence.pop(0)
+            return int(self.page.last_media_list_available)
+        if self.kind == "inventory_cards":
+            if self.page.inventory_sequence:
+                self.page.last_inventory_count = self.page.inventory_sequence.pop(0)
+            return self.page.last_inventory_count
+        if self.kind == "busy":
+            return int(self.page.busy)
+        if self.kind == "progressbar":
+            return int(self.page.progressbar)
         if self.kind == "missing":
             return 0
         if self.kind == "semantic_name":
@@ -219,6 +237,8 @@ class FakeLocator:
     def is_visible(self):
         if self.kind == "empty_state":
             return not self.page.clip_names and self.page.last_empty_state
+        if self.kind == "media_list":
+            return self.page.last_media_list_available
         return self.count() == 1
 
     def wait_for(self, **_kwargs):
@@ -235,6 +255,8 @@ class FakeLocator:
             return FakeLocator(self.page, "composer")
         if self.kind == "composer" and "textarea" in str(selector):
             return FakeLocator(self.page, "prompt")
+        if self.kind == "media_list" and "role=\"button\"" in str(selector):
+            return FakeLocator(self.page, "inventory_cards")
         raise AssertionError(f"unexpected nested locator: {self.kind} {selector}")
 
     def get_by_role(self, role, *, name=None, exact=None):
@@ -271,6 +293,13 @@ class FakePage:
         agent_enabled_states=None,
         delete_requires_confirmation=False,
         empty_state_sequence=None,
+        document_ready=True,
+        media_control_available=True,
+        media_list_available=True,
+        media_list_sequence=None,
+        inventory_sequence=None,
+        busy=False,
+        progressbar=False,
     ):
         self.url = "about:blank"
         self.progress_html = list(progress_html)
@@ -300,6 +329,17 @@ class FakePage:
         self.confirmation_pending = False
         self.empty_state_sequence = list(empty_state_sequence or [])
         self.last_empty_state = empty_state_available
+        self.document_ready = document_ready
+        self.media_control_available = media_control_available
+        self.media_list_available = media_list_available
+        self.media_list_sequence = list(media_list_sequence or [])
+        self.last_media_list_available = media_list_available
+        self.inventory_sequence = list(
+            inventory_sequence if inventory_sequence is not None else [len(self.clip_names)]
+        )
+        self.last_inventory_count = self.inventory_sequence[0]
+        self.busy = busy
+        self.progressbar = progressbar
         self._content_index = 0
 
     def goto(self, url, **kwargs):
@@ -318,6 +358,17 @@ class FakePage:
         self._content_index += 1
         return html
 
+    def evaluate(self, expression):
+        assert expression == "document.readyState"
+        return "complete" if self.document_ready else "interactive"
+
+    def locator(self, selector):
+        if selector == '[data-testid="virtuoso-item-list"]:visible':
+            return FakeLocator(self, "media_list")
+        if selector == '[aria-busy="true"]:visible':
+            return FakeLocator(self, "busy")
+        raise AssertionError(f"unexpected page locator: {selector}")
+
     def get_by_role(self, role, *, name=None, exact=None):
         del exact
         pattern = getattr(name, "pattern", str(name)).lower()
@@ -327,6 +378,10 @@ class FakePage:
             return FakeLocator(self, "bulk_download")
         if role == "button" and "agent" in pattern:
             return FakeLocator(self, "agent")
+        if role == "button" and ("all media" in pattern or "สื่อทั้งหมด" in pattern):
+            return FakeLocator(self, "media_control")
+        if role == "progressbar":
+            return FakeLocator(self, "progressbar")
         if role == "button" and "generate" in pattern:
             return FakeLocator(self, "generate")
         if role == "button" and "download" in pattern:
@@ -402,6 +457,8 @@ def _client(
     *,
     timeout_seconds=30.0,
     workspace_lock_timeout_seconds=None,
+    editor_ready_timeout_seconds=None,
+    settled_poll_count=None,
 ):
     client_cls = getattr(google_flow, "GoogleFlowClient", None)
     assert client_cls is not None, "Task 8 Google Flow production client is not implemented"
@@ -415,6 +472,10 @@ def _client(
     }
     if workspace_lock_timeout_seconds is not None:
         kwargs["workspace_lock_timeout_seconds"] = workspace_lock_timeout_seconds
+    if editor_ready_timeout_seconds is not None:
+        kwargs["editor_ready_timeout_seconds"] = editor_ready_timeout_seconds
+    if settled_poll_count is not None:
+        kwargs["settled_poll_count"] = settled_poll_count
     client = client_cls(FakeBrowserManager(page), sessions, **kwargs)
     return client, sessions
 
@@ -475,6 +536,35 @@ def test_google_flow_workspace_requires_observable_project_editor(monkeypatch):
         agent_available=False,
     )
     client, _ = _client(page, timeout_seconds=1.0)
+    clock = [-0.5]
+
+    def monotonic():
+        clock[0] += 0.5
+        return clock[0]
+
+    monkeypatch.setattr(google_flow.time, "monotonic", monotonic)
+    monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="project editor"):
+        with client.acquire_workspace(_job()):
+            pass
+
+
+def test_google_flow_editor_readiness_timeout_is_independent_from_generation(
+    monkeypatch,
+):
+    page = FakePage(
+        progress_html=["<div>Loading</div>"],
+        agent_available=False,
+        document_ready=False,
+        media_control_available=False,
+        media_list_available=False,
+    )
+    client, _ = _client(
+        page,
+        timeout_seconds=1800.0,
+        editor_ready_timeout_seconds=1.0,
+    )
     clock = iter([0.0, 0.5, 1.1])
     monkeypatch.setattr(google_flow.time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
@@ -482,6 +572,44 @@ def test_google_flow_workspace_requires_observable_project_editor(monkeypatch):
     with pytest.raises(FlowWorkspaceVerificationError, match="project editor"):
         with client.acquire_workspace(_job()):
             pass
+
+
+def test_flow_workspace_transient_empty_inventory_cannot_pass_generation_gate(
+    monkeypatch,
+):
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        inventory_sequence=[0, 0, 2, 2],
+    )
+    client, _ = _client(
+        page,
+        timeout_seconds=1.0,
+        editor_ready_timeout_seconds=1.0,
+        settled_poll_count=3,
+    )
+    clock = iter([0.0, 0.0, 0.2, 0.4, 1.1])
+    monkeypatch.setattr(google_flow.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
+
+    with client.acquire_workspace(_job()) as workspace:
+        with pytest.raises(FlowWorkspaceVerificationError, match="empty product workspace"):
+            workspace.prepare_for_generation()
+
+    assert ("click", "generate") not in page.actions
+
+
+def test_flow_workspace_stable_settled_empty_inventory_passes_generation_gate():
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        inventory_sequence=[0, 0, 0],
+    )
+    client, _ = _client(page, settled_poll_count=3)
+
+    with client.acquire_workspace(_job()) as workspace:
+        workspace.prepare_for_generation()
+
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert ("click", "generate") not in page.actions
 
 
 def test_flow_workspace_preclean_deletes_stale_clips_then_verifies_empty():
@@ -533,13 +661,13 @@ def test_flow_workspace_preclean_confirms_observable_delete_dialog():
     assert page.clip_names == []
 
 
-def test_flow_workspace_preclean_blocks_generation_when_empty_state_is_unverifiable(
+def test_flow_workspace_preclean_blocks_generation_when_inventory_is_unverifiable(
     monkeypatch,
 ):
     page = FakePage(
         progress_html=["<div>Ready</div>"],
         clip_names=[],
-        empty_state_available=False,
+        media_list_sequence=[True, False, False],
     )
     client, _ = _client(page, timeout_seconds=1.0)
     clock = [-0.5]
@@ -558,18 +686,41 @@ def test_flow_workspace_preclean_blocks_generation_when_empty_state_is_unverifia
     assert ("click", "generate") not in page.actions
 
 
-def test_flow_workspace_preclean_waits_for_observable_empty_state_after_reload():
+def test_flow_workspace_preclean_waits_for_stable_empty_inventory_after_reload():
     page = FakePage(
         progress_html=["<div>Ready</div>"],
         clip_names=[],
-        empty_state_sequence=[False, True],
+        inventory_sequence=[2, 0, 0, 0],
     )
     client, _ = _client(page)
 
     with client.acquire_workspace(_job()) as workspace:
         workspace.preclean_and_verify_empty()
 
-    assert page.empty_state_sequence == []
+    assert page.inventory_sequence == []
+
+
+def test_flow_generation_does_not_implicitly_preclean_remote_workspace(
+    monkeypatch, tmp_path
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=["stale-remote-asset"],
+        generation_completion_names=[f"draft-{number}" for number in range(1, 7)],
+    )
+    client, _ = _client(page)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job()) as workspace:
+        workspace.generate_and_download(_job(), paths)
+
+    assert not any(action[0] == "check" for action in page.actions)
+    assert ("click", "delete_selected") not in page.actions
 
 
 def test_flow_workspace_renames_out_of_order_results_and_bulk_downloads_zip(
@@ -644,6 +795,105 @@ def test_flow_workspace_renames_out_of_order_results_and_bulk_downloads_zip(
     ]
 
 
+def test_flow_workspace_reconciles_existing_six_without_new_generation(
+    monkeypatch, tmp_path
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"draft-{number}" for number in range(1, 7)],
+        renamed_clip_names=[f"clip {number}" for number in range(1, 7)],
+        inventory_sequence=[6, 6, 6],
+    )
+    client, _ = _client(page)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job()) as workspace:
+        result = workspace.reconcile_and_download(_job(), paths)
+
+    assert result == paths.flow_files
+    assert not any(
+        action[:3] == ("fill", "prompt", _job().master_prompt)
+        for action in page.actions
+    )
+    assert not any(action[0] == "check" for action in page.actions)
+    assert ("click", "delete_selected") not in page.actions
+
+
+def test_flow_workspace_partial_reconciliation_retains_remote_results(
+    monkeypatch, tmp_path
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 2 / 6</div>"],
+        clip_names=["partial-a", "partial-b"],
+        inventory_sequence=[2, 2, 2],
+    )
+    client, _ = _client(page, timeout_seconds=1.0)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    clock = [-0.5]
+
+    def monotonic():
+        clock[0] += 0.5
+        return clock[0]
+
+    monkeypatch.setattr(google_flow.time, "monotonic", monotonic)
+    monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
+
+    with client.acquire_workspace(_job()) as workspace:
+        with pytest.raises(FlowWorkspaceVerificationError, match="reconcil"):
+            workspace.reconcile_and_download(_job(), paths)
+
+    assert not any(action[0] == "check" for action in page.actions)
+    assert ("click", "delete_selected") not in page.actions
+    assert ("click", "generate") not in page.actions
+
+
+def test_flow_workspace_reconciliation_requires_stable_exact_six_before_rename(
+    monkeypatch,
+    tmp_path,
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=["partial-a", "partial-b"],
+        inventory_sequence=[2, 2, 2],
+    )
+    client, _ = _client(
+        page,
+        editor_ready_timeout_seconds=1.0,
+        settled_poll_count=3,
+    )
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    clock = [-0.5]
+
+    def monotonic():
+        clock[0] += 0.5
+        return clock[0]
+
+    monkeypatch.setattr(google_flow.time, "monotonic", monotonic)
+    monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda *_args, **_kwargs: paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job()) as workspace:
+        with pytest.raises(FlowWorkspaceVerificationError, match="six product clips"):
+            workspace.reconcile_and_download(_job(), paths)
+
+    assert not any(
+        action[:3] == ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
+        for action in page.actions
+    )
+    assert ("click", "bulk_download") not in page.actions
+    assert ("click", "delete_selected") not in page.actions
+    assert ("click", "generate") not in page.actions
+
+
 def test_flow_workspace_rejects_duplicate_semantic_names_before_bulk_download(
     monkeypatch, tmp_path
 ):
@@ -700,10 +950,15 @@ def test_flow_workspace_cleanup_reuses_delete_and_observable_empty_verification(
 def test_flow_workspace_cleanup_raises_when_zero_state_cannot_be_verified(monkeypatch):
     page = FakePage(
         progress_html=["<div>Ready</div>"],
-        clip_names=["clip 1"],
+        clip_names=[],
         empty_state_available=False,
+        inventory_sequence=[1, 1, 1],
     )
-    client, _ = _client(page, timeout_seconds=1.0)
+    client, _ = _client(
+        page,
+        timeout_seconds=30.0,
+        editor_ready_timeout_seconds=1.0,
+    )
     clock = [-0.5]
 
     def monotonic():
@@ -736,3 +991,57 @@ def test_google_flow_generation_timeout_is_bounded(monkeypatch, tmp_path):
             workspace.generate_and_download(_job(), paths)
 
     assert ("click", "bulk_download") not in page.actions
+
+
+def test_google_flow_generation_timeout_is_typed_workspace_failure_after_submit(
+    monkeypatch,
+    tmp_path,
+):
+    page = FakePage(progress_html=["<div>Generation progress 2 / 6</div>"])
+    client, _ = _client(page, timeout_seconds=1.0)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    clock = [-0.5]
+
+    def monotonic():
+        clock[0] += 0.5
+        return clock[0]
+
+    monkeypatch.setattr(google_flow.time, "monotonic", monotonic)
+    monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
+
+    with client.acquire_workspace(_job()) as workspace:
+        with pytest.raises(FlowWorkspaceVerificationError, match="timed out"):
+            workspace.generate_and_download(_job(), paths)
+
+    assert ("click", "generate") in page.actions
+    assert ("click", "bulk_download") not in page.actions
+
+
+def test_post_reload_settled_inventory_uses_editor_timeout_not_generation_timeout(
+    monkeypatch,
+):
+    page = FakePage(
+        progress_html=["<div>Loading</div>"],
+        media_list_sequence=[True, False],
+        inventory_sequence=[0, 0, 0],
+    )
+    client, _ = _client(
+        page,
+        timeout_seconds=1800.0,
+        editor_ready_timeout_seconds=1.0,
+        settled_poll_count=3,
+    )
+    clock = [-0.5]
+
+    def monotonic():
+        clock[0] += 0.5
+        return clock[0]
+
+    monkeypatch.setattr(google_flow.time, "monotonic", monotonic)
+    monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
+
+    with client.acquire_workspace(_job()) as workspace:
+        with pytest.raises(FlowWorkspaceVerificationError, match="empty"):
+            workspace.prepare_for_generation()
+
+    assert clock[0] <= 1.5

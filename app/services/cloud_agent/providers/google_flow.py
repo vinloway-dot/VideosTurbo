@@ -86,27 +86,10 @@ class FlowWorkspaceRun:
             self._confirm_delete_or_wait_for_removal()
 
         self.page.reload(wait_until="domcontentloaded")
-        deadline = time.monotonic() + self.client.generation_timeout_seconds
-        while True:
-            remaining = self.page.get_by_role("checkbox").count()
-            empty_state = self.page.get_by_text(
-                re.compile(
-                    r"^(?:start creating or drop media|เริ่มสร้างหรือวางสื่อ)$",
-                    re.IGNORECASE,
-                ),
-                exact=True,
-            )
-            if (
-                remaining == 0
-                and empty_state.count() == 1
-                and empty_state.is_visible()
-            ):
-                return
-            if time.monotonic() >= deadline:
-                raise FlowWorkspaceVerificationError(
-                    "Google Flow empty product workspace could not be verified"
-                )
-            time.sleep(self.client.poll_seconds)
+        self.client._wait_for_stable_inventory(self.page, expected_count=0)
+
+    def prepare_for_generation(self) -> None:
+        self.preclean_and_verify_empty()
 
     def _confirm_delete_or_wait_for_removal(self) -> None:
         deadline = time.monotonic() + self.client.generation_timeout_seconds
@@ -142,9 +125,41 @@ class FlowWorkspaceRun:
         if expected_count != 6:
             raise ValueError("Google Flow workspace requires exactly six clips")
 
-        self.preclean_and_verify_empty()
         self.client._submit_generation(self.page, job.master_prompt)
         self.client._wait_for_generation(self.page, expected_count)
+        return self._rename_download_and_materialize(paths, expected_count)
+
+    def reconcile_and_download(
+        self,
+        job: CloudJobRecord,
+        paths: JobPaths,
+        expected_count: int = 6,
+    ) -> tuple[Path, ...]:
+        del job
+        if expected_count != 6:
+            raise ValueError("Google Flow workspace requires exactly six clips")
+        try:
+            self.client._wait_for_generation(self.page, expected_count)
+        except MediaValidationError as exc:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow existing generation could not be reconciled"
+            ) from exc
+        try:
+            self.client._wait_for_stable_inventory(
+                self.page,
+                expected_count=expected_count,
+            )
+        except FlowWorkspaceVerificationError as exc:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow existing six product clips could not be verified"
+            ) from exc
+        return self._rename_download_and_materialize(paths, expected_count)
+
+    def _rename_download_and_materialize(
+        self,
+        paths: JobPaths,
+        expected_count: int,
+    ) -> tuple[Path, ...]:
         send = self.client._submit_agent_prompt(
             self.page,
             RENAME_CLIPS_INSTRUCTION,
@@ -199,8 +214,10 @@ class GoogleFlowClient:
         *,
         service_url: str,
         generation_timeout_seconds: float = 1800.0,
+        editor_ready_timeout_seconds: float = 120.0,
         workspace_lock_timeout_seconds: float | None = None,
         poll_seconds: float = 1.0,
+        settled_poll_count: int = 3,
         expected_width: int = 1080,
         expected_height: int = 1920,
     ) -> None:
@@ -209,8 +226,12 @@ class GoogleFlowClient:
             raise ValueError("Google Flow service URL is required")
         if generation_timeout_seconds <= 0:
             raise ValueError("generation_timeout_seconds must be positive")
+        if editor_ready_timeout_seconds <= 0:
+            raise ValueError("editor_ready_timeout_seconds must be positive")
         if poll_seconds < 0:
             raise ValueError("poll_seconds must be non-negative")
+        if settled_poll_count <= 0:
+            raise ValueError("settled_poll_count must be positive")
         if expected_width <= 0 or expected_height <= 0:
             raise ValueError("expected video dimensions must be positive")
 
@@ -218,12 +239,14 @@ class GoogleFlowClient:
         self.sessions = sessions
         self.service_url = service_url
         self.generation_timeout_seconds = float(generation_timeout_seconds)
+        self.editor_ready_timeout_seconds = float(editor_ready_timeout_seconds)
         self.workspace_lock_timeout_seconds = (
             self.generation_timeout_seconds
             if workspace_lock_timeout_seconds is None
             else float(workspace_lock_timeout_seconds)
         )
         self.poll_seconds = float(poll_seconds)
+        self.settled_poll_count = int(settled_poll_count)
         self.expected_width = int(expected_width)
         self.expected_height = int(expected_height)
 
@@ -240,14 +263,46 @@ class GoogleFlowClient:
         ) as context:
             page = BrowserSessionProvider._page(context)
             page.goto(self.service_url, wait_until="domcontentloaded")
-            self._enter_project_editor(page)
+            self._wait_for_settled_editor(page)
             yield FlowWorkspaceRun(self, page)
 
-    def _enter_project_editor(self, page: Any) -> None:
-        deadline = time.monotonic() + self.generation_timeout_seconds
+    @staticmethod
+    def _observable_composer(agent: Any) -> Any:
+        return agent.locator(
+            "xpath=ancestor::div[.//textarea or .//*[@contenteditable='true']][1]"
+        ).locator("textarea:visible, [contenteditable='true']:visible")
+
+    def _is_editor_actionable(self, page: Any) -> bool:
+        if page.evaluate("document.readyState") != "complete":
+            return False
+        agent = page.get_by_role("button", name="Agent", exact=True)
+        if not (
+            agent.count() == 1
+            and agent.is_visible()
+            and agent.is_enabled()
+        ):
+            return False
+        composer = self._observable_composer(agent)
+        if not (composer.count() == 1 and composer.is_visible()):
+            return False
+        media = page.get_by_role(
+            "button",
+            name=re.compile(r"(?:all media|สื่อทั้งหมด)", re.IGNORECASE),
+        )
+        media_list = page.locator('[data-testid="virtuoso-item-list"]:visible')
+        return (
+            media.count() == 1
+            and media.is_visible()
+            and media_list.count() == 1
+            and media_list.is_visible()
+            and page.locator('[aria-busy="true"]:visible').count() == 0
+            and page.get_by_role("progressbar").count() == 0
+        )
+
+    def _wait_for_settled_editor(self, page: Any) -> None:
+        deadline = time.monotonic() + self.editor_ready_timeout_seconds
         while True:
-            agent = page.get_by_role("button", name="Agent", exact=True)
-            if agent.count() == 1 and agent.is_visible():
+            if self._is_editor_actionable(page):
                 return
 
             for role in ("link", "button"):
@@ -263,6 +318,38 @@ class GoogleFlowClient:
             if time.monotonic() >= deadline:
                 raise FlowWorkspaceVerificationError(
                     "Google Flow project editor could not be verified"
+                )
+            time.sleep(self.poll_seconds)
+
+    def _wait_for_stable_inventory(
+        self,
+        page: Any,
+        *,
+        expected_count: int | None,
+    ) -> int:
+        deadline = time.monotonic() + self.editor_ready_timeout_seconds
+        previous_count: int | None = None
+        stable_polls = 0
+        while True:
+            if self._is_editor_actionable(page):
+                media_list = page.locator(
+                    '[data-testid="virtuoso-item-list"]:visible'
+                )
+                count = media_list.locator(
+                    '[role="button"][tabindex="0"]'
+                ).count()
+                stable_polls = stable_polls + 1 if count == previous_count else 1
+                previous_count = count
+                if stable_polls >= self.settled_poll_count and (
+                    expected_count is None or count == expected_count
+                ):
+                    return count
+            else:
+                previous_count = None
+                stable_polls = 0
+            if time.monotonic() >= deadline:
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow empty product workspace could not be verified"
                 )
             time.sleep(self.poll_seconds)
 
@@ -330,7 +417,7 @@ class GoogleFlowClient:
             if progress is not None and progress >= expected_count:
                 return
             if time.monotonic() >= deadline:
-                raise MediaValidationError(
+                raise FlowWorkspaceVerificationError(
                     f"Google Flow generation timed out before {expected_count}/{expected_count}"
                 )
             time.sleep(self.poll_seconds)
