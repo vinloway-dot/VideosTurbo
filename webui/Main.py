@@ -62,6 +62,7 @@ from app.services import version_checker
 from app.utils.logging_utils import configure_terminal_logger
 from app.utils import utils
 from webui import six_clip_timeline
+from webui import cloud_agent
 
 st.set_page_config(
     page_title="MoneyPrinterTurbo",
@@ -5539,6 +5540,7 @@ def _render_generation_controls(
 def _render_application():
     """按固定顺序渲染顶部栏、弹窗、生成表单和任务结果。"""
     _render_top_bar()
+    cloud_agent.render_cloud_agent_panel()
 
     if st.session_state.get("settings_dialog_open", False):
         _render_settings_dialog()
