@@ -38,7 +38,7 @@ secret-bearing screenshots are included in this record.
 - Profile locks: no live owner after checks; no Chrome Singleton locks remained
 - Storage/profile/lock ownership and writability: PASS for `linuxuser:linuxuser`
 - SQLite: read/write open PASS; `PRAGMA quick_check` returned `ok`
-- Live config: server-side, `root:linuxuser`, mode `0640`, service-readable
+- Live config: server-side, `linuxuser:linuxuser`, mode `0600`, service-readable
 - ffprobe: PASS (Ubuntu FFmpeg 6.1.1 toolchain)
 - TTS: existing adapter and Edge/Azure-v1 dependency/timeout configuration loaded;
   no synthesis request was made
