@@ -1,4 +1,5 @@
 from pathlib import Path
+import importlib
 
 import pytest
 
@@ -484,3 +485,38 @@ def test_final_duration_truncation_beyond_tolerance_is_rejected_and_keeps_flow_s
 
     paths = storage.prepare(job.id)
     assert all(path.is_file() for path in paths.flow_files)
+
+
+def test_factory_builds_worker_and_workflow_from_existing_app_config(monkeypatch, tmp_path):
+    """The production factory must use the existing app config, not a second loader."""
+    factory = importlib.import_module("app.services.cloud_agent.factory")
+    app_config = {
+        "cloud_agent_db_path": str(tmp_path / "agent.sqlite3"),
+        "cloud_agent_worker_poll_seconds": 3,
+        "cloud_agent_worker_lease_seconds": 90,
+        "cloud_agent_min_free_disk_gb": 2,
+        "cloud_agent_tts_min_duration_seconds": 1,
+        "cloud_agent_canva_min_playback_speed": 0.85,
+        "cloud_agent_final_duration_tolerance_seconds": 1.0,
+        "cloud_agent_final_min_size_bytes": 1,
+        "cloud_agent_expected_width": 1080,
+        "cloud_agent_expected_height": 1920,
+        "cloud_agent_browser_headless": False,
+        "cloud_agent_google_profile_dir": str(tmp_path / "google-profile"),
+        "cloud_agent_canva_profile_dir": str(tmp_path / "canva-profile"),
+        "cloud_agent_browser_lock_dir": str(tmp_path / "browser-locks"),
+        "cloud_agent_flow_url": "https://flow.example.test",
+        "cloud_agent_canva_template_url": "https://www.canva.com/design/demo/edit",
+    }
+    monkeypatch.setattr(factory.config, "app", app_config)
+
+    workflow = factory.build_workflow()
+    worker = factory.build_worker()
+
+    assert isinstance(workflow, CloudAgentWorkflow)
+    assert workflow.store.db_path == app_config["cloud_agent_db_path"]
+    assert workflow.canva_min_playback_speed == 0.85
+    assert workflow.final_duration_tolerance_seconds == 1.0
+    assert worker.workflow.store.db_path == app_config["cloud_agent_db_path"]
+    assert worker.lease_seconds == 90
+    assert worker.poll_seconds == 3
