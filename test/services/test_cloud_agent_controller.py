@@ -10,6 +10,8 @@ from app.models.cloud_agent import (
     CloudJobCheckpoint,
     CloudJobCreate,
     CloudJobStatus,
+    ServiceSessionStatus,
+    SessionCheckResult,
 )
 from app.models.exception import HttpException
 from app.models.six_clip import empty_six_clip_plan
@@ -330,3 +332,88 @@ def test_final_download_rejects_external_or_mismatched_artifact_path(tmp_path):
 
     assert response.status_code == 409
     assert response.content != outside.read_bytes()
+
+
+class _SessionProvider:
+    def __init__(self, result):
+        self.result = result
+        self.checks = 0
+
+    def check_session(self, **_kwargs):
+        self.checks += 1
+        return self.result
+
+
+class _Sessions:
+    def __init__(self, *, repair_result=None):
+        self.providers = {
+            "google_flow": _SessionProvider(_session_result("google_flow", "READY")),
+            "canva": _SessionProvider(_session_result("canva", "SESSION_EXPIRED")),
+        }
+        self.repair_result = repair_result
+        self.repair_calls = []
+
+    def check_all(self):
+        return {service: provider.check_session() for service, provider in self.providers.items()}
+
+    def ensure_service_ready(self, service, job_id):
+        self.repair_calls.append((service, job_id))
+        if isinstance(self.repair_result, Exception):
+            raise self.repair_result
+        return self.repair_result or self.providers[service].check_session()
+
+
+def _session_result(service, status):
+    return SessionCheckResult(
+        service=service,
+        status=ServiceSessionStatus(status),
+        checked_at="2026-08-23T00:00:00+00:00",
+    )
+
+
+def _session_client(tmp_path, sessions):
+    client, _ = _client(tmp_path)
+    cloud_agent = _cloud_agent_controller()
+    client.app.dependency_overrides[cloud_agent.get_cloud_agent_sessions] = lambda: sessions
+    return client
+
+
+def test_session_check_routes_use_existing_session_manager_without_repair(tmp_path):
+    sessions = _Sessions()
+    client = _session_client(tmp_path, sessions)
+
+    all_response = client.post("/api/v1/cloud-agent/sessions/check")
+    flow_response = client.post("/api/v1/cloud-agent/sessions/google-flow/check")
+    canva_response = client.post("/api/v1/cloud-agent/sessions/canva/check")
+
+    assert all_response.status_code == flow_response.status_code == canva_response.status_code == 200
+    assert set(all_response.json()["data"]) == {"google_flow", "canva"}
+    assert flow_response.json()["data"]["status"] == "READY"
+    assert canva_response.json()["data"]["status"] == "SESSION_EXPIRED"
+    assert sessions.repair_calls == []
+
+
+def test_session_repair_preserves_human_required_result(tmp_path):
+    from app.services.cloud_agent.errors import HumanRequiredError
+
+    sessions = _Sessions(repair_result=HumanRequiredError("canva: CAPTCHA_REQUIRED"))
+    client = _session_client(tmp_path, sessions)
+
+    response = client.post("/api/v1/cloud-agent/sessions/canva/repair")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "HUMAN_REQUIRED"
+    assert "CAPTCHA_REQUIRED" in response.json()["data"]["message"]
+    assert sessions.repair_calls == [("canva", "")]
+
+
+def test_open_browser_is_allowlisted_and_returns_only_configured_novnc_url(monkeypatch, tmp_path):
+    client, _ = _client(tmp_path)
+    monkeypatch.setitem(config.app, "cloud_agent_remote_browser_url", "http://127.0.0.1:6080/vnc.html")
+
+    response = client.get("/api/v1/cloud-agent/sessions/canva/open-browser")
+    unsupported = client.get("/api/v1/cloud-agent/sessions/other/open-browser")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {"url": "http://127.0.0.1:6080/vnc.html"}
+    assert unsupported.status_code == 400

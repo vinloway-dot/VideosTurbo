@@ -25,24 +25,15 @@ def build_workflow() -> CloudAgentWorkflow:
     storage = CloudJobStorage()
     store = CloudJobStore(str(app_config["cloud_agent_db_path"]))
     browser = PersistentBrowserManager(app_config=app_config, storage=storage)
-    sessions = SessionManager(
-        {
-            "google_flow": GoogleFlowSessionProvider(
-                browser,
-                service_url=app_config["cloud_agent_flow_url"],
-            ),
-            "canva": CanvaSessionProvider(
-                browser,
-                service_url=app_config["cloud_agent_canva_template_url"],
-            ),
-        }
-    )
+    sessions = build_session_manager(browser=browser)
     preflight = PreflightManager(
         store,
         storage,
         sessions,
         min_free_disk_gb=float(app_config["cloud_agent_min_free_disk_gb"]),
     )
+
+
     return CloudAgentWorkflow(
         store,
         storage,
@@ -71,6 +62,26 @@ def build_workflow() -> CloudAgentWorkflow:
         final_min_size_bytes=int(app_config["cloud_agent_final_min_size_bytes"]),
         expected_width=int(app_config["cloud_agent_expected_width"]),
         expected_height=int(app_config["cloud_agent_expected_height"]),
+    )
+
+
+def build_session_manager(
+    *, browser: PersistentBrowserManager | None = None
+) -> SessionManager:
+    """Build the existing provider-based session control boundary from ``config.app``."""
+    app_config = config.app
+    browser = browser or PersistentBrowserManager(app_config=app_config)
+    return SessionManager(
+        {
+            "google_flow": GoogleFlowSessionProvider(
+                browser,
+                service_url=app_config["cloud_agent_flow_url"],
+            ),
+            "canva": CanvaSessionProvider(
+                browser,
+                service_url=app_config["cloud_agent_canva_template_url"],
+            ),
+        }
     )
 
 

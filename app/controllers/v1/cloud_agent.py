@@ -14,7 +14,10 @@ from app.models.cloud_agent import (
 )
 from app.models.exception import HttpException
 from app.services.cloud_agent.job_store import CloudJobStore
+from app.services.cloud_agent.errors import HumanRequiredError
+from app.services.cloud_agent.factory import build_session_manager
 from app.services.cloud_agent.preflight import _probe_storage_writable
+from app.services.cloud_agent.session import SessionManager
 from app.services.cloud_agent.storage import CloudJobStorage
 from app.utils import utils
 from app.utils.file_security import resolve_path_within_directory
@@ -58,8 +61,8 @@ def get_cloud_job_storage() -> CloudJobStorage:
     return CloudJobStorage()
 
 
-def _not_implemented():
-    raise NotImplementedError("cloud agent API behavior is implemented incrementally via TDD")
+def get_cloud_agent_sessions() -> SessionManager:
+    return build_session_manager()
 
 
 def _job_data(job) -> dict:
@@ -288,36 +291,73 @@ def get_cloud_agent_final(
 
 
 @router.post("/cloud-agent/sessions/check")
-def check_cloud_agent_sessions(request: Request):
+def check_cloud_agent_sessions(
+    request: Request,
+    sessions: SessionManager = Depends(get_cloud_agent_sessions),
+):
     del request
-    return _not_implemented()
+    return utils.get_response(
+        200,
+        {service: result.model_dump(mode="json") for service, result in sessions.check_all().items()},
+    )
 
 
 @router.post("/cloud-agent/sessions/google-flow/check")
-def check_google_flow_session(request: Request):
+def check_google_flow_session(
+    request: Request,
+    sessions: SessionManager = Depends(get_cloud_agent_sessions),
+):
     del request
-    return _not_implemented()
+    return utils.get_response(200, _session_data(sessions, "google_flow"))
 
 
 @router.post("/cloud-agent/sessions/canva/check")
-def check_canva_session(request: Request):
+def check_canva_session(
+    request: Request,
+    sessions: SessionManager = Depends(get_cloud_agent_sessions),
+):
     del request
-    return _not_implemented()
+    return utils.get_response(200, _session_data(sessions, "canva"))
 
 
 @router.post("/cloud-agent/sessions/google-flow/repair")
-def repair_google_flow_session(request: Request):
+def repair_google_flow_session(
+    request: Request,
+    sessions: SessionManager = Depends(get_cloud_agent_sessions),
+):
     del request
-    return _not_implemented()
+    return utils.get_response(200, _repair_session_data(sessions, "google_flow"))
 
 
 @router.post("/cloud-agent/sessions/canva/repair")
-def repair_canva_session(request: Request):
+def repair_canva_session(
+    request: Request,
+    sessions: SessionManager = Depends(get_cloud_agent_sessions),
+):
     del request
-    return _not_implemented()
+    return utils.get_response(200, _repair_session_data(sessions, "canva"))
 
 
 @router.get("/cloud-agent/sessions/{service}/open-browser")
 def open_cloud_agent_browser(service: str, request: Request):
-    del service, request
-    return _not_implemented()
+    del request
+    if service not in {"google_flow", "canva"}:
+        raise HttpException(task_id="", status_code=400, message="unsupported cloud agent service")
+    return utils.get_response(200, {"url": config.app["cloud_agent_remote_browser_url"]})
+
+
+def _session_data(sessions: SessionManager, service: str) -> dict:
+    try:
+        result = sessions.providers[service].check_session()
+    except KeyError as exc:
+        raise HttpException(task_id="", status_code=400, message="unsupported cloud agent service") from exc
+    return result.model_dump(mode="json")
+
+
+def _repair_session_data(sessions: SessionManager, service: str) -> dict:
+    try:
+        return sessions.ensure_service_ready(service, job_id="").model_dump(mode="json")
+    except HumanRequiredError as exc:
+        return {"service": service, "status": "HUMAN_REQUIRED", "message": str(exc)}
+    except ValueError as exc:
+        raise HttpException(task_id="", status_code=400, message="unsupported cloud agent service") from exc
