@@ -1,0 +1,20 @@
+[Unit]
+Description=VideosTurbo Cloud Agent Worker
+After=network-online.target videosturbo-xvfb.service videosturbo-openbox.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=videosturbo
+Group=videosturbo
+WorkingDirectory=/opt/VideosTurbo
+EnvironmentFile=-/etc/videosturbo/cloud-agent.env
+Environment=PYTHONPATH=/opt/VideosTurbo
+Environment=DISPLAY=:99
+ExecStart=/opt/VideosTurbo/.venv/bin/python -m app.services.cloud_agent.worker
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

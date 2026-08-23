@@ -1,0 +1,19 @@
+[Unit]
+Description=VideosTurbo Cloud Agent API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=videosturbo
+Group=videosturbo
+WorkingDirectory=/opt/VideosTurbo
+EnvironmentFile=-/etc/videosturbo/cloud-agent.env
+Environment=PYTHONPATH=/opt/VideosTurbo
+ExecStart=/opt/VideosTurbo/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
