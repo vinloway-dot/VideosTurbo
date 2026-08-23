@@ -1,7 +1,7 @@
 # VideosTurbo Cloud Video Agent Design
 
-> **Status:** Design Spec v2.3 — Adaptive Six-Clip + dedicated shared Google Flow workspace.
-> **Implementation gate:** Production coding for the shared-workspace lifecycle is paused until this spec and its RED→GREEN implementation plan are complete. No paid Flow/TTS operation is authorized by this document.
+> **Status:** Design Spec v2.4 — Adaptive Six-Clip + durable paid Google Flow generation fence.
+> **Implementation gate:** Production Google Flow work remains paused until the v2.4 RED→GREEN implementation, live-job remediation, full verification, and CI are complete. This document authorizes no paid Flow/TTS operation and does not authorize restarting the production Worker.
 
 ## 1. Goal
 
@@ -31,8 +31,9 @@ Start Auto Production
 → calculate required Canva playback speed
 → reject before Flow if speed would exceed the configured safety policy
 → recover valid local Flow artifacts or exclusively pre-clean the dedicated Flow project
+→ durably fence the paid Flow side effect before Generate can be clicked
 → Google Flow generates, semantically renames, and bulk-downloads six clips when recovery is unavailable
-→ persist FLOW_READY before remote Flow cleanup
+→ atomically clear the paid-generation fence and persist FLOW_READY before remote Flow cleanup
 → Canva uploads/arranges six clips
 → Canva adjusts clip playback speed when required
 → Canva adds narration + captions
@@ -61,7 +62,7 @@ feature/six-clip-media-timeline
 
 Do not merge or modify the baseline as part of this feature. Do not remove the legacy stock/local-render path until the Cloud Agent passes the real Ubuntu End-to-End smoke gate.
 
-The current feature implementation completed Tasks 1–14 through the non-paid Ubuntu checkpoint. Those components are retained where compatible. This v2.3 spec supersedes the earlier per-run Flow download assumptions with one dedicated, exclusively locked, self-cleaning Flow project while preserving the v2.2 Adaptive Six-Clip timing policy.
+The current feature implementation completed Tasks 1–14 through the live paid-flow checkpoint. Those components are retained where compatible. This v2.4 spec keeps the v2.3 dedicated shared Flow workspace and v2.2 Adaptive Six-Clip timing policy, but adds a conservative durable fence before the paid Generate click so a crash at `TTS_READY` cannot cause automatic pre-clean and duplicate generation.
 
 ## 3. Repository-aligned reuse decisions
 
@@ -174,7 +175,9 @@ The existing cross-process `google_flow` persistent-profile lock is also the exc
 
 ```text
 inspect/pre-clean
+→ settled actionable-editor verification
 → observable empty verification
+→ durable paid-generation fence
 → paid generation
 → Agent rename
 → semantic-name verification
@@ -187,32 +190,56 @@ inspect/pre-clean
 
 Session-check/control endpoints retain bounded short lock timeouts and may report busy. A production Flow run may wait longer for the shared workspace, renewing its worker lease while it waits. No process may inspect, clean, generate, rename, or download from the project while another process owns the workspace lock.
 
-No global Flow workspace-state table is required. Each next owner always pre-cleans after acquiring the lock, independent of previous job history.
+No global Flow workspace-state table is required. Each fresh generation owner pre-cleans after acquiring the lock, independent of previous job history. A job with `flow_generation_unresolved=true` is not a fresh generation owner: it enters reconciliation and must never pre-clean, delete remote assets, or click Generate.
 
 The provider/workflow boundary is context-managed:
 
 ```python
 with flow.acquire_workspace(job) as workspace:
-    clips = recovered_clips or workspace.generate_and_download(job, flow_dir)
-    job = workflow.persist_flow_ready(clips, cleanup_unresolved=True)
+    if recovered_clips:
+        clips = recovered_clips
+    elif job.flow_generation_unresolved:
+        clips = workspace.reconcile_and_download(job, flow_dir)
+    else:
+        workspace.prepare_for_generation()
+        job = workflow.persist_generation_fence(job)
+        clips = workspace.generate_and_download(job, flow_dir)
+    job = workflow.persist_flow_ready(
+        clips,
+        generation_unresolved=False,
+        cleanup_unresolved=True,
+    )
     workspace.cleanup_and_verify_empty()
     job = workflow.confirm_flow_cleanup(job)
 ```
 
 `GoogleFlowClient`/`FlowWorkspaceRun` own browser actions, observable remote state, the ZIP download boundary, and the long-lived lock. `CloudAgentWorkflow` owns local recovery priority, checkpoint/control transitions, and cleanup-error suppression. `CloudJobStore` owns the compatible SQLite migration and atomic single-job update. The provider never writes SQLite.
 
-### 3.9 v2.3 implementation delta from the current branch
+### 3.9 v2.4 implementation delta from the current branch
 
-The current branch does not yet satisfy this lifecycle:
+The current branch already has the v2.3 workspace lock, semantic bulk ZIP, local salvage, `flow_cleanup_unresolved`, and post-`FLOW_READY` cleanup behavior. The paid smoke exposed these remaining gaps:
 
-- `GoogleFlowClient.generate_and_download()` opens the profile only for its own call, downloads individual buttons, and derives canonical order from locator/completion order.
-- `CloudAgentWorkflow` persists `FLOW_READY` only after the provider returns, so it cannot currently checkpoint before cleanup while the same workspace lock remains held.
-- `PersistentBrowserManager.open()` has one short manager-level lock timeout and needs a production-run override without changing bounded session-check behavior.
-- `CloudJobRecord`/SQLite have no `flow_cleanup_unresolved` field or compatible migration.
-- Job storage has no explicit bulk-ZIP, staging, salvage, or quarantine operations.
-- The two typed Flow workspace/archive errors do not yet exist.
+- SQLite and `CloudJobRecord` have no `flow_generation_unresolved` fence between `TTS_READY` and the paid remote side effect.
+- `FlowWorkspaceRun.generate_and_download()` performs pre-clean and clicks Generate inside one provider call, so the workflow cannot durably fence the click while keeping SQLite out of the provider.
+- A restarted `TTS_READY` job always re-enters the fresh path and may delete partial paid output before generating again.
+- Empty verification can accept a transient loading state because zero checkboxes plus initial empty text does not prove the virtualized media inventory is settled.
+- Editor readiness incorrectly shares the 1,800-second generation timeout.
+- `FlowWorkspaceVerificationError` can escape the workflow, terminate the Worker process, and let systemd reclaim the still-claimable job.
 
-The implementation plan must replace only these boundaries and preserve existing TTS, Canva, legacy render/stock, API, and deployment behavior.
+The v2.4 implementation changes only these boundaries and preserves existing TTS, Canva, archive validation, local salvage, legacy render/stock, API, deployment, profile ownership, and public-network behavior.
+
+### 3.10 One-time live-job remediation
+
+The paid smoke job `c604f5d5-c206-4d49-bad2-cac59e2815a2` has one canonical `voice.mp3` with measured duration `63.936` seconds and playback speed `0.9384384384384384`, plus unresolved remote Flow assets. After the compatible schema migration is installed and while the production Worker remains stopped, one durable update sets:
+
+```text
+status=HUMAN_REQUIRED
+checkpoint=TTS_READY
+flow_generation_unresolved=true
+error_code=FLOW_GENERATION_RECONCILIATION_REQUIRED
+```
+
+The remediation preserves the canonical audio, measured timing, remote assets, browser profile, and locks. It performs no pre-clean, delete, Generate, TTS, rename, download, or cleanup action. The Worker remains stopped after remediation; a later restart or paid retry requires a separate explicit gate.
 
 ## 4. Runtime architecture
 
@@ -359,6 +386,7 @@ progress
 
 flow_status
 canva_status
+flow_generation_unresolved
 flow_cleanup_unresolved
 
 final_video
@@ -389,6 +417,19 @@ max(60.0, audio_duration_seconds)
 
 for the Adaptive Six-Clip MVP.
 
+`flow_generation_unresolved` is a conservative per-job paid-side-effect fence:
+
+```text
+false = no unresolved paid Flow generation exists for this job; a fresh
+        generation is permitted only after local salvage, the exclusive lock,
+        settled-editor verification, pre-clean, and stable empty verification
+true  = a paid Flow generation may have been submitted but has not yet become
+        six validated canonical local clips; automatic pre-clean, deletion,
+        and Generate are forbidden
+```
+
+Legacy rows migrate with `flow_generation_unresolved = false`. The SQLite column is non-null with a false/zero default. For a genuinely fresh `TTS_READY` job, one `patch_job()` transaction persists `status=FLOW_GENERATING`, `checkpoint=TTS_READY`, and `flow_generation_unresolved=true` after safe empty verification but before the provider clicks Generate. This intentionally prefers a false-positive unresolved fence if the process dies before the click over the risk of duplicate paid generation.
+
 `flow_cleanup_unresolved` is durable per-job recovery/audit state:
 
 ```text
@@ -398,9 +439,9 @@ true  = FLOW_READY/local canonical clips are durable, but remote empty-state
 false = post-job Flow cleanup completed and refresh/reload verified zero product clips
 ```
 
-The flag never decides whether the next job pre-cleans. The next job always pre-cleans.
+The cleanup flag never decides whether the next fresh job pre-cleans. Fresh jobs always pre-clean; an unresolved-generation job follows the separate no-cleanup reconciliation rule.
 
-Legacy rows migrate with `flow_cleanup_unresolved = false`. The SQLite column is non-null with a false/zero default. The transition to `FLOW_READY` writes status, checkpoint, progress/current step, and `flow_cleanup_unresolved=true` in one `patch_job()` update/transaction.
+Legacy rows migrate with `flow_cleanup_unresolved = false`. The SQLite column is non-null with a false/zero default. The transition to `FLOW_READY` writes status, checkpoint, progress/current step, `flow_generation_unresolved=false`, and `flow_cleanup_unresolved=true` in one `patch_job()` update/transaction.
 
 ## 7. Adaptive Six-Clip timing policy
 
@@ -686,6 +727,8 @@ Do not create a second production TTS after this point. `voice.mp3` is reused by
 
 The safety-floor gate from Step 3 must pass **before** Flow generation. A job at `TTS_READY` must first try to recover already-paid local output from the crash window between bulk download/materialization and durable `FLOW_READY`.
 
+Local recovery has priority even when `flow_generation_unresolved=true`. If canonical, ZIP, or staging recovery reconstructs six valid canonical videos, no remote Generate is permitted; the workflow acquires the Flow workspace lock, atomically commits `FLOW_READY` with `flow_generation_unresolved=false` and `flow_cleanup_unresolved=true`, attempts the existing remote cleanup, then continues to Canva.
+
 Recovery priority is mandatory:
 
 1. Validate the complete canonical set `clip_01.mp4` … `clip_06.mp4` with the existing full video validation policy. If all six pass, do not generate.
@@ -719,14 +762,45 @@ Before a genuinely new paid generation:
 check Flow session with the normal bounded session-check policy
 → acquire the long-lived exclusive google_flow workspace/profile lock
 → open the configured dedicated project
+→ prove the editor is settled and actionable within the editor-readiness timeout
 → inspect existing product clips
 → delete every existing product clip when any exist
 → refresh/reload
-→ observably verify zero product clips
-→ only then submit generation
+→ prove a settled, stable zero-product inventory across multiple polls
+→ atomically persist status=FLOW_GENERATING, checkpoint=TTS_READY,
+  flow_generation_unresolved=true
+→ only then submit generation exactly once
 ```
 
-The next job always performs this pre-clean regardless of any prior job's `flow_cleanup_unresolved` value. Failure to prove the zero-product-clip state raises `FlowWorkspaceVerificationError` and stops before a new paid generation.
+The next fresh job always performs this pre-clean regardless of any prior job's `flow_cleanup_unresolved` value. Failure to prove the settled editor or stable zero-product state raises `FlowWorkspaceVerificationError` and stops before a new paid generation. The paid fence write happens after safe pre-clean/empty verification and before the click; the provider never writes SQLite.
+
+Live authenticated Flow evidence establishes this settled-editor barrier without coordinate selectors:
+
+```text
+document.readyState == complete
+exactly one Agent button is visible and enabled
+exactly one composer editable associated with Agent is visible
+the All media / สื่อทั้งหมด control is uniquely visible
+data-testid="virtuoso-item-list" is uniquely visible
+no visible aria-busy=true element
+no visible progressbar
+the observable media-card inventory remains unchanged for at least 3 polls
+```
+
+The virtualized inventory uses the observed `virtuoso-item-list` boundary and observable product-card descendants. A single poll with zero checkboxes, zero cards, or transient empty text is never proof of emptiness. Empty verification requires the whole settled barrier plus a zero inventory that remains stable across at least three polls. Loading/hydration resets the stability count. Editor readiness has its own short bounded timeout; it does not borrow the 1,800-second generation timeout.
+
+The default editor-readiness timeout is 120 seconds and is an independent `GoogleFlowClient` constructor policy. The production factory uses that policy from the existing composition root; it does not add a second config loader. Tests may inject shorter values. Existing generation/reconciliation waits retain the separate 1,800-second generation policy.
+
+At `TTS_READY` with `flow_generation_unresolved=true`, the workflow enters reconciliation under the same exclusive workspace lock. Reconciliation may inspect and wait for the existing remote request, semantically rename exactly six resolved current-job clips, bulk-download once, and run the existing safe local validation/materialization. It must never pre-clean, delete, or click Generate. If exactly six results cannot be reconciled safely, the workflow persists:
+
+```text
+status=HUMAN_REQUIRED
+checkpoint=TTS_READY
+flow_generation_unresolved=true
+error_code=FLOW_GENERATION_RECONCILIATION_REQUIRED
+```
+
+Partial remote output is retained. A later paid retry requires explicit authorization after remote state reconciliation.
 
 Generation then performs:
 
@@ -764,6 +838,7 @@ After six canonical local files are durable and validated, but while the same wo
 one SQLite update:
     status=FLOW_READY
     checkpoint=FLOW_READY
+    flow_generation_unresolved=false
     flow_cleanup_unresolved=true
 → attempt remote delete-all cleanup before honoring pause/cancel
 → refresh/reload
@@ -877,8 +952,10 @@ Classify failures:
 
 - transient network/browser timeout → retry;
 - deterministic invalid artifact → `FAILED` unless a step-specific retry can fix only that artifact;
-- inability to prove the dedicated Flow workspace is empty before generation → `FlowWorkspaceVerificationError`, hard failure before `FLOW_READY`;
-- unsafe, incomplete, duplicate, ambiguous, or invalid Flow ZIP → `FlowArchiveValidationError`, hard failure before `FLOW_READY`;
+- inability to prove a settled actionable Flow editor or stable empty workspace before the paid fence → `FlowWorkspaceVerificationError`, fail the job without setting paid-generation reconciliation state;
+- any Flow workspace verification failure after `flow_generation_unresolved=true` → preserve `checkpoint=TTS_READY` and the fence, transition to `HUMAN_REQUIRED` with `FLOW_GENERATION_RECONCILIATION_REQUIRED`, and do not let the typed failure terminate the Worker;
+- unsafe, incomplete, duplicate, ambiguous, or invalid Flow ZIP before a paid fence → `FlowArchiveValidationError`, hard failure before `FLOW_READY`;
+- the same archive failure after `flow_generation_unresolved=true` → preserve the fence and transition to reconciliation-required `HUMAN_REQUIRED`, never automatically generate again;
 - post-`FLOW_READY` Flow cleanup failure/interruption → retain `FLOW_READY`, leave `flow_cleanup_unresolved=true`, do not propagate job failure, and continue toward Canva;
 - narration requires playback below the configured safety floor → `FAILED` before Flow with `NARRATION_TOO_LONG_FOR_SIX_CLIP`;
 - password/CAPTCHA/2FA/security challenge → `HUMAN_REQUIRED` immediately;
@@ -888,7 +965,7 @@ Classify failures:
 
 Resume must validate artifacts required by the checkpoint before skipping a paid step.
 
-At `TTS_READY`, resume performs the canonical → ZIP/staging salvage priority from Workflow Step 4 before considering a new Flow generation. A complete valid salvaged set becomes `FLOW_READY` without regeneration. Partial/invalid canonical materialization is quarantined before salvage or a new generation.
+At `TTS_READY`, resume performs the canonical → ZIP/staging salvage priority from Workflow Step 4. A complete valid salvaged set becomes `FLOW_READY` without regeneration. Partial/invalid canonical materialization is quarantined before salvage. If salvage is unavailable and `flow_generation_unresolved=false`, the fresh fenced path may run. If salvage is unavailable and `flow_generation_unresolved=true`, only read-only remote reconciliation may run; pre-clean, delete, and Generate remain forbidden.
 
 Example:
 
@@ -905,6 +982,8 @@ six clips valid
 Never regenerate TTS/Flow merely because Canva required human login or a worker/server restart occurred.
 
 At `FLOW_READY`, resume validates the six canonical clips and never invokes Flow generation. A historical `flow_cleanup_unresolved=true` does not block Canva and does not control the next job's mandatory pre-clean.
+
+Expected per-job `FlowWorkspaceVerificationError` and reconciliation failures are contained at the workflow boundary and converted into durable job state. They do not normally escape `CloudAgentWorker.run_once()` or rely on systemd restart for control flow.
 
 ## 13. API surface
 
@@ -1105,6 +1184,17 @@ Timing-policy unit tests must cover at least:
 Dedicated Flow workspace tests must cover at least:
 
 - compatible SQLite migration/default/round-trip for `flow_cleanup_unresolved`;
+- compatible SQLite migration/default/round-trip for `flow_generation_unresolved`;
+- the generation fence is durably persisted before the provider can click Generate;
+- a crash immediately before or after the Generate click resumes without a second Generate;
+- `TTS_READY + flow_generation_unresolved=true` never pre-cleans, deletes, or generates;
+- six existing remote results reconcile through rename/download without a new Generate;
+- partial remote results are retained and transition to reconciliation-required state without cleanup or generation;
+- a workspace verification error before the fence fails safely with the fence false;
+- a workspace verification error after the fence becomes `HUMAN_REQUIRED` with the fence true;
+- an expected typed Flow workspace failure does not escape and terminate the Worker;
+- loading/transient zero inventory cannot satisfy empty verification;
+- a settled actionable editor with a stable zero inventory may satisfy the pre-generation gate;
 - stale remote product clips are deleted and refreshed zero state is verified before Generate;
 - failure to prove empty state prevents Generate;
 - out-of-order completion is not used for semantic ordering;
@@ -1117,7 +1207,7 @@ Dedicated Flow workspace tests must cover at least:
 - complete canonical files at `TTS_READY` recover to `FLOW_READY` with zero generation calls;
 - partial canonical files plus a valid surviving ZIP/staged set reconstruct all six with zero generation calls;
 - unrecoverable partial state is quarantined, then the workspace is pre-cleaned before a new generation;
-- `FLOW_READY + flow_cleanup_unresolved=true` are persisted before remote cleanup;
+- `FLOW_READY + flow_generation_unresolved=false + flow_cleanup_unresolved=true` are persisted atomically before remote cleanup;
 - cleanup success verifies empty state before changing unresolved to false;
 - cleanup failure retains `FLOW_READY`, local clips, and unresolved=true while Canva continues;
 - pause/cancel arriving at the Flow boundary is honored only after the post-`FLOW_READY` cleanup attempt;
@@ -1142,24 +1232,27 @@ MVP is complete only when all are demonstrated:
 10. Narration longer than 60/62 seconds is not rejected solely for exceeding the old fixed timeline.
 11. Required Canva playback speed is calculated from real narration duration and checked before Flow credit is consumed.
 12. Narration requiring playback below the configured minimum is rejected before Flow with an actionable error.
-13. Each Flow job acquires the dedicated shared workspace, removes stale product clips, refreshes, and proves zero clips before generation.
-14. Flow generates six clips, renames them semantically with the approved Agent instruction, verifies exactly one `clip 1` … `clip 6`, and bulk-downloads one ZIP.
-15. Secure ZIP processing ignores completion/archive order, rejects unsafe or ambiguous content, and materializes exactly six validated canonical clips.
-16. `FLOW_READY + flow_cleanup_unresolved=true` are durable before remote cleanup; cleanup failure cannot invalidate local artifacts or trigger regeneration.
-17. Complete canonical or salvageable ZIP/staging artifacts at `TTS_READY` recover without another paid Flow generation.
-18. The exclusive workspace lock prevents a second job from entering until the current owner finishes its cleanup attempt and releases ownership.
-19. Canva uploads and arranges six clips plus the same canonical narration file.
-20. When narration exceeds 60 seconds within policy, Canva applies uniform playback adjustment across all six clips.
-21. Canva playback automation has passed the real Editor spike including observable post-action verification.
-22. Canva generates captions and exports MP4.
-23. `final.mp4` passes stream/resolution/size and narration-derived duration validation before local source cleanup.
-24. User can Pause/Resume/Cancel at defined safe boundaries; post-Flow cleanup is attempted before a newly arrived pause/cancel is honored.
-25. Resume validates checkpoint and salvage artifacts and does not repeat successful paid steps unnecessarily.
-26. Worker lease/heartbeat prevents duplicate execution and exposes Cloud Agent online status.
-27. Closing the local browser/computer does not stop production.
-28. Worker/server restart preserves the job and resumes from a safe checkpoint.
-29. WebUI shows history/status/timing/final Preview/Download.
-30. Legacy stock/render code remains available until this E2E gate passes.
+13. Each fresh Flow job acquires the dedicated shared workspace, proves the editor settled, removes stale product clips, refreshes, and proves a stable zero inventory before generation.
+14. `flow_generation_unresolved=true` is durable before the paid Generate click; restart cannot pre-clean, delete, or generate while the fence remains true.
+15. Existing remote results reconcile without a new Generate, while unsafe partial/ambiguous state becomes `HUMAN_REQUIRED` and remains untouched.
+16. Flow generates six clips, renames them semantically with the approved Agent instruction, verifies exactly one `clip 1` … `clip 6`, and bulk-downloads one ZIP.
+17. Secure ZIP processing ignores completion/archive order, rejects unsafe or ambiguous content, and materializes exactly six validated canonical clips.
+18. `FLOW_READY + flow_generation_unresolved=false + flow_cleanup_unresolved=true` are durable before remote cleanup; cleanup failure cannot invalidate local artifacts or trigger regeneration.
+19. Complete canonical or salvageable ZIP/staging artifacts at `TTS_READY` recover without another paid Flow generation.
+20. The exclusive workspace lock prevents a second job from entering until the current owner finishes its cleanup attempt and releases ownership.
+21. Canva uploads and arranges six clips plus the same canonical narration file.
+22. When narration exceeds 60 seconds within policy, Canva applies uniform playback adjustment across all six clips.
+23. Canva playback automation has passed the real Editor spike including observable post-action verification.
+24. Canva generates captions and exports MP4.
+25. `final.mp4` passes stream/resolution/size and narration-derived duration validation before local source cleanup.
+26. User can Pause/Resume/Cancel at defined safe boundaries; post-Flow cleanup is attempted before a newly arrived pause/cancel is honored.
+27. Resume validates checkpoint, fence, and salvage artifacts and does not repeat successful paid steps unnecessarily.
+28. Worker lease/heartbeat prevents duplicate execution and exposes Cloud Agent online status.
+29. Expected per-job Flow workspace errors become durable job state without killing the Worker.
+30. Closing the local browser/computer does not stop production.
+31. Worker/server restart preserves the job and resumes from a safe checkpoint.
+32. WebUI shows history/status/timing/final Preview/Download.
+33. Legacy stock/render code remains available until this E2E gate passes.
 
 ## 20. Real Ubuntu smoke gate
 
