@@ -5,12 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=videosturbo
-Group=videosturbo
+User=linuxuser
+Group=linuxuser
 WorkingDirectory=/opt/VideosTurbo
 EnvironmentFile=-/etc/videosturbo/cloud-agent.env
 Environment=PYTHONPATH=/opt/VideosTurbo
-ExecStart=/opt/VideosTurbo/.venv/bin/python main.py
+Environment=DISPLAY=:99
+ExecStart=/opt/VideosTurbo/.venv/bin/python -m uvicorn app.asgi:app --host 127.0.0.1 --port 8080
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
