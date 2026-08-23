@@ -26,7 +26,7 @@ class NeverTTS:
 
 
 class NeverFlow:
-    def generate_and_download(self, job, flow_dir):
+    def acquire_workspace(self, job):
         raise AssertionError("Flow must not run")
 
 

@@ -13,7 +13,6 @@ from app.services.cloud_agent.errors import (
     MediaValidationError,
 )
 from app.services.cloud_agent.flow_archive import materialize_flow_archive
-from app.services.cloud_agent.media_probe import validate_video
 from app.services.cloud_agent.providers._browser_session import BrowserSessionProvider
 from app.services.cloud_agent.providers._session_detection import (
     classify_security_challenge,
@@ -190,7 +189,6 @@ class GoogleFlowClient:
         generation_timeout_seconds: float = 1800.0,
         workspace_lock_timeout_seconds: float | None = None,
         poll_seconds: float = 1.0,
-        max_download_attempts: int = 3,
         expected_width: int = 1080,
         expected_height: int = 1920,
     ) -> None:
@@ -201,8 +199,6 @@ class GoogleFlowClient:
             raise ValueError("generation_timeout_seconds must be positive")
         if poll_seconds < 0:
             raise ValueError("poll_seconds must be non-negative")
-        if max_download_attempts <= 0:
-            raise ValueError("max_download_attempts must be positive")
         if expected_width <= 0 or expected_height <= 0:
             raise ValueError("expected video dimensions must be positive")
 
@@ -216,7 +212,6 @@ class GoogleFlowClient:
             else float(workspace_lock_timeout_seconds)
         )
         self.poll_seconds = float(poll_seconds)
-        self.max_download_attempts = int(max_download_attempts)
         self.expected_width = int(expected_width)
         self.expected_height = int(expected_height)
 
@@ -258,41 +253,6 @@ class GoogleFlowClient:
                     "Google Flow project editor could not be verified"
                 )
             time.sleep(self.poll_seconds)
-
-    def generate_and_download(
-        self,
-        job: CloudJobRecord,
-        flow_dir: Path,
-        expected_count: int = 6,
-    ) -> list[Path]:
-        if expected_count <= 0:
-            raise ValueError("expected_count must be positive")
-
-        self.sessions.ensure_service_ready("google_flow", job.id)
-        flow_dir = Path(flow_dir)
-        flow_dir.mkdir(parents=True, exist_ok=True)
-
-        with self.browser.open("google_flow", headed=False) as context:
-            page = BrowserSessionProvider._page(context)
-            page.goto(self.service_url, wait_until="domcontentloaded")
-            self._submit_generation(page, job.master_prompt)
-            self._wait_for_generation(page, expected_count)
-            downloads = page.get_by_role(
-                "button",
-                name=re.compile(r"download", re.IGNORECASE),
-            )
-            actual_count = downloads.count()
-            if actual_count != expected_count:
-                raise MediaValidationError(
-                    f"expected {expected_count} downloadable Flow results, got {actual_count}"
-                )
-
-            paths = []
-            for index in range(expected_count):
-                path = flow_dir / f"clip_{index + 1:02d}.mp4"
-                self._download_and_validate(downloads.nth(index), page, path)
-                paths.append(path)
-            return paths
 
     def _submit_generation(self, page: Any, master_prompt: str) -> None:
         self._submit_agent_prompt(page, master_prompt)
@@ -371,25 +331,3 @@ class GoogleFlowClient:
             if total == expected_count:
                 return current
         return None
-
-    def _download_and_validate(self, locator: Any, page: Any, path: Path) -> None:
-        last_error: MediaValidationError | None = None
-        for _attempt in range(1, self.max_download_attempts + 1):
-            with page.expect_download() as download_info:
-                locator.click()
-            download_info.value.save_as(str(path))
-            try:
-                validate_video(
-                    path,
-                    min_size_bytes=1,
-                    expected_width=self.expected_width,
-                    expected_height=self.expected_height,
-                )
-                return
-            except MediaValidationError as exc:
-                last_error = exc
-
-        raise MediaValidationError(
-            f"{path.name} failed validation after "
-            f"{self.max_download_attempts} download attempts: {last_error}"
-        ) from last_error

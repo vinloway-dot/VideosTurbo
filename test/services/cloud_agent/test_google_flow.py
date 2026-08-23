@@ -392,7 +392,6 @@ def _client(
     page,
     *,
     timeout_seconds=30.0,
-    max_download_attempts=3,
     workspace_lock_timeout_seconds=None,
 ):
     client_cls = getattr(google_flow, "GoogleFlowClient", None)
@@ -402,7 +401,6 @@ def _client(
         "service_url": "https://labs.google/fx/tools/flow/project/demo",
         "generation_timeout_seconds": timeout_seconds,
         "poll_seconds": 0.0,
-        "max_download_attempts": max_download_attempts,
         "expected_width": 1080,
         "expected_height": 1920,
     }
@@ -679,99 +677,16 @@ def test_flow_workspace_cleanup_raises_when_zero_state_cannot_be_verified():
             workspace.cleanup_and_verify_empty()
 
 
-def test_google_flow_generation_uses_agent_mode_prompt_and_observable_progress(
-    monkeypatch, tmp_path
-):
-    page = FakePage(
-        progress_html=[
-            "<div>Generation progress 2 / 6</div>",
-            "<div>Generation progress 4 / 6</div>",
-            "<div>Generation progress 6 / 6</div>",
-        ]
-    )
-    client, sessions = _client(page)
-    validations = []
-    monkeypatch.setattr(
-        google_flow,
-        "validate_video",
-        lambda path, **kwargs: validations.append((Path(path), kwargs)),
-    )
-
-    result = client.generate_and_download(_job(), tmp_path / "flow")
-
-    assert sessions.calls == [("google_flow", "job-123")]
-    assert page.goto_calls == [
-        (
-            "https://labs.google/fx/tools/flow/project/demo",
-            {"wait_until": "domcontentloaded"},
-        )
-    ]
-    assert page.actions[:3] == [
-        ("click", "agent"),
-        ("fill", "prompt", _job().master_prompt),
-        ("click", "generate"),
-    ]
-    assert [path.name for path in result] == [f"clip_{index:02d}.mp4" for index in range(1, 7)]
-    assert [path.name for path, _ in validations] == [path.name for path in result]
-    assert page.download_attempts == [1, 1, 1, 1, 1, 1]
-
-
-def test_google_flow_selective_retry_redownloads_only_invalid_clip(monkeypatch, tmp_path):
-    page = FakePage(progress_html=["<div>Generation progress 6 / 6</div>"])
-    client, _ = _client(page)
-    validation_attempts = {}
-
-    def validate(path, **_kwargs):
-        name = Path(path).name
-        validation_attempts[name] = validation_attempts.get(name, 0) + 1
-        if name == "clip_03.mp4" and validation_attempts[name] == 1:
-            raise MediaValidationError("corrupt clip")
-
-    monkeypatch.setattr(google_flow, "validate_video", validate)
-
-    result = client.generate_and_download(_job(), tmp_path / "flow")
-
-    assert len(result) == 6
-    assert page.download_attempts == [1, 1, 2, 1, 1, 1]
-    assert validation_attempts["clip_03.mp4"] == 2
-
-
-def test_google_flow_retry_budget_is_bounded(monkeypatch, tmp_path):
-    page = FakePage(progress_html=["<div>Generation progress 6 / 6</div>"])
-    client, _ = _client(page, max_download_attempts=2)
-
-    def always_invalid(path, **_kwargs):
-        if Path(path).name == "clip_02.mp4":
-            raise MediaValidationError("still corrupt")
-
-    monkeypatch.setattr(google_flow, "validate_video", always_invalid)
-
-    with pytest.raises(MediaValidationError, match="clip_02.mp4"):
-        client.generate_and_download(_job(), tmp_path / "flow")
-
-    assert page.download_attempts == [1, 2, 0, 0, 0, 0]
-
-
 def test_google_flow_generation_timeout_is_bounded(monkeypatch, tmp_path):
     page = FakePage(progress_html=["<div>Generation progress 2 / 6</div>"])
     client, _ = _client(page, timeout_seconds=1.0)
-    clock = iter([0.0, 0.5, 1.1])
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    clock = iter([0.0, 0.0, 0.5, 1.1])
     monkeypatch.setattr(google_flow.time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
 
     with pytest.raises(MediaValidationError, match="timed out"):
-        client.generate_and_download(_job(), tmp_path / "flow")
+        with client.acquire_workspace(_job()) as workspace:
+            workspace.generate_and_download(_job(), paths)
 
-    assert page.download_attempts == [0, 0, 0, 0, 0, 0]
-
-
-def test_google_flow_requires_exactly_six_downloadable_results(monkeypatch, tmp_path):
-    page = FakePage(
-        progress_html=["<div>Generation progress 6 / 6</div>"],
-        download_count=5,
-    )
-    client, _ = _client(page)
-    monkeypatch.setattr(google_flow, "validate_video", lambda *_args, **_kwargs: None)
-
-    with pytest.raises(MediaValidationError, match="exactly six|expected 6"):
-        client.generate_and_download(_job(), tmp_path / "flow")
+    assert ("click", "bulk_download") not in page.actions

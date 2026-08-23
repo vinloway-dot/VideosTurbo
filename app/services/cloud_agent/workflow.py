@@ -1,5 +1,7 @@
 from pathlib import Path
-from typing import Protocol
+from typing import ContextManager, Protocol
+
+from loguru import logger
 
 from app.models.cloud_agent import (
     CloudControlRequest,
@@ -12,6 +14,7 @@ from app.services.cloud_agent.errors import (
     MediaValidationError,
     NarrationTooLongError,
 )
+from app.services.cloud_agent.flow_archive import recover_flow_artifacts
 from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.media_probe import MediaProbe, validate_audio, validate_video
 from app.services.cloud_agent.storage import CloudJobStorage, JobPaths
@@ -26,8 +29,22 @@ class TTSClient(Protocol):
     def generate(self, job: CloudJobRecord, output_path: Path) -> Path: ...
 
 
+class FlowWorkspace(Protocol):
+    def generate_and_download(
+        self,
+        job: CloudJobRecord,
+        paths: JobPaths,
+        expected_count: int = 6,
+    ) -> tuple[Path, ...]: ...
+
+    def cleanup_and_verify_empty(self) -> None: ...
+
+
 class FlowClient(Protocol):
-    def generate_and_download(self, job: CloudJobRecord, flow_dir: Path) -> list[Path]: ...
+    def acquire_workspace(
+        self,
+        job: CloudJobRecord,
+    ) -> ContextManager[FlowWorkspace]: ...
 
 
 class CanvaClient(Protocol):
@@ -266,36 +283,62 @@ class CloudAgentWorkflow:
 
             job = self._get_job(job.id)
             if job.checkpoint is CloudJobCheckpoint.TTS_READY:
-                self.store.patch_job(
+                recovered = recover_flow_artifacts(
+                    self.storage,
                     job.id,
-                    status=CloudJobStatus.FLOW_GENERATING,
-                    current_step="flow_generating",
-                    progress=35,
+                    min_size_bytes=1,
+                    expected_width=self.expected_width,
+                    expected_height=self.expected_height,
                 )
-                generated = self.flow.generate_and_download(job, paths.flow_dir)
-                if len(generated) != 6:
-                    raise MediaValidationError(
-                        f"Flow step must produce exactly six clips; got {len(generated)}"
+                if recovered is None:
+                    self.store.patch_job(
+                        job.id,
+                        status=CloudJobStatus.FLOW_GENERATING,
+                        current_step="flow_generating",
+                        progress=35,
                     )
-                missing = [path for path in paths.flow_files if not path.is_file()]
-                if missing:
-                    raise MediaValidationError(
-                        f"Flow step did not produce canonical clip: {missing[0]}"
+                with self.flow.acquire_workspace(job) as workspace:
+                    generated = (
+                        recovered.paths
+                        if recovered is not None
+                        else workspace.generate_and_download(job, paths)
                     )
-                for path in paths.flow_files:
-                    validate_video(
-                        path,
-                        min_size_bytes=1,
-                        expected_width=self.expected_width,
-                        expected_height=self.expected_height,
+                    if len(generated) != 6:
+                        raise MediaValidationError(
+                            f"Flow step must produce exactly six clips; got {len(generated)}"
+                        )
+                    missing = [path for path in paths.flow_files if not path.is_file()]
+                    if missing:
+                        raise MediaValidationError(
+                            f"Flow step did not produce canonical clip: {missing[0]}"
+                        )
+                    for path in paths.flow_files:
+                        validate_video(
+                            path,
+                            min_size_bytes=1,
+                            expected_width=self.expected_width,
+                            expected_height=self.expected_height,
+                        )
+                    job = self.store.patch_job(
+                        job.id,
+                        status=CloudJobStatus.FLOW_READY,
+                        checkpoint=CloudJobCheckpoint.FLOW_READY,
+                        current_step="flow_ready",
+                        progress=60,
+                        flow_cleanup_unresolved=True,
                     )
-                job = self.store.patch_job(
-                    job.id,
-                    status=CloudJobStatus.FLOW_READY,
-                    checkpoint=CloudJobCheckpoint.FLOW_READY,
-                    current_step="flow_ready",
-                    progress=60,
-                )
+                    try:
+                        workspace.cleanup_and_verify_empty()
+                    except Exception:
+                        logger.warning(
+                            "Flow workspace cleanup remains unresolved for cloud job {}",
+                            job.id,
+                        )
+                    else:
+                        job = self.store.patch_job(
+                            job.id,
+                            flow_cleanup_unresolved=False,
+                        )
                 stopped = self._control_boundary(job.id)
                 if stopped is not None:
                     return stopped

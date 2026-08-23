@@ -1,5 +1,7 @@
-from pathlib import Path
 import importlib
+from contextlib import contextmanager
+from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 
@@ -10,7 +12,11 @@ from app.models.cloud_agent import (
     CloudJobStatus,
 )
 from app.models.six_clip import empty_six_clip_plan
-from app.services.cloud_agent.errors import HumanRequiredError, MediaValidationError
+from app.services.cloud_agent.errors import (
+    FlowWorkspaceVerificationError,
+    HumanRequiredError,
+    MediaValidationError,
+)
 from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.media_probe import MediaProbe
 from app.services.cloud_agent.storage import CloudJobStorage
@@ -77,13 +83,99 @@ class RecordingTTS:
 class RecordingFlow:
     def __init__(self):
         self.calls: list[tuple[str, Path]] = []
+        self.cleanup_calls = 0
 
-    def generate_and_download(self, job, flow_dir: Path) -> list[Path]:
-        self.calls.append((job.id, flow_dir))
-        files = [flow_dir / f"clip_{index:02d}.mp4" for index in range(1, 7)]
-        for path in files:
+    @contextmanager
+    def acquire_workspace(self, job):
+        owner = self
+
+        class Workspace:
+            def generate_and_download(self, current_job, paths, expected_count=6):
+                assert current_job.id == job.id
+                assert expected_count == 6
+                owner.calls.append((current_job.id, paths.flow_dir))
+                for path in paths.flow_files:
+                    path.write_bytes(b"clip")
+                return paths.flow_files
+
+            def cleanup_and_verify_empty(self):
+                owner.cleanup_calls += 1
+
+        yield Workspace()
+
+
+class RecordingWorkspace:
+    def __init__(
+        self,
+        store,
+        events,
+        *,
+        cleanup_error=None,
+        control_request_on_cleanup=None,
+    ):
+        self.store = store
+        self.events = events
+        self.cleanup_error = cleanup_error
+        self.generate_calls = []
+        self.cleanup_calls = 0
+        self.job_id = None
+        self.control_request_on_cleanup = control_request_on_cleanup
+
+    def generate_and_download(self, job, paths, expected_count=6):
+        self.events.append("generate")
+        self.generate_calls.append((job.id, paths, expected_count))
+        for path in paths.flow_files:
             path.write_bytes(b"clip")
-        return files
+        return paths.flow_files
+
+    def cleanup_and_verify_empty(self):
+        self.cleanup_calls += 1
+        current = self.store.get_job(self.job_id)
+        assert current is not None
+        self.events.append(
+            (
+                "cleanup",
+                current.checkpoint,
+                current.flow_cleanup_unresolved,
+            )
+        )
+        if self.control_request_on_cleanup is not None:
+            self.store.patch_job(
+                self.job_id,
+                control_request=self.control_request_on_cleanup,
+            )
+        if self.cleanup_error is not None:
+            raise self.cleanup_error
+
+
+class RecordingWorkspaceFlow:
+    def __init__(
+        self,
+        store,
+        events=None,
+        *,
+        cleanup_error=None,
+        control_request_on_cleanup=None,
+    ):
+        self.store = store
+        self.events = events if events is not None else []
+        self.workspace = RecordingWorkspace(
+            store,
+            self.events,
+            cleanup_error=cleanup_error,
+            control_request_on_cleanup=control_request_on_cleanup,
+        )
+        self.acquire_calls = []
+
+    @contextmanager
+    def acquire_workspace(self, job):
+        self.acquire_calls.append(job.id)
+        self.workspace.job_id = job.id
+        self.events.append("workspace_enter")
+        try:
+            yield self.workspace
+        finally:
+            self.events.append("workspace_exit")
 
 
 class RecordingCanva:
@@ -108,6 +200,16 @@ class RecordingCanva:
         )
         output.write_bytes(b"final")
         return output
+
+
+class EventRecordingCanva(RecordingCanva):
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+
+    def assemble_and_export(self, job, clips, audio, output):
+        self.events.append("canva")
+        return super().assemble_and_export(job, clips, audio, output)
 
 
 def _workflow(tmp_path, store, *, preflight=None, tts=None, flow=None, canva=None):
@@ -152,6 +254,10 @@ def _accept_media(monkeypatch):
     )
     monkeypatch.setattr(
         "app.services.cloud_agent.workflow.validate_video",
+        fake_validate_video,
+    )
+    monkeypatch.setattr(
+        "app.services.cloud_agent.flow_archive.validate_video",
         fake_validate_video,
     )
 
@@ -206,6 +312,10 @@ def _patch_timed_media(
         "app.services.cloud_agent.workflow.validate_video",
         fake_validate_video,
     )
+    monkeypatch.setattr(
+        "app.services.cloud_agent.flow_archive.validate_video",
+        fake_validate_video,
+    )
 
 
 def test_workflow_progresses_from_queue_through_all_durable_checkpoints(monkeypatch, tmp_path):
@@ -236,6 +346,188 @@ def test_workflow_progresses_from_queue_through_all_durable_checkpoints(monkeypa
     assert result.progress == 100
     assert Path(result.voice_file).is_file()
     assert Path(result.final_video).is_file()
+
+
+def test_workflow_persists_flow_ready_before_cleanup_while_workspace_is_held(
+    monkeypatch, tmp_path
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    events = []
+    flow = RecordingWorkspaceFlow(store, events)
+    canva = EventRecordingCanva(events)
+    _accept_media(monkeypatch)
+    workflow = _workflow(tmp_path, store, flow=flow, canva=canva)
+
+    result = workflow.run(job.id, worker_id=WORKER_ID)
+
+    assert events == [
+        "workspace_enter",
+        "generate",
+        ("cleanup", CloudJobCheckpoint.FLOW_READY, True),
+        "workspace_exit",
+        "canva",
+    ]
+    assert result.status is CloudJobStatus.COMPLETED
+    assert result.flow_cleanup_unresolved is False
+
+
+def test_tts_ready_valid_canonical_recovery_skips_flow_generation(monkeypatch, tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    paths = storage.prepare(job.id)
+    paths.voice_file.write_bytes(b"voice")
+    for number, path in enumerate(paths.flow_files, start=1):
+        path.write_bytes(f"canonical-{number}".encode())
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.TTS_READY,
+        checkpoint=CloudJobCheckpoint.TTS_READY,
+        current_step="tts_ready",
+        voice_file=str(paths.voice_file),
+    )
+    flow = RecordingWorkspaceFlow(store)
+    _accept_media(monkeypatch)
+    workflow = _workflow(tmp_path, store, tts=RecordingTTS(), flow=flow)
+
+    result = workflow.run(job.id, worker_id=WORKER_ID)
+
+    assert flow.acquire_calls == [job.id]
+    assert flow.workspace.generate_calls == []
+    assert flow.workspace.cleanup_calls == 1
+    assert result.status is CloudJobStatus.COMPLETED
+
+
+@pytest.mark.parametrize("salvage_source", ["archive", "staging"])
+def test_tts_ready_partial_canonical_salvage_reconstructs_without_generation(
+    monkeypatch, tmp_path, salvage_source
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    paths = storage.prepare(job.id)
+    paths.voice_file.write_bytes(b"voice")
+    paths.flow_files[0].write_bytes(b"partial-canonical")
+    if salvage_source == "archive":
+        with ZipFile(paths.flow_archive_file, "w") as archive:
+            for number in (4, 1, 6, 2, 5, 3):
+                archive.writestr(f"clip {number}.mp4", f"archive-{number}".encode())
+    else:
+        staged = paths.flow_staging_dir / "validated-before-restart"
+        staged.mkdir()
+        for number in range(1, 7):
+            (staged / f"clip {number}.mp4").write_bytes(
+                f"staged-{number}".encode()
+            )
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.TTS_READY,
+        checkpoint=CloudJobCheckpoint.TTS_READY,
+        current_step="tts_ready",
+        voice_file=str(paths.voice_file),
+    )
+    flow = RecordingWorkspaceFlow(store)
+    _accept_media(monkeypatch)
+    workflow = _workflow(tmp_path, store, tts=RecordingTTS(), flow=flow)
+
+    result = workflow.run(job.id, worker_id=WORKER_ID)
+
+    assert flow.acquire_calls == [job.id]
+    assert flow.workspace.generate_calls == []
+    assert all(path.is_file() for path in paths.flow_files)
+    assert list(paths.flow_quarantine_dir.rglob("clip_01.mp4"))
+    assert result.status is CloudJobStatus.COMPLETED
+
+
+def test_post_flow_ready_cleanup_failure_keeps_checkpoint_and_continues_canva(
+    monkeypatch, tmp_path
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    flow = RecordingWorkspaceFlow(
+        store,
+        cleanup_error=FlowWorkspaceVerificationError("remote state unavailable"),
+    )
+    canva = RecordingCanva()
+    _accept_media(monkeypatch)
+    workflow = _workflow(tmp_path, store, flow=flow, canva=canva)
+
+    result = workflow.run(job.id, worker_id=WORKER_ID)
+
+    assert flow.workspace.cleanup_calls == 1
+    assert len(flow.workspace.generate_calls) == 1
+    assert len(canva.calls) == 1
+    assert result.status is CloudJobStatus.COMPLETED
+    assert result.flow_cleanup_unresolved is True
+    assert result.error_code == ""
+    assert result.error_message == ""
+
+
+def test_crash_after_flow_ready_never_reopens_or_regenerates_flow(monkeypatch, tmp_path):
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    crashing_flow = RecordingWorkspaceFlow(
+        store,
+        cleanup_error=SimulatedProcessCrash(),
+    )
+    _accept_media(monkeypatch)
+    first_workflow = _workflow(tmp_path, store, flow=crashing_flow)
+
+    with pytest.raises(SimulatedProcessCrash):
+        first_workflow.run(job.id, worker_id=WORKER_ID)
+
+    durable = store.get_job(job.id)
+    assert durable is not None
+    assert durable.checkpoint is CloudJobCheckpoint.FLOW_READY
+    assert durable.flow_cleanup_unresolved is True
+
+    never_flow = RecordingWorkspaceFlow(store)
+    canva = RecordingCanva()
+    resumed = _workflow(tmp_path, store, flow=never_flow, canva=canva).run(
+        job.id,
+        worker_id=WORKER_ID,
+    )
+
+    assert never_flow.acquire_calls == []
+    assert never_flow.workspace.generate_calls == []
+    assert len(canva.calls) == 1
+    assert resumed.status is CloudJobStatus.COMPLETED
+    assert resumed.flow_cleanup_unresolved is True
+
+
+@pytest.mark.parametrize(
+    ("control_request", "expected_status"),
+    [
+        (CloudControlRequest.PAUSE, CloudJobStatus.PAUSED),
+        (CloudControlRequest.CANCEL, CloudJobStatus.CANCELLED),
+    ],
+)
+def test_flow_boundary_honors_control_only_after_cleanup_attempt(
+    monkeypatch,
+    tmp_path,
+    control_request,
+    expected_status,
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    flow = RecordingWorkspaceFlow(
+        store,
+        control_request_on_cleanup=control_request,
+    )
+    canva = RecordingCanva()
+    _accept_media(monkeypatch)
+    workflow = _workflow(tmp_path, store, flow=flow, canva=canva)
+
+    result = workflow.run(job.id, worker_id=WORKER_ID)
+
+    assert flow.workspace.cleanup_calls == 1
+    assert result.status is expected_status
+    assert result.checkpoint is CloudJobCheckpoint.FLOW_READY
+    assert canva.calls == []
 
 
 def test_flow_ready_checkpoint_skips_tts_and_flow_then_calls_canva(monkeypatch, tmp_path):
