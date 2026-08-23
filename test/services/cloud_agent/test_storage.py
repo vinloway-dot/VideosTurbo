@@ -1,8 +1,8 @@
-from pathlib import Path
-
 import pytest
 
 from app.services.cloud_agent import storage as storage_module
+from app.services.cloud_agent import errors as errors_module
+from app.services.cloud_agent.errors import MediaValidationError
 from app.services.cloud_agent.storage import CloudJobStorage
 
 
@@ -13,6 +13,9 @@ def test_prepare_creates_expected_directories_without_placeholder_media(tmp_path
     assert paths.input_dir == tmp_path / "job-123" / "input"
     assert paths.audio_dir == tmp_path / "job-123" / "audio"
     assert paths.flow_dir == tmp_path / "job-123" / "flow"
+    assert paths.flow_downloads_dir == paths.flow_dir / "downloads"
+    assert paths.flow_staging_dir == paths.flow_dir / "staging"
+    assert paths.flow_quarantine_dir == paths.flow_dir / "quarantine"
     assert paths.screenshots_dir == tmp_path / "job-123" / "screenshots"
     assert paths.logs_dir == tmp_path / "job-123" / "logs"
     assert paths.final_dir == tmp_path / "job-123" / "final"
@@ -28,11 +31,15 @@ def test_prepare_creates_expected_directories_without_placeholder_media(tmp_path
         "clip_05.mp4",
         "clip_06.mp4",
     ]
+    assert paths.flow_archive_file == paths.flow_downloads_dir / "product_clips.zip"
     assert paths.final_file == paths.final_dir / "final.mp4"
 
     assert paths.input_dir.is_dir()
     assert paths.audio_dir.is_dir()
     assert paths.flow_dir.is_dir()
+    assert paths.flow_downloads_dir.is_dir()
+    assert paths.flow_staging_dir.is_dir()
+    assert paths.flow_quarantine_dir.is_dir()
     assert paths.screenshots_dir.is_dir()
     assert paths.logs_dir.is_dir()
     assert paths.final_dir.is_dir()
@@ -121,3 +128,67 @@ def test_cleanup_refuses_flow_symlink_that_resolves_outside_job(tmp_path):
         storage.cleanup_flow_sources("job-123")
 
     assert outside_file.read_bytes() == b"outside"
+
+
+def test_quarantine_flow_canonical_returns_none_when_no_clips_exist(tmp_path):
+    storage = CloudJobStorage(tmp_path)
+    storage.prepare("job-123")
+
+    assert storage.quarantine_flow_canonical("job-123") is None
+
+
+def test_quarantine_flow_canonical_moves_only_canonical_clips(tmp_path):
+    storage = CloudJobStorage(tmp_path)
+    paths = storage.prepare("job-123")
+    paths.flow_files[0].write_bytes(b"clip-one")
+    paths.flow_files[2].write_bytes(b"clip-three")
+    paths.flow_archive_file.write_bytes(b"archive")
+    staged = paths.flow_staging_dir / "clip 1.mp4"
+    staged.write_bytes(b"staged")
+    unrelated = paths.flow_dir / "keep.txt"
+    unrelated.write_text("keep", encoding="utf-8")
+
+    quarantine = storage.quarantine_flow_canonical("job-123")
+
+    assert quarantine is not None
+    assert quarantine.parent == paths.flow_quarantine_dir
+    assert (quarantine / "clip_01.mp4").read_bytes() == b"clip-one"
+    assert (quarantine / "clip_03.mp4").read_bytes() == b"clip-three"
+    assert all(not path.exists() for path in paths.flow_files)
+    assert paths.flow_archive_file.read_bytes() == b"archive"
+    assert staged.read_bytes() == b"staged"
+    assert unrelated.read_text(encoding="utf-8") == "keep"
+
+    paths.flow_files[0].write_bytes(b"new-clip")
+    second_quarantine = storage.quarantine_flow_canonical("job-123")
+    assert second_quarantine is not None
+    assert second_quarantine != quarantine
+
+
+def test_quarantine_flow_canonical_refuses_external_symlink_before_moving(tmp_path):
+    storage = CloudJobStorage(tmp_path)
+    paths = storage.prepare("job-123")
+    paths.flow_files[0].write_bytes(b"safe-clip")
+    outside_file = tmp_path / "outside.mp4"
+    outside_file.write_bytes(b"outside")
+
+    try:
+        paths.flow_files[1].symlink_to(outside_file)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are unavailable in this environment")
+
+    with pytest.raises(ValueError, match="escapes"):
+        storage.quarantine_flow_canonical("job-123")
+
+    assert paths.flow_files[0].read_bytes() == b"safe-clip"
+    assert outside_file.read_bytes() == b"outside"
+
+
+def test_flow_workspace_and_archive_errors_are_typed_media_failures():
+    workspace_error = getattr(errors_module, "FlowWorkspaceVerificationError", None)
+    archive_error = getattr(errors_module, "FlowArchiveValidationError", None)
+
+    assert workspace_error is not None
+    assert archive_error is not None
+    assert issubclass(workspace_error, MediaValidationError)
+    assert issubclass(archive_error, MediaValidationError)

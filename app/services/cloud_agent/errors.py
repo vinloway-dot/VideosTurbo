@@ -5,6 +5,14 @@ class MediaValidationError(ValueError):
     """Raised when a produced media artifact fails validation."""
 
 
+class FlowWorkspaceVerificationError(MediaValidationError):
+    """Raised when the shared Flow workspace state cannot be proven safe."""
+
+
+class FlowArchiveValidationError(MediaValidationError):
+    """Raised when a Flow bulk-download archive is unsafe or incomplete."""
+
+
 class NarrationTooLongError(MediaValidationError):
     """Raised before Flow when six clips would require excessive slowing."""
 
