@@ -201,7 +201,11 @@ class FakeLocator:
                 and len(self.page.selected_clip_indexes) == len(self.page.clip_names)
             )
         if self.kind == "empty_state":
-            return int(not self.page.clip_names and self.page.empty_state_available)
+            if self.page.empty_state_sequence:
+                self.page.last_empty_state = self.page.empty_state_sequence.pop(0)
+            else:
+                self.page.last_empty_state = self.page.empty_state_available
+            return int(not self.page.clip_names and self.page.last_empty_state)
         if self.kind in {"prompt", "composer", "generate", "bulk_download"}:
             return 1
         if self.kind == "missing":
@@ -213,6 +217,8 @@ class FakeLocator:
         raise AssertionError(f"count is unavailable for {self.kind}")
 
     def is_visible(self):
+        if self.kind == "empty_state":
+            return not self.page.clip_names and self.page.last_empty_state
         return self.count() == 1
 
     def wait_for(self, **_kwargs):
@@ -264,6 +270,7 @@ class FakePage:
         renamed_clip_names=None,
         agent_enabled_states=None,
         delete_requires_confirmation=False,
+        empty_state_sequence=None,
     ):
         self.url = "about:blank"
         self.progress_html = list(progress_html)
@@ -291,6 +298,8 @@ class FakePage:
         self.agent_enabled_states = list(agent_enabled_states or [False, True])
         self.delete_requires_confirmation = delete_requires_confirmation
         self.confirmation_pending = False
+        self.empty_state_sequence = list(empty_state_sequence or [])
+        self.last_empty_state = empty_state_available
         self._content_index = 0
 
     def goto(self, url, **kwargs):
@@ -524,19 +533,43 @@ def test_flow_workspace_preclean_confirms_observable_delete_dialog():
     assert page.clip_names == []
 
 
-def test_flow_workspace_preclean_blocks_generation_when_empty_state_is_unverifiable():
+def test_flow_workspace_preclean_blocks_generation_when_empty_state_is_unverifiable(
+    monkeypatch,
+):
     page = FakePage(
         progress_html=["<div>Ready</div>"],
         clip_names=[],
         empty_state_available=False,
     )
-    client, _ = _client(page)
+    client, _ = _client(page, timeout_seconds=1.0)
+    clock = [-0.5]
+
+    def monotonic():
+        clock[0] += 0.5
+        return clock[0]
+
+    monkeypatch.setattr(google_flow.time, "monotonic", monotonic)
+    monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
 
     with client.acquire_workspace(_job()) as workspace:
         with pytest.raises(FlowWorkspaceVerificationError, match="empty"):
             workspace.preclean_and_verify_empty()
 
     assert ("click", "generate") not in page.actions
+
+
+def test_flow_workspace_preclean_waits_for_observable_empty_state_after_reload():
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        clip_names=[],
+        empty_state_sequence=[False, True],
+    )
+    client, _ = _client(page)
+
+    with client.acquire_workspace(_job()) as workspace:
+        workspace.preclean_and_verify_empty()
+
+    assert page.empty_state_sequence == []
 
 
 def test_flow_workspace_renames_out_of_order_results_and_bulk_downloads_zip(
@@ -664,13 +697,21 @@ def test_flow_workspace_cleanup_reuses_delete_and_observable_empty_verification(
     assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
 
 
-def test_flow_workspace_cleanup_raises_when_zero_state_cannot_be_verified():
+def test_flow_workspace_cleanup_raises_when_zero_state_cannot_be_verified(monkeypatch):
     page = FakePage(
         progress_html=["<div>Ready</div>"],
         clip_names=["clip 1"],
         empty_state_available=False,
     )
-    client, _ = _client(page)
+    client, _ = _client(page, timeout_seconds=1.0)
+    clock = [-0.5]
+
+    def monotonic():
+        clock[0] += 0.5
+        return clock[0]
+
+    monkeypatch.setattr(google_flow.time, "monotonic", monotonic)
+    monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
 
     with client.acquire_workspace(_job()) as workspace:
         with pytest.raises(FlowWorkspaceVerificationError, match="empty"):
@@ -681,8 +722,13 @@ def test_google_flow_generation_timeout_is_bounded(monkeypatch, tmp_path):
     page = FakePage(progress_html=["<div>Generation progress 2 / 6</div>"])
     client, _ = _client(page, timeout_seconds=1.0)
     paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
-    clock = iter([0.0, 0.0, 0.5, 1.1])
-    monkeypatch.setattr(google_flow.time, "monotonic", lambda: next(clock))
+    clock = [-0.5]
+
+    def monotonic():
+        clock[0] += 0.5
+        return clock[0]
+
+    monkeypatch.setattr(google_flow.time, "monotonic", monotonic)
     monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
 
     with pytest.raises(MediaValidationError, match="timed out"):

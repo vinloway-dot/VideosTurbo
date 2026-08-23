@@ -86,15 +86,27 @@ class FlowWorkspaceRun:
             self._confirm_delete_or_wait_for_removal()
 
         self.page.reload(wait_until="domcontentloaded")
-        remaining = self.page.get_by_role("checkbox").count()
-        empty_state = self.page.get_by_text(
-            re.compile(r"^(?:start creating or drop media|เริ่มสร้างหรือวางสื่อ)$", re.IGNORECASE),
-            exact=True,
-        )
-        if remaining != 0 or empty_state.count() != 1 or not empty_state.is_visible():
-            raise FlowWorkspaceVerificationError(
-                "Google Flow empty product workspace could not be verified"
+        deadline = time.monotonic() + self.client.generation_timeout_seconds
+        while True:
+            remaining = self.page.get_by_role("checkbox").count()
+            empty_state = self.page.get_by_text(
+                re.compile(
+                    r"^(?:start creating or drop media|เริ่มสร้างหรือวางสื่อ)$",
+                    re.IGNORECASE,
+                ),
+                exact=True,
             )
+            if (
+                remaining == 0
+                and empty_state.count() == 1
+                and empty_state.is_visible()
+            ):
+                return
+            if time.monotonic() >= deadline:
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow empty product workspace could not be verified"
+                )
+            time.sleep(self.client.poll_seconds)
 
     def _confirm_delete_or_wait_for_removal(self) -> None:
         deadline = time.monotonic() + self.client.generation_timeout_seconds
