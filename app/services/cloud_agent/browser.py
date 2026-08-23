@@ -47,14 +47,22 @@ class PersistentBrowserManager:
         service: BrowserService,
         *,
         headed: bool | None = None,
+        lock_timeout_seconds: float | None = None,
     ) -> Iterator[Any]:
         """Open one service's dedicated persistent Chromium context under its lock."""
         profile_dir = self._profile_dir(service)
         headless = self._resolve_headless(headed)
+        effective_lock_timeout = (
+            self.lock_timeout_seconds
+            if lock_timeout_seconds is None
+            else float(lock_timeout_seconds)
+        )
+        if effective_lock_timeout < 0:
+            raise ValueError("lock_timeout_seconds must be non-negative")
 
         with self.profile_lock.acquire(
             service,
-            timeout_seconds=self.lock_timeout_seconds,
+            timeout_seconds=effective_lock_timeout,
         ):
             profile_dir.mkdir(parents=True, exist_ok=True)
             with self.playwright_factory() as playwright:

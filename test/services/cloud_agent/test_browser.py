@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -61,6 +62,16 @@ class FakePlaywrightStarter:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.exited = True
+
+
+class RecordingProfileLock:
+    def __init__(self):
+        self.calls = []
+
+    @contextmanager
+    def acquire(self, service, *, timeout_seconds):
+        self.calls.append((service, timeout_seconds))
+        yield
 
 
 def _settings(tmp_path):
@@ -156,6 +167,67 @@ def test_open_holds_same_service_profile_lock_for_context_lifetime(tmp_path):
                 pass
 
     assert second_chromium.launches == []
+
+
+def test_open_allows_production_timeout_without_changing_default(tmp_path):
+    chromium = FakeChromium()
+    starter = FakePlaywrightStarter(chromium)
+    profile_lock = RecordingProfileLock()
+    manager = PersistentBrowserManager(
+        app_config=_settings(tmp_path),
+        storage=CloudJobStorage(tmp_path / "jobs"),
+        profile_lock=profile_lock,
+        playwright_factory=lambda: starter,
+        lock_timeout_seconds=30.0,
+    )
+
+    with manager.open("google_flow"):
+        pass
+    with manager.open("google_flow", lock_timeout_seconds=1800.0):
+        pass
+
+    assert profile_lock.calls == [
+        ("google_flow", 30.0),
+        ("google_flow", 1800.0),
+    ]
+
+
+def test_open_rejects_negative_per_call_lock_timeout(tmp_path):
+    chromium = FakeChromium()
+    manager, _ = _manager(tmp_path, chromium)
+
+    with pytest.raises(ValueError, match="lock_timeout_seconds"):
+        with manager.open("google_flow", lock_timeout_seconds=-1):
+            pass
+
+    assert chromium.launches == []
+
+
+def test_second_production_open_waits_until_workspace_lock_is_released(tmp_path):
+    first_chromium = FakeChromium()
+    second_chromium = FakeChromium()
+    first, _ = _manager(tmp_path, first_chromium, timeout=0.2)
+    second, _ = _manager(tmp_path, second_chromium, timeout=0.05)
+    second_entered = threading.Event()
+    errors = []
+
+    def open_second():
+        try:
+            with second.open("google_flow", lock_timeout_seconds=1.0):
+                second_entered.set()
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    with first.open("google_flow"):
+        thread = threading.Thread(target=open_second)
+        thread.start()
+        assert not second_entered.wait(timeout=0.05)
+
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    assert errors == []
+    assert second_entered.is_set()
+    assert len(second_chromium.launches) == 1
 
 
 def test_capture_evidence_writes_job_owned_screenshot_and_html(tmp_path):
