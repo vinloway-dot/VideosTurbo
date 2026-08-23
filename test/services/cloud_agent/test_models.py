@@ -137,6 +137,16 @@ def test_cloud_job_record_accepts_persisted_adaptive_timing_values():
     assert record.target_final_duration_seconds == 63.25
 
 
+def test_cloud_job_record_has_restart_safe_flow_cleanup_state():
+    default_record = CloudJobRecord(**_valid_record())
+    unresolved_record = CloudJobRecord(
+        **_valid_record(flow_cleanup_unresolved=True)
+    )
+
+    assert default_record.flow_cleanup_unresolved is False
+    assert unresolved_record.flow_cleanup_unresolved is True
+
+
 def test_cloud_job_record_rejects_progress_outside_zero_to_one_hundred():
     with pytest.raises(ValidationError):
         CloudJobRecord(**_valid_record(progress=101))

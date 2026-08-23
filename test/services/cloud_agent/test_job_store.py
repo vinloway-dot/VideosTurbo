@@ -145,6 +145,15 @@ def test_pre_v22_database_is_migrated_without_losing_job(tmp_path):
     assert migrated.audio_duration_seconds == 0.0
     assert migrated.canva_playback_speed == 1.0
     assert migrated.target_final_duration_seconds == 60.0
+    assert migrated.flow_cleanup_unresolved is False
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(cloud_agent_jobs)"
+            ).fetchall()
+        }
+    assert "flow_cleanup_unresolved" in columns
 
     updated = store.patch_job(
         migrated.id,
@@ -162,6 +171,34 @@ def test_pre_v22_database_is_migrated_without_losing_job(tmp_path):
     assert reopened.audio_duration_seconds == pytest.approx(63.25)
     assert reopened.canva_playback_speed == pytest.approx(60.0 / 63.25)
     assert reopened.target_final_duration_seconds == pytest.approx(63.25)
+
+
+def test_flow_ready_and_unresolved_cleanup_are_persisted_together(tmp_path):
+    db_path = tmp_path / "agent.sqlite3"
+    store = CloudJobStore(str(db_path))
+    created = store.create_job(_request())
+
+    updated = store.patch_job(
+        created.id,
+        status=CloudJobStatus.FLOW_READY,
+        checkpoint=CloudJobCheckpoint.FLOW_READY,
+        current_step="flow_ready",
+        progress=60,
+        flow_cleanup_unresolved=True,
+    )
+
+    assert updated.flow_cleanup_unresolved is True
+    reopened = CloudJobStore(str(db_path)).get_job(created.id)
+    assert reopened is not None
+    assert reopened.status is CloudJobStatus.FLOW_READY
+    assert reopened.checkpoint is CloudJobCheckpoint.FLOW_READY
+    assert reopened.current_step == "flow_ready"
+    assert reopened.progress == 60
+    assert reopened.flow_cleanup_unresolved is True
+
+    resolved = store.patch_job(created.id, flow_cleanup_unresolved=False)
+    assert resolved.flow_cleanup_unresolved is False
+    assert resolved.checkpoint is CloudJobCheckpoint.FLOW_READY
 
 
 def test_list_jobs_is_newest_first_and_supports_pagination(tmp_path):
