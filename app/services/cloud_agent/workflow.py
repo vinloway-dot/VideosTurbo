@@ -314,6 +314,7 @@ class CloudAgentWorkflow:
                         generated = workspace.reconcile_and_download(job, paths)
                     else:
                         workspace.prepare_for_generation()
+                        workspace.prepare_agent_prompt(job.master_prompt)
                         job = self.store.patch_job(
                             job.id,
                             status=CloudJobStatus.FLOW_GENERATING,
@@ -322,7 +323,10 @@ class CloudAgentWorkflow:
                             progress=35,
                             flow_generation_unresolved=True,
                         )
-                        generated = workspace.generate_and_download(job, paths)
+                        generated = workspace.submit_prepared_generation_and_download(
+                            job,
+                            paths,
+                        )
                     if len(generated) != 6:
                         raise MediaValidationError(
                             f"Flow step must produce exactly six clips; got {len(generated)}"

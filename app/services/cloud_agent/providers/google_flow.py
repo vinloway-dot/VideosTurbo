@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -25,6 +26,16 @@ from app.services.cloud_agent.storage import JobPaths
 
 _PROGRESS_RE = re.compile(r"\b(\d+)\s*/\s*(\d+)\b")
 RENAME_CLIPS_INSTRUCTION = "เปลี่ยนชื่อคลิปตามลำดับ ของวีดีโอ"
+
+
+@dataclass(frozen=True)
+class AgentComposer:
+    """One observable, active Flow Agent composer and its submit control."""
+
+    agent: Any
+    container: Any
+    prompt: Any
+    generate: Any
 
 
 def classify_google_flow_session(*, url: str, html: str) -> ServiceSessionStatus:
@@ -69,6 +80,7 @@ class FlowWorkspaceRun:
     def __init__(self, client: GoogleFlowClient, page: Any) -> None:
         self.client = client
         self.page = page
+        self._prepared_master_prompt = ""
 
     def preclean_and_verify_empty(self) -> None:
         checkboxes = self.page.get_by_role("checkbox")
@@ -128,6 +140,30 @@ class FlowWorkspaceRun:
             raise ValueError("Google Flow workspace requires exactly six clips")
 
         self.client._submit_generation(self.page, job.master_prompt)
+        self.client._wait_for_generation(self.page, expected_count)
+        return self._rename_download_and_materialize(paths, expected_count)
+
+    def prepare_agent_prompt(self, master_prompt: str) -> AgentComposer:
+        prepared = self.client._prepare_agent_prompt(self.page, master_prompt)
+        self._prepared_master_prompt = master_prompt
+        return prepared
+
+    def submit_prepared_generation_and_download(
+        self,
+        job: CloudJobRecord,
+        paths: JobPaths,
+        expected_count: int = 6,
+    ) -> tuple[Path, ...]:
+        if expected_count != 6:
+            raise ValueError("Google Flow workspace requires exactly six clips")
+        if self._prepared_master_prompt != job.master_prompt:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow prepared Agent prompt could not be verified"
+            )
+        self.client._submit_prepared_agent_prompt(
+            self.page,
+            self._prepared_master_prompt,
+        )
         self.client._wait_for_generation(self.page, expected_count)
         return self._rename_download_and_materialize(paths, expected_count)
 
@@ -274,6 +310,101 @@ class GoogleFlowClient:
             "xpath=ancestor::div[.//textarea or .//*[@contenteditable='true']][1]"
         ).locator("textarea:visible, [contenteditable='true']:visible")
 
+    @staticmethod
+    def _agent_control(page: Any) -> Any:
+        agent = page.get_by_role("button", name="Agent", exact=True)
+        if not (
+            agent.count() == 1
+            and agent.is_visible()
+            and agent.is_enabled()
+        ):
+            raise FlowWorkspaceVerificationError(
+                "Google Flow Agent control could not be verified"
+            )
+        return agent
+
+    @classmethod
+    def _active_agent_composer(cls, page: Any) -> AgentComposer:
+        try:
+            agent = cls._agent_control(page)
+            if agent.get_attribute("aria-pressed") != "true":
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow Agent state is not active"
+                )
+            container = agent.locator(
+                "xpath=ancestor::div[.//textarea or "
+                ".//*[@contenteditable='true']][1]"
+            )
+            if not (container.count() == 1 and container.is_visible()):
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow active Agent composer could not be verified"
+                )
+            prompt = container.locator(
+                "textarea:visible, [contenteditable='true']:visible"
+            )
+            if not (prompt.count() == 1 and prompt.is_visible()):
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow active Agent prompt could not be verified"
+                )
+            generate = container.get_by_role(
+                "button",
+                name=re.compile(
+                    r"^(?:generate|arrow_forward\s+(?:generate|สร้าง))$",
+                    re.IGNORECASE,
+                ),
+            )
+            if not (generate.count() == 1 and generate.is_visible()):
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow active Agent submit control could not be verified"
+                )
+            return AgentComposer(
+                agent=agent,
+                container=container,
+                prompt=prompt,
+                generate=generate,
+            )
+        except PlaywrightError as exc:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow Agent state could not be verified"
+            ) from exc
+
+    def _ensure_agent_active(self, page: Any) -> AgentComposer:
+        """Return a verified Agent composer without toggling an active Agent off."""
+        try:
+            agent = self._agent_control(page)
+            state = agent.get_attribute("aria-pressed")
+        except PlaywrightError as exc:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow Agent state could not be verified"
+            ) from exc
+
+        if state == "true":
+            return self._active_agent_composer(page)
+        if state != "false":
+            raise FlowWorkspaceVerificationError(
+                "Google Flow Agent state is unknown"
+            )
+
+        agent.click()
+        deadline = time.monotonic() + self.editor_ready_timeout_seconds
+        while True:
+            try:
+                return self._active_agent_composer(page)
+            except FlowWorkspaceVerificationError:
+                pass
+            if time.monotonic() >= deadline:
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow Agent activation could not be verified"
+                )
+            time.sleep(self.poll_seconds)
+
+    @staticmethod
+    def _prompt_value(prompt: Any) -> str:
+        try:
+            return str(prompt.input_value())
+        except (AttributeError, PlaywrightError):
+            return str(prompt.inner_text())
+
     def _is_editor_actionable(self, page: Any) -> bool:
         try:
             if page.evaluate("document.readyState") != "complete":
@@ -361,45 +492,29 @@ class GoogleFlowClient:
     def _submit_generation(self, page: Any, master_prompt: str) -> None:
         self._submit_agent_prompt(page, master_prompt)
 
-    @staticmethod
-    def _submit_agent_prompt(page: Any, prompt_text: str) -> Any:
-        agent = page.get_by_role(
-            "button",
-            name=re.compile(r"^\s*agent\s*$", re.IGNORECASE),
-        )
-        if agent.count() != 1:
-            raise FlowWorkspaceVerificationError(
-                "Google Flow Agent control could not be verified"
-            )
-        agent.click()
+    def _prepare_agent_prompt(self, page: Any, prompt_text: str) -> AgentComposer:
+        composer = self._ensure_agent_active(page)
+        composer.prompt.fill(prompt_text)
 
-        prompt = page.get_by_label(re.compile(r"prompt", re.IGNORECASE))
-        if prompt.count() != 1:
-            composer = agent.locator(
-                "xpath=ancestor::div[.//textarea or .//*[@contenteditable='true']][1]"
-            )
-            prompt = composer.locator(
-                "textarea:visible, [contenteditable='true']:visible"
-            )
-        if prompt.count() != 1:
+        verified = self._active_agent_composer(page)
+        if self._prompt_value(verified.prompt) != prompt_text:
             raise FlowWorkspaceVerificationError(
-                "Google Flow Agent prompt could not be verified"
+                "Google Flow active Agent prompt value could not be verified"
             )
-        prompt.fill(prompt_text)
+        return verified
 
-        send = page.get_by_role(
-            "button",
-            name=re.compile(
-                r"^(?:generate|arrow_forward\s+(?:generate|สร้าง))$",
-                re.IGNORECASE,
-            ),
-        )
-        if send.count() != 1:
+    def _submit_prepared_agent_prompt(self, page: Any, prompt_text: str) -> Any:
+        verified = self._active_agent_composer(page)
+        if self._prompt_value(verified.prompt) != prompt_text:
             raise FlowWorkspaceVerificationError(
-                "Google Flow Agent submit control could not be verified"
+                "Google Flow active Agent prompt value could not be verified"
             )
-        send.click()
-        return send
+        verified.generate.click()
+        return verified.generate
+
+    def _submit_agent_prompt(self, page: Any, prompt_text: str) -> Any:
+        self._prepare_agent_prompt(page, prompt_text)
+        return self._submit_prepared_agent_prompt(page, prompt_text)
 
     def _wait_for_agent_completion(self, send: Any) -> None:
         deadline = time.monotonic() + self.generation_timeout_seconds

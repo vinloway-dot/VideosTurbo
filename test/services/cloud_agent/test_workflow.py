@@ -95,6 +95,16 @@ class RecordingFlow:
             def prepare_for_generation(self):
                 return None
 
+            def prepare_agent_prompt(self, master_prompt):
+                assert master_prompt == job.master_prompt
+
+            def submit_prepared_generation_and_download(
+                self, current_job, paths, expected_count=6
+            ):
+                return self.generate_and_download(
+                    current_job, paths, expected_count=expected_count
+                )
+
             def generate_and_download(self, current_job, paths, expected_count=6):
                 assert current_job.id == job.id
                 assert expected_count == 6
@@ -129,6 +139,7 @@ class RecordingWorkspace:
         self.events = events
         self.cleanup_error = cleanup_error
         self.prepare_calls = 0
+        self.agent_prepare_calls = 0
         self.generate_calls = []
         self.reconcile_calls = []
         self.cleanup_calls = 0
@@ -138,6 +149,13 @@ class RecordingWorkspace:
     def prepare_for_generation(self):
         self.prepare_calls += 1
         self.events.append("prepare")
+
+    def prepare_agent_prompt(self, master_prompt):
+        self.agent_prepare_calls += 1
+        self.events.append(("agent_prepare", master_prompt))
+
+    def submit_prepared_generation_and_download(self, job, paths, expected_count=6):
+        return self.generate_and_download(job, paths, expected_count=expected_count)
 
     def generate_and_download(self, job, paths, expected_count=6):
         current = self.store.get_job(job.id)
@@ -221,6 +239,7 @@ class FenceWorkspace:
         prepare_error=None,
         generate_error=None,
         reconcile_error=None,
+        agent_prepare_error=None,
         crash_before_generate=False,
         crash_after_generate=False,
     ):
@@ -229,6 +248,7 @@ class FenceWorkspace:
         self.prepare_error = prepare_error
         self.generate_error = generate_error
         self.reconcile_error = reconcile_error
+        self.agent_prepare_error = agent_prepare_error
         self.crash_before_generate = crash_before_generate
         self.crash_after_generate = crash_after_generate
         self.generate_calls = 0
@@ -238,6 +258,14 @@ class FenceWorkspace:
         self.events.append("prepare")
         if self.prepare_error is not None:
             raise self.prepare_error
+
+    def prepare_agent_prompt(self, master_prompt):
+        self.events.append(("agent_prepare", master_prompt))
+        if self.agent_prepare_error is not None:
+            raise self.agent_prepare_error
+
+    def submit_prepared_generation_and_download(self, job, paths, expected_count=6):
+        return self.generate_and_download(job, paths, expected_count=expected_count)
 
     def generate_and_download(self, job, paths, expected_count=6):
         current = self.store.get_job(job.id)
@@ -494,6 +522,7 @@ def test_generation_fence_precedes_submit_and_flow_ready_commit_is_atomic(
     assert events == [
         "workspace_enter",
         "prepare",
+        ("agent_prepare", job.master_prompt),
         ("generate", CloudJobCheckpoint.TTS_READY, True),
         ("cleanup", CloudJobCheckpoint.FLOW_READY, False, True),
         "workspace_exit",
@@ -574,6 +603,44 @@ def test_flow_workspace_error_before_paid_fence_fails_without_reconciliation_sta
     assert result.checkpoint is CloudJobCheckpoint.TTS_READY
     assert result.flow_generation_unresolved is False
     assert result.error_code == "FLOW_WORKSPACE_VERIFICATION_FAILED"
+    assert workspace.generate_calls == 0
+    assert workspace.reconcile_calls == 0
+
+
+def test_agent_activation_failure_before_paid_fence_does_not_set_generation_fence(
+    monkeypatch,
+    tmp_path,
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    events = []
+    workspace = FenceWorkspace(
+        store,
+        events,
+        agent_prepare_error=FlowWorkspaceVerificationError(
+            "Agent activation could not be verified"
+        ),
+    )
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        flow=FenceFlow(workspace, events),
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert result.status is CloudJobStatus.FAILED
+    assert result.checkpoint is CloudJobCheckpoint.TTS_READY
+    assert result.flow_generation_unresolved is False
+    assert result.error_code == "FLOW_WORKSPACE_VERIFICATION_FAILED"
+    assert events == [
+        "workspace_enter",
+        "prepare",
+        ("agent_prepare", _request().master_prompt),
+        "workspace_exit",
+    ]
     assert workspace.generate_calls == 0
     assert workspace.reconcile_calls == 0
 

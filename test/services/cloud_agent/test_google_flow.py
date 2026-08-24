@@ -141,6 +141,17 @@ class FakeLocator:
         self.index = index
 
     def click(self):
+        if self.kind == "agent":
+            self.page.agent_click_count += 1
+            self.page.actions.append(("click", "agent"))
+            if self.page.agent_pressed is True:
+                self.page.agent_pressed = False
+            elif self.page.agent_pressed is False:
+                if self.page.agent_activation_delay_reads:
+                    self.page.agent_activation_pending = True
+                else:
+                    self.page.agent_pressed = True
+            return
         if self.kind == "launch":
             self.page.landing = False
             self.page.actions.append(("click", "launch"))
@@ -165,6 +176,7 @@ class FakeLocator:
             return
         if self.kind == "generate":
             self.page.actions.append(("click", "generate"))
+            self.page.generate_clicked = True
             if self.page.last_filled == google_flow.RENAME_CLIPS_INSTRUCTION:
                 self.page.pending_clip_names = list(self.page.renamed_clip_names)
             elif self.page.generation_completion_names is not None:
@@ -188,7 +200,10 @@ class FakeLocator:
 
     def fill(self, value):
         self.page.actions.append(("fill", self.kind, value))
+        self.page.fill_agent_pressed_states.append(self.page.agent_pressed)
         self.page.last_filled = value
+        if self.page.agent_deactivates_on_prompt_fill:
+            self.page.agent_pressed = False
 
     def count(self):
         if self.kind == "downloads":
@@ -211,7 +226,16 @@ class FakeLocator:
             else:
                 self.page.last_empty_state = self.page.empty_state_available
             return int(not self.page.clip_names and self.page.last_empty_state)
-        if self.kind in {"prompt", "composer", "generate", "bulk_download"}:
+        if self.kind in {
+            "prompt",
+            "default_prompt",
+            "multiple_prompt",
+            "composer",
+            "generate",
+            "bulk_download",
+        }:
+            if self.kind == "multiple_prompt":
+                return self.page.agent_prompt_count
             return 1
         if self.kind == "media_control":
             return int(self.page.media_control_available)
@@ -247,15 +271,39 @@ class FakeLocator:
             raise AssertionError(f"{self.kind} did not become visible")
 
     def is_enabled(self):
+        if self.kind == "generate" and not self.page.generate_clicked:
+            return self.page.generate_available
         if self.kind == "generate" and self.page.agent_enabled_states:
             return self.page.agent_enabled_states.pop(0)
         return self.page.agent_ready
+
+    def get_attribute(self, name):
+        if self.kind == "agent" and name == "aria-pressed":
+            if self.page.agent_activation_pending:
+                if self.page.agent_activation_delay_reads:
+                    self.page.agent_activation_delay_reads -= 1
+                    return "false"
+                self.page.agent_activation_pending = False
+                self.page.agent_pressed = True
+            if self.page.agent_pressed is None:
+                return None
+            return str(self.page.agent_pressed).lower()
+        return None
+
+    def input_value(self):
+        assert self.kind in {"prompt", "default_prompt", "multiple_prompt"}
+        return self.page.last_filled
 
     def locator(self, selector):
         if self.kind == "agent" and str(selector).startswith("xpath="):
             return FakeLocator(self.page, "composer")
         if self.kind == "composer" and "textarea" in str(selector):
-            return FakeLocator(self.page, "prompt")
+            prompt_kind = (
+                "multiple_prompt"
+                if self.page.agent_prompt_count != 1
+                else "prompt"
+            )
+            return FakeLocator(self.page, prompt_kind)
         if self.kind == "media_list" and "role=\"button\"" in str(selector):
             return FakeLocator(self.page, "inventory_cards")
         raise AssertionError(f"unexpected nested locator: {self.kind} {selector}")
@@ -263,6 +311,8 @@ class FakeLocator:
     def get_by_role(self, role, *, name=None, exact=None):
         del exact
         pattern = getattr(name, "pattern", str(name)).lower()
+        if self.kind == "composer" and role == "button" and "generate" in pattern:
+            return FakeLocator(self.page, "generate")
         if self.kind == "dialog" and role == "button" and (
             "delete" in pattern or "ลบ" in pattern
         ):
@@ -302,6 +352,12 @@ class FakePage:
         busy=False,
         progressbar=False,
         evaluate_errors=None,
+        agent_pressed=True,
+        agent_activation_delay_reads=0,
+        agent_prompt_count=1,
+        default_prompt_visible=False,
+        agent_deactivates_on_prompt_fill=False,
+        generate_available=True,
     ):
         self.url = "about:blank"
         self.progress_html = list(progress_html)
@@ -343,6 +399,16 @@ class FakePage:
         self.busy = busy
         self.progressbar = progressbar
         self.evaluate_errors = list(evaluate_errors or [])
+        self.agent_pressed = agent_pressed
+        self.agent_activation_delay_reads = agent_activation_delay_reads
+        self.agent_activation_pending = False
+        self.agent_prompt_count = agent_prompt_count
+        self.default_prompt_visible = default_prompt_visible
+        self.agent_deactivates_on_prompt_fill = agent_deactivates_on_prompt_fill
+        self.generate_available = generate_available
+        self.generate_clicked = False
+        self.agent_click_count = 0
+        self.fill_agent_pressed_states = []
         self._content_index = 0
 
     def goto(self, url, **kwargs):
@@ -413,7 +479,13 @@ class FakePage:
         assert "prompt" in str(name).lower()
         return FakeLocator(
             self,
-            "prompt" if self.prompt_label_available else "missing",
+            (
+                "default_prompt"
+                if self.default_prompt_visible
+                else "prompt"
+                if self.prompt_label_available
+                else "missing"
+            ),
         )
 
     def expect_download(self):
@@ -949,6 +1021,129 @@ def test_google_flow_agent_prompt_uses_observable_composer_when_locale_has_no_pr
 
     assert ("fill", "prompt", _job().master_prompt) in page.actions
     assert ("click", "generate") in page.actions
+
+
+def test_ensure_agent_active_clicks_an_inactive_toggle_once_and_returns_composer():
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        agent_pressed=False,
+    )
+    client, _ = _client(page)
+
+    composer = client._ensure_agent_active(page)
+
+    assert page.agent_click_count == 1
+    assert page.agent_pressed is True
+    assert composer.prompt.kind == "prompt"
+
+
+def test_ensure_agent_active_does_not_toggle_an_already_active_agent_twice():
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        agent_pressed=True,
+    )
+    client, _ = _client(page)
+
+    first = client._ensure_agent_active(page)
+    second = client._ensure_agent_active(page)
+
+    assert first.prompt.kind == "prompt"
+    assert second.prompt.kind == "prompt"
+    assert page.agent_click_count == 0
+    assert page.agent_pressed is True
+
+
+def test_ensure_agent_active_fails_closed_for_unknown_toggle_state():
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        agent_pressed=None,
+    )
+    client, _ = _client(page)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="Agent state"):
+        client._ensure_agent_active(page)
+
+    assert page.agent_click_count == 0
+    assert not any(action[0] == "fill" for action in page.actions)
+    assert ("click", "generate") not in page.actions
+
+
+def test_google_flow_submit_waits_for_delayed_agent_activation_before_prompt_fill():
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        agent_pressed=False,
+        agent_activation_delay_reads=2,
+    )
+    client, _ = _client(page)
+
+    client._submit_generation(page, _job().master_prompt)
+
+    assert page.agent_click_count == 1
+    assert page.fill_agent_pressed_states == [True]
+    assert ("click", "generate") in page.actions
+
+
+def test_google_flow_submit_fails_before_fill_when_agent_never_activates(monkeypatch):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        agent_pressed=False,
+        agent_activation_delay_reads=99,
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=1.0)
+    clock = iter([0.0, 1.1])
+    monkeypatch.setattr(google_flow.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="Agent activation"):
+        client._submit_generation(page, _job().master_prompt)
+
+    assert page.agent_click_count == 1
+    assert not any(action[0] == "fill" for action in page.actions)
+    assert ("click", "generate") not in page.actions
+
+
+def test_google_flow_submit_never_fills_default_image_prompt_when_agent_composer_exists():
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        agent_pressed=True,
+        default_prompt_visible=True,
+    )
+    client, _ = _client(page)
+
+    client._submit_generation(page, _job().master_prompt)
+
+    assert ("fill", "prompt", _job().master_prompt) in page.actions
+    assert ("fill", "default_prompt", _job().master_prompt) not in page.actions
+
+
+def test_google_flow_submit_rejects_multiple_prompt_fields_in_agent_container():
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        agent_pressed=True,
+        agent_prompt_count=2,
+    )
+    client, _ = _client(page)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="Agent prompt"):
+        client._submit_generation(page, _job().master_prompt)
+
+    assert not any(action[0] == "fill" for action in page.actions)
+    assert ("click", "generate") not in page.actions
+
+
+def test_google_flow_submit_aborts_when_agent_turns_inactive_after_prompt_fill():
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        agent_pressed=True,
+        agent_deactivates_on_prompt_fill=True,
+    )
+    client, _ = _client(page)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="Agent state"):
+        client._submit_generation(page, _job().master_prompt)
+
+    assert ("fill", "prompt", _job().master_prompt) in page.actions
+    assert ("click", "generate") not in page.actions
 
 
 def test_flow_workspace_cleanup_reuses_delete_and_observable_empty_verification():

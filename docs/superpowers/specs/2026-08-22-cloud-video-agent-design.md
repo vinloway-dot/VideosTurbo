@@ -1,7 +1,7 @@
 # VideosTurbo Cloud Video Agent Design
 
-> **Status:** Design Spec v2.4 — Adaptive Six-Clip + durable paid Google Flow generation fence.
-> **Implementation gate:** Production Google Flow work remains paused until the v2.4 RED→GREEN implementation, live-job remediation, full verification, and CI are complete. This document authorizes no paid Flow/TTS operation and does not authorize restarting the production Worker.
+> **Status:** Design Spec v2.5 — Adaptive Six-Clip + durable paid Google Flow generation fence + idempotent Agent activation.
+> **Implementation gate:** Production Google Flow work remains paused until the v2.5 RED→GREEN implementation, full verification, and CI are complete. This document authorizes no paid Flow/TTS operation and does not authorize restarting the production Worker.
 
 ## 1. Goal
 
@@ -31,6 +31,7 @@ Start Auto Production
 → calculate required Canva playback speed
 → reject before Flow if speed would exceed the configured safety policy
 → recover valid local Flow artifacts or exclusively pre-clean the dedicated Flow project
+→ observably ensure the stateful Flow Agent composer is active
 → durably fence the paid Flow side effect before Generate can be clicked
 → Google Flow generates, semantically renames, and bulk-downloads six clips when recovery is unavailable
 → atomically clear the paid-generation fence and persist FLOW_READY before remote Flow cleanup
@@ -240,6 +241,74 @@ error_code=FLOW_GENERATION_RECONCILIATION_REQUIRED
 ```
 
 The remediation preserves the canonical audio, measured timing, remote assets, browser profile, and locks. It performs no pre-clean, delete, Generate, TTS, rename, download, or cleanup action. The Worker remains stopped after remediation; a later restart or paid retry requires a separate explicit gate.
+
+### 3.11 v2.5 Google Flow Agent activation and prompt-ownership contract
+
+Google Flow's project composer has a persistent, stateful Agent toggle. On the
+approved production project, the observable Agent control has accessible name
+`Agent` and exposes its state through `aria-pressed`:
+
+```text
+aria-pressed=true  -> Agent active
+aria-pressed=false -> default non-Agent/Image composer state
+```
+
+Read-only live discovery proved that clicking the control toggles the state in
+both directions and that `aria-pressed=true` persists across a project reload.
+The prompt-like field and Generate control remain visible inside the same
+container in both states. Their presence alone therefore does not prove Agent
+ownership. Default Image state can otherwise submit a request through the same
+visible composer.
+
+`GoogleFlowClient` must expose an idempotent, fail-closed preparation operation:
+
+```python
+ensure_agent_active(page) -> AgentComposer
+```
+
+The returned value represents the single verified Agent container and its one
+visible prompt field. It is valid only when all of the following are observable:
+
+- exactly one visible `Agent` control exists;
+- its `aria-pressed` value is exactly `"true"`;
+- exactly one visible prompt-like field belongs to the Agent container; and
+- exactly one Generate control belongs to that same container.
+
+The operation has three cases:
+
+```text
+already active -> do not click; return verified AgentComposer
+inactive       -> click once; poll until the complete active contract is true;
+                  then return AgentComposer
+unknown        -> do not click, do not fill, do not Generate; raise
+                  FlowWorkspaceVerificationError
+```
+
+Calling it repeatedly must leave Agent active without a second toggle click.
+Activation may be asynchronous, so prompt fill is forbidden until the active
+contract is observable. A missing/ambiguous/invalid `aria-pressed` value is
+unknown, not inactive.
+
+Paid prompt submission must use only the returned `AgentComposer`, never a
+global `page.get_by_label(/prompt/)` lookup. The provider verifies Agent state
+and composer ownership before fill, verifies the exact master prompt is present
+in that field after fill, then verifies Agent state and the same ownership
+immediately before the paid Generate click. Any failure raises
+`FlowWorkspaceVerificationError` before the click.
+
+The durable generation fence is unchanged. For a fresh job, safe non-paid
+workspace preparation and Agent/composer preparation occur before the fence.
+The workflow persists `status=FLOW_GENERATING`, `checkpoint=TTS_READY`, and
+`flow_generation_unresolved=true` before the provider is allowed to perform the
+final Agent re-check and Generate click. If that final re-check fails, no click
+occurs and the conservative fence remains set. A fenced `TTS_READY` job remains
+reconciliation-only: it must never enter fresh Agent activation, pre-clean, or
+Generate paths.
+
+The existing production job `c604f5d5-c206-4d49-bad2-cac59e2815a2` remains
+`HUMAN_REQUIRED / TTS_READY / flow_generation_unresolved=true`. Its canonical
+audio and two remote image assets are preserved as evidence and are not used to
+test or remediate this contract.
 
 ## 4. Runtime architecture
 
