@@ -4,6 +4,7 @@ import re
 from types import SimpleNamespace
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
 
 from app.models.cloud_agent import ServiceSessionStatus
 from app.services.cloud_agent.errors import (
@@ -300,6 +301,7 @@ class FakePage:
         inventory_sequence=None,
         busy=False,
         progressbar=False,
+        evaluate_errors=None,
     ):
         self.url = "about:blank"
         self.progress_html = list(progress_html)
@@ -340,6 +342,7 @@ class FakePage:
         self.last_inventory_count = self.inventory_sequence[0]
         self.busy = busy
         self.progressbar = progressbar
+        self.evaluate_errors = list(evaluate_errors or [])
         self._content_index = 0
 
     def goto(self, url, **kwargs):
@@ -360,6 +363,8 @@ class FakePage:
 
     def evaluate(self, expression):
         assert expression == "document.readyState"
+        if self.evaluate_errors:
+            raise self.evaluate_errors.pop(0)
         return "complete" if self.document_ready else "interactive"
 
     def locator(self, selector):
@@ -572,6 +577,21 @@ def test_google_flow_editor_readiness_timeout_is_independent_from_generation(
     with pytest.raises(FlowWorkspaceVerificationError, match="project editor"):
         with client.acquire_workspace(_job()):
             pass
+
+
+def test_google_flow_editor_readiness_retries_destroyed_navigation_context():
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        evaluate_errors=[
+            PlaywrightError(
+                "Page.evaluate: Execution context was destroyed, most likely because of a navigation"
+            )
+        ],
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=1.0)
+
+    with client.acquire_workspace(_job()) as workspace:
+        assert workspace.page is page
 
 
 def test_flow_workspace_transient_empty_inventory_cannot_pass_generation_gate(

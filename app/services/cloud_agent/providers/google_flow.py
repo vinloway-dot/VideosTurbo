@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+from playwright.sync_api import Error as PlaywrightError
+
 from app.models.cloud_agent import CloudJobRecord, ServiceSessionStatus
 from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
@@ -273,31 +275,34 @@ class GoogleFlowClient:
         ).locator("textarea:visible, [contenteditable='true']:visible")
 
     def _is_editor_actionable(self, page: Any) -> bool:
-        if page.evaluate("document.readyState") != "complete":
+        try:
+            if page.evaluate("document.readyState") != "complete":
+                return False
+            agent = page.get_by_role("button", name="Agent", exact=True)
+            if not (
+                agent.count() == 1
+                and agent.is_visible()
+                and agent.is_enabled()
+            ):
+                return False
+            composer = self._observable_composer(agent)
+            if not (composer.count() == 1 and composer.is_visible()):
+                return False
+            media = page.get_by_role(
+                "button",
+                name=re.compile(r"(?:all media|สื่อทั้งหมด)", re.IGNORECASE),
+            )
+            media_list = page.locator('[data-testid="virtuoso-item-list"]:visible')
+            return (
+                media.count() == 1
+                and media.is_visible()
+                and media_list.count() == 1
+                and media_list.is_visible()
+                and page.locator('[aria-busy="true"]:visible').count() == 0
+                and page.get_by_role("progressbar").count() == 0
+            )
+        except PlaywrightError:
             return False
-        agent = page.get_by_role("button", name="Agent", exact=True)
-        if not (
-            agent.count() == 1
-            and agent.is_visible()
-            and agent.is_enabled()
-        ):
-            return False
-        composer = self._observable_composer(agent)
-        if not (composer.count() == 1 and composer.is_visible()):
-            return False
-        media = page.get_by_role(
-            "button",
-            name=re.compile(r"(?:all media|สื่อทั้งหมด)", re.IGNORECASE),
-        )
-        media_list = page.locator('[data-testid="virtuoso-item-list"]:visible')
-        return (
-            media.count() == 1
-            and media.is_visible()
-            and media_list.count() == 1
-            and media_list.is_visible()
-            and page.locator('[aria-busy="true"]:visible').count() == 0
-            and page.get_by_role("progressbar").count() == 0
-        )
 
     def _wait_for_settled_editor(self, page: Any) -> None:
         deadline = time.monotonic() + self.editor_ready_timeout_seconds
