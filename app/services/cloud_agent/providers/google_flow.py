@@ -29,6 +29,18 @@ _GENERATED_IMAGE_ALT_RE = re.compile(
     r"^(?:generated image|รูปภาพที่สร้างขึ้น)$",
     re.IGNORECASE,
 )
+_MEDIA_CARD_SELECTOR = (
+    '[data-testid="virtuoso-item-list"]:visible '
+    '[role="button"][tabindex="0"]'
+)
+_CARD_DELETE_NAME_RE = re.compile(
+    r"(?:delete\s+)?(?:move to trash|ย้ายลงถังขยะ)",
+    re.IGNORECASE,
+)
+_EMPTY_MEDIA_NAME_RE = re.compile(
+    r"(?:start creating or add media|เริ่มสร้างหรือวางสื่อ)",
+    re.IGNORECASE,
+)
 RENAME_CLIPS_INSTRUCTION = "เปลี่ยนชื่อคลิปตามลำดับ ของวีดีโอ"
 
 
@@ -87,21 +99,8 @@ class FlowWorkspaceRun:
         self._prepared_master_prompt = ""
 
     def preclean_and_verify_empty(self) -> None:
-        checkboxes = self.page.get_by_role("checkbox")
-        clip_count = checkboxes.count()
-        if clip_count:
-            for index in range(clip_count):
-                checkboxes.nth(index).check()
-            delete = self.page.get_by_role(
-                "button",
-                name=re.compile(r"^(?:delete|ลบ|delete\s+ลบ)$", re.IGNORECASE),
-            )
-            if delete.count() != 1:
-                raise FlowWorkspaceVerificationError(
-                    "Google Flow stale product clips could not be deleted reliably"
-                )
-            delete.click()
-            self._confirm_delete_or_wait_for_removal()
+        while self.client._media_card_count(self.page):
+            self._delete_one_current_media_card()
 
         self.page.reload(wait_until="domcontentloaded")
         self.client._wait_for_stable_inventory(self.page, expected_count=0)
@@ -109,21 +108,43 @@ class FlowWorkspaceRun:
     def prepare_for_generation(self) -> None:
         self.preclean_and_verify_empty()
 
-    def _confirm_delete_or_wait_for_removal(self) -> None:
-        deadline = time.monotonic() + self.client.generation_timeout_seconds
+    def _delete_one_current_media_card(self) -> None:
+        previous_count = self.client._media_card_count(self.page)
+        card = self.client._media_cards(self.page).nth(0)
+        if not card.is_visible():
+            raise FlowWorkspaceVerificationError(
+                "Google Flow stale product card could not be selected reliably"
+            )
+        card.click()
+
+        deadline = time.monotonic() + self.client.editor_ready_timeout_seconds
+        while True:
+            delete = self.page.get_by_role("button", name=_CARD_DELETE_NAME_RE)
+            if delete.count() == 1 and delete.is_visible() and delete.is_enabled():
+                delete.click()
+                self._confirm_delete_or_wait_for_removal(previous_count)
+                return
+            if time.monotonic() >= deadline:
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow stale product card could not be deleted reliably"
+                )
+            time.sleep(self.client.poll_seconds)
+
+    def _confirm_delete_or_wait_for_removal(self, previous_count: int) -> None:
+        deadline = time.monotonic() + self.client.editor_ready_timeout_seconds
         while True:
             dialog = self.page.get_by_role("dialog")
             if dialog.count() == 1:
                 confirm = dialog.get_by_role(
                     "button",
-                    name=re.compile(r"^(?:delete|ลบ|delete\s+ลบ)$", re.IGNORECASE),
+                    name=_CARD_DELETE_NAME_RE,
                 )
                 if confirm.count() != 1:
                     raise FlowWorkspaceVerificationError(
                         "Google Flow delete confirmation could not be verified"
-                    )
+                )
                 confirm.click()
-            if self.page.get_by_role("checkbox").count() == 0:
+            if self.client._media_card_count(self.page) < previous_count:
                 return
             if time.monotonic() >= deadline:
                 raise FlowWorkspaceVerificationError(
@@ -300,7 +321,7 @@ class GoogleFlowClient:
         self.sessions.ensure_service_ready("google_flow", job.id)
         with self.browser.open(
             "google_flow",
-            headed=False,
+            headed=None,
             lock_timeout_seconds=self.workspace_lock_timeout_seconds,
         ) as context:
             page = BrowserSessionProvider._page(context)
@@ -315,17 +336,46 @@ class GoogleFlowClient:
         ).locator("textarea:visible, [contenteditable='true']:visible")
 
     @staticmethod
+    def _media_cards(page: Any) -> Any:
+        return page.locator(_MEDIA_CARD_SELECTOR)
+
+    @classmethod
+    def _media_card_count(cls, page: Any) -> int:
+        return cls._media_cards(page).count()
+
+    @staticmethod
     def _agent_control(page: Any) -> Any:
         agent = page.get_by_role("button", name="Agent", exact=True)
-        if not (
+        if (
             agent.count() == 1
             and agent.is_visible()
             and agent.is_enabled()
         ):
-            raise FlowWorkspaceVerificationError(
-                "Google Flow Agent control could not be verified"
-            )
-        return agent
+            return agent
+
+        agent_text = page.get_by_text("Agent", exact=True)
+        text_backed_agent = agent_text.locator("xpath=ancestor::button[1]")
+        if (
+            text_backed_agent.count() == 1
+            and text_backed_agent.is_visible()
+            and text_backed_agent.is_enabled()
+        ):
+            return text_backed_agent
+        raise FlowWorkspaceVerificationError(
+            "Google Flow Agent control could not be verified"
+        )
+
+    @staticmethod
+    def _media_inventory_is_observable(page: Any) -> bool:
+        media_list = page.locator('[data-testid="virtuoso-item-list"]:visible')
+        empty_state = page.get_by_text(_EMPTY_MEDIA_NAME_RE)
+        return (
+            media_list.count() == 1
+            and media_list.is_visible()
+        ) or (
+            empty_state.count() == 1
+            and empty_state.is_visible()
+        )
 
     @classmethod
     def _active_agent_composer(cls, page: Any) -> AgentComposer:
@@ -413,30 +463,16 @@ class GoogleFlowClient:
         try:
             if page.evaluate("document.readyState") != "complete":
                 return False
-            agent = page.get_by_role("button", name="Agent", exact=True)
-            if not (
-                agent.count() == 1
-                and agent.is_visible()
-                and agent.is_enabled()
-            ):
-                return False
+            agent = self._agent_control(page)
             composer = self._observable_composer(agent)
             if not (composer.count() == 1 and composer.is_visible()):
                 return False
-            media = page.get_by_role(
-                "button",
-                name=re.compile(r"(?:all media|สื่อทั้งหมด)", re.IGNORECASE),
-            )
-            media_list = page.locator('[data-testid="virtuoso-item-list"]:visible')
             return (
-                media.count() == 1
-                and media.is_visible()
-                and media_list.count() == 1
-                and media_list.is_visible()
+                self._media_inventory_is_observable(page)
                 and page.locator('[aria-busy="true"]:visible').count() == 0
                 and page.get_by_role("progressbar").count() == 0
             )
-        except PlaywrightError:
+        except (FlowWorkspaceVerificationError, PlaywrightError):
             return False
 
     def _wait_for_settled_editor(self, page: Any) -> None:
@@ -472,12 +508,7 @@ class GoogleFlowClient:
         stable_polls = 0
         while True:
             if self._is_editor_actionable(page):
-                media_list = page.locator(
-                    '[data-testid="virtuoso-item-list"]:visible'
-                )
-                count = media_list.locator(
-                    '[role="button"][tabindex="0"]'
-                ).count()
+                count = self._media_card_count(page)
                 stable_polls = stable_polls + 1 if count == previous_count else 1
                 previous_count = count
                 if stable_polls >= self.settled_poll_count and (

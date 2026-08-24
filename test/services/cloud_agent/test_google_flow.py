@@ -141,7 +141,7 @@ class FakeLocator:
         self.index = index
 
     def click(self):
-        if self.kind == "agent":
+        if self.kind in {"agent", "agent_role"}:
             self.page.agent_click_count += 1
             self.page.actions.append(("click", "agent"))
             if self.page.agent_pressed is True:
@@ -156,6 +156,18 @@ class FakeLocator:
             self.page.landing = False
             self.page.actions.append(("click", "launch"))
             return
+        if self.kind == "media_card":
+            self.page.active_card_index = self.index
+            self.page.actions.append(("click", "media_card", self.index))
+            return
+        if self.kind == "card_delete":
+            self.page.actions.append(("click", "card_delete"))
+            if self.page.delete_requires_confirmation:
+                self.page.confirmation_pending = True
+                self.page.pending_card_delete_index = self.page.active_card_index
+            elif self.page.card_delete_removes:
+                self.page._remove_active_card()
+            return
         if self.kind == "delete_selected":
             self.page.actions.append(("click", "delete_selected"))
             if self.page.delete_requires_confirmation:
@@ -168,7 +180,11 @@ class FakeLocator:
             return
         if self.kind == "confirm_delete":
             self.page.actions.append(("click", "confirm_delete"))
-            self.page.clip_names.clear()
+            if self.page.pending_card_delete_index is not None:
+                self.page._remove_active_card()
+                self.page.pending_card_delete_index = None
+            else:
+                self.page.clip_names.clear()
             self.page.selected_clip_indexes.clear()
             self.page.confirmation_pending = False
             self.page.inventory_sequence = [0, 0, 0]
@@ -210,10 +226,31 @@ class FakeLocator:
             return self.page.download_count
         if self.kind == "launch":
             return int(self.page.landing)
-        if self.kind == "agent":
+        if self.kind == "agent_role":
             return int(not self.page.landing and self.page.agent_available)
+        if self.kind == "agent":
+            return int(not self.page.landing and self.page.agent_text_available)
+        if self.kind == "agent_text":
+            return int(not self.page.landing and self.page.agent_text_available)
         if self.kind == "checkboxes":
+            return (
+                len(self.page.clip_names)
+                if self.page.checkbox_count is None
+                else self.page.checkbox_count
+            )
+        if self.kind == "media_cards":
+            if self.page.card_count_sequence:
+                self.page.last_card_count = self.page.card_count_sequence.pop(0)
+                return self.page.last_card_count
             return len(self.page.clip_names)
+        if self.kind == "media_card":
+            return int(self.index is not None and self.index < len(self.page.clip_names))
+        if self.kind == "card_delete":
+            return int(
+                self.page.card_delete_available
+                and self.page.active_card_index is not None
+                and self.page.active_card_index < len(self.page.clip_names)
+            )
         if self.kind == "delete_selected":
             return int(
                 self.page.delete_available
@@ -280,7 +317,7 @@ class FakeLocator:
         return self.page.agent_ready
 
     def get_attribute(self, name):
-        if self.kind == "agent" and name == "aria-pressed":
+        if self.kind in {"agent", "agent_role"} and name == "aria-pressed":
             if self.page.agent_activation_pending:
                 if self.page.agent_activation_delay_reads:
                     self.page.agent_activation_delay_reads -= 1
@@ -299,8 +336,10 @@ class FakeLocator:
         return self.page.last_filled
 
     def locator(self, selector):
-        if self.kind == "agent" and str(selector).startswith("xpath="):
+        if self.kind in {"agent", "agent_role"} and str(selector).startswith("xpath="):
             return FakeLocator(self.page, "composer")
+        if self.kind == "agent_text" and str(selector).startswith("xpath="):
+            return FakeLocator(self.page, "agent")
         if self.kind == "composer" and "textarea" in str(selector):
             prompt_kind = (
                 "multiple_prompt"
@@ -328,6 +367,8 @@ class FakeLocator:
             return FakeLocator(self.page, "download", index=index)
         if self.kind == "checkboxes":
             return FakeLocator(self.page, "checkbox", index=index)
+        if self.kind == "media_cards":
+            return FakeLocator(self.page, "media_card", index=index)
         if self.kind == "generated_images":
             return FakeLocator(self.page, "generated_image", index=index)
         raise AssertionError(f"nth is unavailable for {self.kind}")
@@ -341,6 +382,7 @@ class FakePage:
         download_count=6,
         landing=False,
         agent_available=True,
+        agent_text_available=None,
         clip_names=None,
         empty_state_available=True,
         delete_available=True,
@@ -355,6 +397,7 @@ class FakePage:
         media_list_available=True,
         media_list_sequence=None,
         inventory_sequence=None,
+        card_count_sequence=None,
         busy=False,
         progressbar=False,
         evaluate_errors=None,
@@ -365,6 +408,9 @@ class FakePage:
         agent_deactivates_on_prompt_fill=False,
         generate_available=True,
         generated_image_alts=None,
+        checkbox_count=None,
+        card_delete_available=True,
+        card_delete_removes=True,
     ):
         self.url = "about:blank"
         self.progress_html = list(progress_html)
@@ -375,6 +421,11 @@ class FakePage:
         self.active_download = None
         self.landing = landing
         self.agent_available = agent_available
+        self.agent_text_available = (
+            agent_available
+            if agent_text_available is None
+            else agent_text_available
+        )
         self.clip_names = list(clip_names or [])
         self.empty_state_available = empty_state_available
         self.delete_available = delete_available
@@ -402,6 +453,8 @@ class FakePage:
         self.inventory_sequence = list(
             inventory_sequence if inventory_sequence is not None else [len(self.clip_names)]
         )
+        self.card_count_sequence = list(card_count_sequence or [])
+        self.last_card_count = len(self.clip_names)
         self.last_inventory_count = self.inventory_sequence[0]
         self.busy = busy
         self.progressbar = progressbar
@@ -414,10 +467,24 @@ class FakePage:
         self.agent_deactivates_on_prompt_fill = agent_deactivates_on_prompt_fill
         self.generate_available = generate_available
         self.generated_image_alts = list(generated_image_alts or [])
+        self.checkbox_count = checkbox_count
+        self.card_delete_available = card_delete_available
+        self.card_delete_removes = card_delete_removes
+        self.active_card_index = None
+        self.pending_card_delete_index = None
         self.generate_clicked = False
         self.agent_click_count = 0
         self.fill_agent_pressed_states = []
         self._content_index = 0
+
+    def _remove_active_card(self):
+        if self.active_card_index is None:
+            return
+        if self.active_card_index < len(self.clip_names):
+            self.clip_names.pop(self.active_card_index)
+        self.active_card_index = None
+        self.inventory_sequence = [len(self.clip_names)] * 3
+        self.last_inventory_count = len(self.clip_names)
 
     def goto(self, url, **kwargs):
         self.goto_calls.append((url, kwargs))
@@ -442,6 +509,12 @@ class FakePage:
         return "complete" if self.document_ready else "interactive"
 
     def locator(self, selector):
+        if (
+            selector
+            == '[data-testid="virtuoso-item-list"]:visible '
+            '[role="button"][tabindex="0"]'
+        ):
+            return FakeLocator(self, "media_cards")
         if selector == '[data-testid="virtuoso-item-list"]:visible':
             return FakeLocator(self, "media_list")
         if selector == '[aria-busy="true"]:visible':
@@ -458,7 +531,7 @@ class FakePage:
         if role == "button" and "download product clips" in pattern:
             return FakeLocator(self, "bulk_download")
         if role == "button" and "agent" in pattern:
-            return FakeLocator(self, "agent")
+            return FakeLocator(self, "agent_role")
         if role == "button" and ("all media" in pattern or "สื่อทั้งหมด" in pattern):
             return FakeLocator(self, "media_control")
         if role == "progressbar":
@@ -470,6 +543,8 @@ class FakePage:
         if role == "checkbox":
             return FakeLocator(self, "checkboxes")
         if role == "button" and ("delete" in pattern or "ลบ" in pattern):
+            if self.active_card_index is not None:
+                return FakeLocator(self, "card_delete")
             return FakeLocator(self, "delete_selected")
         if role == "dialog":
             return FakeLocator(self, "dialog")
@@ -478,6 +553,8 @@ class FakePage:
     def get_by_text(self, text, *, exact=None):
         del exact
         pattern = getattr(text, "pattern", str(text)).lower()
+        if pattern == "agent":
+            return FakeLocator(self, "agent_text")
         if "start creating" in pattern or "เริ่มสร้าง" in pattern:
             return FakeLocator(self, "empty_state")
         semantic = re.fullmatch(r"clip\s+([1-6])", pattern)
@@ -567,7 +644,7 @@ def _client(
     return client, sessions
 
 
-def test_google_flow_workspace_context_holds_production_profile_lock():
+def test_google_flow_workspace_context_uses_browser_configuration_and_holds_lock():
     page = FakePage(progress_html=["<div>Generation progress 6 / 6</div>"])
     client, sessions = _client(page, timeout_seconds=45.0)
     browser = client.browser
@@ -580,7 +657,7 @@ def test_google_flow_workspace_context_holds_production_profile_lock():
         assert sessions.calls == [("google_flow", "job-123")]
 
     assert browser.context_is_open is False
-    assert browser.open_calls == [("google_flow", False, 45.0)]
+    assert browser.open_calls == [("google_flow", None, 45.0)]
     assert page.goto_calls == [
         (
             "https://labs.google/fx/tools/flow/project/demo",
@@ -600,7 +677,7 @@ def test_google_flow_workspace_lock_timeout_can_differ_from_generation_timeout()
     with client.acquire_workspace(_job()):
         pass
 
-    assert client.browser.open_calls == [("google_flow", False, 90.0)]
+    assert client.browser.open_calls == [("google_flow", None, 90.0)]
 
 
 def test_google_flow_workspace_enters_project_from_observable_landing_control():
@@ -608,13 +685,31 @@ def test_google_flow_workspace_enters_project_from_observable_landing_control():
         progress_html=["<div>Generation progress 6 / 6</div>"],
         landing=True,
     )
-    client, _ = _client(page)
+    client, _ = _client(page, editor_ready_timeout_seconds=0.1)
 
     with client.acquire_workspace(_job()) as workspace:
         assert workspace.page is page
 
     assert ("click", "launch") in page.actions
     assert page.landing is False
+
+
+def test_google_flow_workspace_accepts_text_backed_agent_and_empty_media_state():
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        agent_available=False,
+        agent_text_available=True,
+        clip_names=[],
+        media_control_available=False,
+        media_list_available=False,
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=0.1)
+
+    with client.acquire_workspace(_job()) as workspace:
+        workspace.preclean_and_verify_empty()
+
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert not any(action[0] == "click" for action in page.actions)
 
 
 def test_google_flow_workspace_requires_observable_project_editor(monkeypatch):
@@ -681,7 +776,7 @@ def test_flow_workspace_transient_empty_inventory_cannot_pass_generation_gate(
 ):
     page = FakePage(
         progress_html=["<div>Ready</div>"],
-        inventory_sequence=[0, 0, 2, 2],
+        card_count_sequence=[0, 0, 2, 2],
     )
     client, _ = _client(
         page,
@@ -703,7 +798,7 @@ def test_flow_workspace_transient_empty_inventory_cannot_pass_generation_gate(
 def test_flow_workspace_stable_settled_empty_inventory_passes_generation_gate():
     page = FakePage(
         progress_html=["<div>Ready</div>"],
-        inventory_sequence=[0, 0, 0],
+        card_count_sequence=[0, 0, 0],
     )
     client, _ = _client(page, settled_poll_count=3)
 
@@ -719,21 +814,109 @@ def test_flow_workspace_preclean_deletes_stale_clips_then_verifies_empty():
         progress_html=["<div>Ready</div>"],
         clip_names=["stale-a", "stale-b", "stale-c"],
     )
-    client, _ = _client(page)
+    client, _ = _client(page, editor_ready_timeout_seconds=0.1)
 
     with client.acquire_workspace(_job()) as workspace:
         preclean = getattr(workspace, "preclean_and_verify_empty", None)
         assert preclean is not None, "Flow workspace pre-clean is not implemented"
         preclean()
 
-    assert page.actions[-4:] == [
-        ("check", 0),
-        ("check", 1),
-        ("check", 2),
-        ("click", "delete_selected"),
+    assert page.actions == [
+        ("click", "media_card", 0),
+        ("click", "card_delete"),
+        ("click", "media_card", 0),
+        ("click", "card_delete"),
+        ("click", "media_card", 0),
+        ("click", "card_delete"),
     ]
     assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
     assert page.clip_names == []
+
+
+def test_flow_workspace_preclean_deletes_card_inventory_when_checkboxes_are_absent():
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        clip_names=["generated-image-a", "generated-image-b"],
+        checkbox_count=0,
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=0.1)
+
+    with client.acquire_workspace(_job()) as workspace:
+        workspace.preclean_and_verify_empty()
+
+    assert page.clip_names == []
+    assert page.actions.count(("click", "card_delete")) == 2
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+
+
+def test_flow_workspace_preclean_fails_closed_when_card_delete_is_unavailable():
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        clip_names=["generated-image-a"],
+        checkbox_count=0,
+        card_delete_available=False,
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=0.1)
+
+    with client.acquire_workspace(_job()) as workspace:
+        with pytest.raises(FlowWorkspaceVerificationError, match="could not be deleted"):
+            workspace.preclean_and_verify_empty()
+
+    assert page.clip_names == ["generated-image-a"]
+    assert ("click", "generate") not in page.actions
+
+
+def test_flow_workspace_preclean_fails_closed_when_card_delete_does_not_remove_card():
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        clip_names=["generated-image-a"],
+        checkbox_count=0,
+        card_delete_removes=False,
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=0.1)
+
+    with client.acquire_workspace(_job()) as workspace:
+        with pytest.raises(FlowWorkspaceVerificationError, match="removal"):
+            workspace.preclean_and_verify_empty()
+
+    assert page.clip_names == ["generated-image-a"]
+    assert page.actions == [
+        ("click", "media_card", 0),
+        ("click", "card_delete"),
+    ]
+    assert ("click", "generate") not in page.actions
+
+
+def test_flow_workspace_preclean_confirms_card_delete_then_waits_for_removal():
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        clip_names=["generated-image-a", "generated-video-b"],
+        checkbox_count=0,
+        delete_requires_confirmation=True,
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=0.1)
+
+    with client.acquire_workspace(_job()) as workspace:
+        workspace.preclean_and_verify_empty()
+
+    assert page.clip_names == []
+    assert page.actions.count(("click", "card_delete")) == 2
+    assert page.actions.count(("click", "confirm_delete")) == 2
+
+
+def test_flow_workspace_post_ready_cleanup_uses_card_deletion_without_checkboxes():
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        clip_names=["generated-image-a", "generated-video-b"],
+        checkbox_count=0,
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=0.1)
+
+    with client.acquire_workspace(_job()) as workspace:
+        workspace.cleanup_and_verify_empty()
+
+    assert page.clip_names == []
+    assert page.actions.count(("click", "card_delete")) == 2
 
 
 def test_flow_workspace_preclean_refreshes_even_when_already_empty():
@@ -758,8 +941,8 @@ def test_flow_workspace_preclean_confirms_observable_delete_dialog():
     with client.acquire_workspace(_job()) as workspace:
         workspace.preclean_and_verify_empty()
 
-    assert ("click", "delete_selected") in page.actions
-    assert ("click", "confirm_delete") in page.actions
+    assert page.actions.count(("click", "card_delete")) == 2
+    assert page.actions.count(("click", "confirm_delete")) == 2
     assert page.clip_names == []
 
 
@@ -769,6 +952,7 @@ def test_flow_workspace_preclean_blocks_generation_when_inventory_is_unverifiabl
     page = FakePage(
         progress_html=["<div>Ready</div>"],
         clip_names=[],
+        empty_state_available=False,
         media_list_sequence=[True, False, False],
     )
     client, _ = _client(page, timeout_seconds=1.0)
@@ -792,14 +976,14 @@ def test_flow_workspace_preclean_waits_for_stable_empty_inventory_after_reload()
     page = FakePage(
         progress_html=["<div>Ready</div>"],
         clip_names=[],
-        inventory_sequence=[2, 0, 0, 0],
+        card_count_sequence=[0, 2, 0, 0, 0],
     )
     client, _ = _client(page)
 
     with client.acquire_workspace(_job()) as workspace:
         workspace.preclean_and_verify_empty()
 
-    assert page.inventory_sequence == []
+    assert page.card_count_sequence == []
 
 
 def test_flow_generation_does_not_implicitly_preclean_remote_workspace(
