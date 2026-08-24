@@ -290,6 +290,12 @@ class FakeLocator:
             return int(self.page.progressbar)
         if self.kind == "generated_images":
             return len(self.page.generated_image_alts)
+        if self.kind == "videos":
+            return sum(
+                card["media_type"] == "video"
+                and card.get("has_video_element", True)
+                for card in self.page.active_completed_video_poll
+            )
         if self.kind == "missing":
             return 0
         if self.kind == "semantic_name":
@@ -410,6 +416,7 @@ class FakePage:
         agent_deactivates_on_prompt_fill=False,
         generate_available=True,
         generated_image_alts=None,
+        completed_video_polls=None,
         checkbox_count=None,
         card_delete_available=True,
         card_delete_removes=True,
@@ -473,6 +480,9 @@ class FakePage:
         self.agent_deactivates_on_prompt_fill = agent_deactivates_on_prompt_fill
         self.generate_available = generate_available
         self.generated_image_alts = list(generated_image_alts or [])
+        self.completed_video_polls = list(completed_video_polls or [[]])
+        self.active_completed_video_poll = list(self.completed_video_polls[0])
+        self.context = FakeCdpContext(self)
         self.checkbox_count = checkbox_count
         self.card_delete_available = card_delete_available
         self.card_delete_removes = card_delete_removes
@@ -532,6 +542,8 @@ class FakePage:
             return FakeLocator(self, "busy")
         if selector == "img[alt]":
             return FakeLocator(self, "generated_images")
+        if selector == "video:visible":
+            return FakeLocator(self, "videos")
         raise AssertionError(f"unexpected page locator: {selector}")
 
     def get_by_role(self, role, *, name=None, exact=None):
@@ -588,6 +600,58 @@ class FakePage:
 
     def expect_download(self):
         return FakeDownloadExpectation(self)
+
+
+class FakeCdpSession:
+    def __init__(self, page):
+        self.page = page
+
+    def send(self, method):
+        assert method == "Accessibility.getFullAXTree"
+        if self.page.completed_video_polls:
+            self.page.active_completed_video_poll = list(
+                self.page.completed_video_polls.pop(0)
+            )
+
+        nodes = []
+        for card in self.page.active_completed_video_poll:
+            media_type = card["media_type"]
+            if media_type == "video":
+                name = "Video cover play_circle"
+            elif media_type == "image":
+                name = "Generated image"
+            else:
+                name = "Unknown media output"
+            description = card.get("description", "Duration 00:10")
+            if card.get("processing"):
+                description = "Processing"
+            if card.get("failed"):
+                description = "Failed"
+            nodes.append(
+                {
+                    "backendDOMNodeId": card["fingerprint"],
+                    "role": {"value": "button"},
+                    "name": {"value": name},
+                    "description": {"value": description},
+                    "properties": [
+                        {"name": "disabled", "value": {"value": not card.get("playable", True)}},
+                        {"name": "busy", "value": {"value": card.get("busy", False)}},
+                    ],
+                }
+            )
+        return {"nodes": nodes}
+
+    def detach(self):
+        return None
+
+
+class FakeCdpContext:
+    def __init__(self, page):
+        self.page = page
+
+    def new_cdp_session(self, page):
+        assert page is self.page
+        return FakeCdpSession(page)
 
 
 class FakeContext:
@@ -1240,6 +1304,45 @@ def test_flow_workspace_reconciles_existing_six_without_new_generation(
     assert ("click", "delete_selected") not in page.actions
 
 
+def test_flow_workspace_reconciles_completed_video_cards_without_progress_or_generate(
+    monkeypatch, tmp_path
+):
+    cards = _completed_video_cards()
+    page = FakePage(
+        progress_html=["<div>Generation complete</div>"],
+        completed_video_polls=[cards, cards, cards],
+        clip_names=[f"draft-{number}" for number in range(1, 7)],
+        renamed_clip_names=[f"clip {number}" for number in range(1, 7)],
+        inventory_sequence=[6, 6, 6],
+    )
+    client, _ = _client(page, timeout_seconds=5.0, settled_poll_count=3)
+    _timeout_clock(monkeypatch)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        result = workspace.reconcile_and_download(
+            _job(flow_generation_unresolved=True),
+            paths,
+        )
+
+    assert result == paths.flow_files
+    assert not any(
+        action[:3] == ("fill", "prompt", _job().master_prompt)
+        for action in page.actions
+    )
+    assert ("click", "delete_selected") not in page.actions
+    assert (
+        "fill",
+        "prompt",
+        google_flow.RENAME_CLIPS_INSTRUCTION,
+    ) in page.actions
+
+
 def test_flow_workspace_partial_reconciliation_retains_remote_results(
     monkeypatch, tmp_path
 ):
@@ -1529,6 +1632,177 @@ def test_google_flow_generation_stops_early_when_observable_generated_image_appe
 
     with pytest.raises(FlowWorkspaceVerificationError, match="generated image"):
         client._wait_for_generation(page, expected_count=6)
+
+
+def _completed_video_cards(*, fingerprints=("a", "b", "c", "d", "e", "f"), **overrides):
+    return [
+        {
+            "fingerprint": fingerprint,
+            "media_type": "video",
+            "playable": True,
+            "has_video_element": True,
+            "ready_state": 0,
+            **overrides,
+        }
+        for fingerprint in fingerprints
+    ]
+
+
+def _timeout_clock(monkeypatch):
+    clock = [-0.5]
+
+    def monotonic():
+        clock[0] += 0.5
+        return clock[0]
+
+    monkeypatch.setattr(google_flow.time, "monotonic", monotonic)
+    monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
+
+
+def test_google_flow_completed_video_detection_preserves_trusted_text_progress():
+    page = FakePage(progress_html=["<div>Generation progress 6 / 6</div>"])
+    client, _ = _client(page)
+
+    client._wait_for_generation(page, expected_count=6)
+
+
+def test_google_flow_completed_video_cards_complete_after_three_stable_polls(
+    monkeypatch,
+):
+    cards = _completed_video_cards()
+    page = FakePage(
+        progress_html=["<div>Generation complete</div>"],
+        completed_video_polls=[cards, cards, cards],
+    )
+    client, _ = _client(page, timeout_seconds=5.0, settled_poll_count=3)
+    _timeout_clock(monkeypatch)
+
+    client._wait_for_generation(page, expected_count=6)
+
+
+def test_google_flow_completed_video_cards_do_not_complete_after_only_two_polls(
+    monkeypatch,
+):
+    cards = _completed_video_cards()
+    page = FakePage(
+        progress_html=["<div>Generation complete</div>"],
+        completed_video_polls=[cards, cards, []],
+    )
+    client, _ = _client(page, timeout_seconds=1.0, settled_poll_count=3)
+    _timeout_clock(monkeypatch)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="timed out"):
+        client._wait_for_generation(page, expected_count=6)
+
+
+@pytest.mark.parametrize(
+    "cards",
+    [
+        _completed_video_cards(processing=True),
+        _completed_video_cards(failed=True),
+        _completed_video_cards(
+            fingerprints=("a", "b", "c", "d", "e", "unknown"),
+        )[:-1]
+        + [
+            {
+                "fingerprint": "unknown",
+                "media_type": "unknown",
+                "playable": True,
+                "has_video_element": False,
+            }
+        ],
+    ],
+    ids=("processing", "failed", "unknown_media"),
+)
+def test_google_flow_completed_video_cards_fail_closed_on_unsafe_card_evidence(
+    monkeypatch,
+    cards,
+):
+    page = FakePage(
+        progress_html=["<div>Generation complete</div>"],
+        completed_video_polls=[cards, cards, cards],
+    )
+    client, _ = _client(page, timeout_seconds=1.0, settled_poll_count=3)
+    _timeout_clock(monkeypatch)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="timed out"):
+        client._wait_for_generation(page, expected_count=6)
+
+
+def test_google_flow_completed_video_cards_preserve_generated_image_failure_gate(
+    monkeypatch,
+):
+    cards = _completed_video_cards()
+    cards[-1] = {
+        "fingerprint": "image",
+        "media_type": "image",
+        "playable": True,
+        "has_video_element": False,
+    }
+    page = FakePage(
+        progress_html=["<div>Generation complete</div>"],
+        completed_video_polls=[cards, cards, cards],
+        generated_image_alts=["generated image"],
+    )
+    client, _ = _client(page, timeout_seconds=5.0, settled_poll_count=3)
+    _timeout_clock(monkeypatch)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="generated image"):
+        client._wait_for_generation(page, expected_count=6)
+
+
+@pytest.mark.parametrize(
+    ("cards", "page_kwargs"),
+    [
+        (_completed_video_cards(busy=True), {}),
+        (_completed_video_cards(), {"busy": True}),
+        (_completed_video_cards(), {"progressbar": True}),
+    ],
+    ids=("card_busy", "page_busy", "progressbar"),
+)
+def test_google_flow_completed_video_cards_require_idle_page_state(
+    monkeypatch,
+    cards,
+    page_kwargs,
+):
+    page = FakePage(
+        progress_html=["<div>Generation complete</div>"],
+        completed_video_polls=[cards, cards, cards],
+        **page_kwargs,
+    )
+    client, _ = _client(page, timeout_seconds=1.0, settled_poll_count=3)
+    _timeout_clock(monkeypatch)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="timed out"):
+        client._wait_for_generation(page, expected_count=6)
+
+
+def test_google_flow_completed_video_card_fingerprint_change_resets_stability(
+    monkeypatch,
+):
+    stable = _completed_video_cards()
+    changed = _completed_video_cards(fingerprints=("a", "b", "c", "d", "e", "x"))
+    page = FakePage(
+        progress_html=["<div>Generation complete</div>"],
+        completed_video_polls=[stable, changed, stable],
+    )
+    client, _ = _client(page, timeout_seconds=1.0, settled_poll_count=3)
+    _timeout_clock(monkeypatch)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="timed out"):
+        client._wait_for_generation(page, expected_count=6)
+
+
+def test_google_flow_completed_video_cards_allow_lazy_video_metadata(monkeypatch):
+    cards = _completed_video_cards(ready_state=0)
+    page = FakePage(
+        progress_html=["<div>Generation complete</div>"],
+        completed_video_polls=[cards, cards, cards],
+    )
+    client, _ = _client(page, timeout_seconds=5.0, settled_poll_count=3)
+    _timeout_clock(monkeypatch)
+
+    client._wait_for_generation(page, expected_count=6)
 
 
 def test_google_flow_generation_timeout_is_bounded(monkeypatch, tmp_path):

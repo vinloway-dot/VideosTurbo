@@ -29,6 +29,18 @@ _GENERATED_IMAGE_ALT_RE = re.compile(
     r"^(?:generated image|รูปภาพที่สร้างขึ้น)$",
     re.IGNORECASE,
 )
+_VIDEO_CARD_NAME_RE = re.compile(
+    r"(?:video\s+cover|ภาพปกวิดีโอ).*play(?:_circle)?",
+    re.IGNORECASE,
+)
+_CARD_PROCESSING_RE = re.compile(
+    r"(?:processing|loading|กำลังประมวลผล|กำลังโหลด)",
+    re.IGNORECASE,
+)
+_CARD_FAILURE_RE = re.compile(
+    r"(?:failed|failure|error|ล้มเหลว|ไม่สำเร็จ|ข้อผิดพลาด)",
+    re.IGNORECASE,
+)
 _MEDIA_CARD_SELECTOR = (
     '[data-testid="virtuoso-item-list"]:visible '
     '[role="button"][tabindex="0"]'
@@ -607,6 +619,8 @@ class GoogleFlowClient:
 
     def _wait_for_generation(self, page: Any, expected_count: int) -> None:
         deadline = time.monotonic() + self.generation_timeout_seconds
+        previous_fingerprints: tuple[str, ...] | None = None
+        stable_polls = 0
         while True:
             if self._generated_image_output_count(page):
                 raise FlowWorkspaceVerificationError(
@@ -615,11 +629,98 @@ class GoogleFlowClient:
             progress = self._progress_for_expected_count(page.content(), expected_count)
             if progress is not None and progress >= expected_count:
                 return
+            fingerprints = self._completed_video_card_fingerprints(
+                page,
+                expected_count=expected_count,
+            )
+            if fingerprints is not None and fingerprints == previous_fingerprints:
+                stable_polls += 1
+            elif fingerprints is not None:
+                stable_polls = 1
+            else:
+                stable_polls = 0
+            previous_fingerprints = fingerprints
+            if stable_polls >= self.settled_poll_count:
+                return
             if time.monotonic() >= deadline:
                 raise FlowWorkspaceVerificationError(
                     f"Google Flow generation timed out before {expected_count}/{expected_count}"
                 )
             time.sleep(self.poll_seconds)
+
+    @classmethod
+    def _completed_video_card_fingerprints(
+        cls,
+        page: Any,
+        *,
+        expected_count: int,
+    ) -> tuple[str, ...] | None:
+        """Return stable AX card fingerprints only for a safe completed-video set."""
+        if page.locator("video:visible").count() != expected_count:
+            return None
+        if page.locator('[aria-busy="true"]:visible').count():
+            return None
+        if page.get_by_role("progressbar").count():
+            return None
+
+        session = None
+        try:
+            session = page.context.new_cdp_session(page)
+            nodes = session.send("Accessibility.getFullAXTree").get("nodes", [])
+        except PlaywrightError:
+            return None
+        finally:
+            if session is not None:
+                try:
+                    session.detach()
+                except PlaywrightError:
+                    pass
+
+        fingerprints: list[str] = []
+        for node in nodes:
+            if cls._ax_value(node, "role") != "button":
+                continue
+            name = cls._ax_value(node, "name")
+            if not _VIDEO_CARD_NAME_RE.search(name):
+                continue
+            description = cls._ax_value(node, "description")
+            properties = cls._ax_properties(node)
+            if not description or properties.get("disabled") or properties.get("busy"):
+                return None
+            if _CARD_PROCESSING_RE.search(f"{name} {description}"):
+                return None
+            if _CARD_FAILURE_RE.search(f"{name} {description}"):
+                return None
+            backend_node_id = node.get("backendDOMNodeId")
+            if backend_node_id in {None, ""}:
+                return None
+            fingerprints.append(f"ax:{backend_node_id}")
+
+        stable = tuple(sorted(fingerprints))
+        if len(stable) != expected_count or len(set(stable)) != expected_count:
+            return None
+        return stable
+
+    @staticmethod
+    def _ax_value(node: Any, field: str) -> str:
+        value = node.get(field, {}) if isinstance(node, dict) else {}
+        if not isinstance(value, dict):
+            return ""
+        return str(value.get("value", "") or "")
+
+    @staticmethod
+    def _ax_properties(node: Any) -> dict[str, Any]:
+        if not isinstance(node, dict):
+            return {}
+        result: dict[str, Any] = {}
+        for property_value in node.get("properties", []):
+            if not isinstance(property_value, dict):
+                continue
+            name = str(property_value.get("name", "") or "")
+            value = property_value.get("value", {})
+            if name and isinstance(value, dict):
+                result[name] = value.get("value")
+        return result
 
     @staticmethod
     def _generated_image_output_count(page: Any) -> int:
