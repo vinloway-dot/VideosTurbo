@@ -375,6 +375,15 @@ then re-enters the existing `TTS_READY` code path, which validates/probes the
 audio again and never invokes `tts.generate()`. There is no automatic retry
 and no new status, schema column, or retry counter.
 
+The accepted retry transition is compare-and-set atomic. The retry service may
+perform slow read-only audio/artifact checks before the commit, but the store
+must open one SQLite immediate transaction and re-check the durable retry
+predicate while changing `FAILED` to `QUEUED`. Exactly one of two concurrent
+retry requests can succeed; the other sees that the job is no longer exactly
+the eligible failed state and receives the normal controlled 409 response.
+The existing atomic worker claim then permits only one worker lease. This closes
+the requeue race without a new retry table or a second TTS/Flow execution path.
+
 The WebUI exposes the same explicit `Retry` action beside Pause/Resume/Cancel.
 Success explains that the existing narration will be reused. A 409 displays a
 sanitized reason (for example, that possible paid Flow work requires

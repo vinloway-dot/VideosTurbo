@@ -28,6 +28,7 @@
 **Files:**
 - Create: `app/services/cloud_agent/retry.py`
 - Modify: `app/services/cloud_agent/errors.py`
+- Modify: `app/services/cloud_agent/job_store.py`
 - Create: `test/services/cloud_agent/test_retry.py`
 - Modify: `test/services/cloud_agent/test_workflow.py`
 
@@ -47,6 +48,17 @@ class PreFlowRetryService:
     ) -> None: ...
 
     def retry(self, job_id: str) -> CloudJobRecord: ...
+
+class CloudJobStore:
+    def requeue_pre_flow_retry(
+        self,
+        job_id: str,
+        *,
+        voice_file: str,
+        audio_duration_seconds: float,
+        canva_playback_speed: float,
+        target_final_duration_seconds: float,
+    ) -> CloudJobRecord: ...
 ```
 
 - [ ] **Step 1: Write failing pure-retry tests**
@@ -77,6 +89,13 @@ class PreFlowRetryService:
   ```
 
   Assert all refusals leave `FAILED / TTS_READY`, the original error, flags, and audio untouched. Add an explicit regression that a valid ZIP/staging set is not deleted or reclassified by the retry service; existing `recover_flow_artifacts()` workflow tests remain the authoritative recovery behavior.
+
+  Add a concurrent RED regression with two `PreFlowRetryService` calls against
+  the same SQLite file. Synchronize both just before the store transition, then
+  assert exactly one returns `QUEUED` and exactly one raises the typed
+  eligibility error. Immediately call `claim_next_job()` as two worker ids and
+  assert exactly one lease is acquired. Assert neither retry path has a TTS or
+  Flow dependency/call.
 
 - [ ] **Step 3: Run RED evidence**
 
@@ -110,7 +129,7 @@ def retry(self, job_id: str) -> CloudJobRecord:
 
 - [ ] **Step 2: Implement timing revalidation and one normal state update**
 
-  Probe the canonical voice with the configured minimum duration. Recompute timing with `calculate_adaptive_timing(..., min_playback_speed=...)`; if the policy rejects the real audio, refuse retry. Otherwise call exactly one existing `store.patch_job()` to set `QUEUED`, `current_step="queued"`, `control_request=NONE`, clear the prior error, and persist the recomputed timing. Preserve the original checkpoint, canonical voice path, Flow flags, script, prompt, and all source artifacts. Do not add a SQLite migration.
+  Probe the canonical voice with the configured minimum duration. Recompute timing with `calculate_adaptive_timing(..., min_playback_speed=...)`; if the policy rejects the real audio, refuse retry. Add one `CloudJobStore.requeue_pre_flow_retry()` method that uses `BEGIN IMMEDIATE`, rereads the row, rechecks the status/checkpoint/error/fence/lease predicate, and updates it to `QUEUED`, `current_step="queued"`, `control_request=NONE`, cleared error, and recomputed timing in that same transaction. Translate a lost compare-and-set race into the typed refusal. Preserve the original checkpoint, canonical voice path, Flow flags, script, prompt, and all source artifacts. Do not add a SQLite migration.
 
 - [ ] **Step 3: Run focused GREEN tests**
 
@@ -252,6 +271,7 @@ def _wait_for_settled_editor(self, page: Any) -> None:
   git add docs/superpowers/specs/2026-08-22-cloud-video-agent-design.md \
       docs/superpowers/plans/2026-08-24-retry-pre-flow-failures.md \
       app/services/cloud_agent/retry.py app/services/cloud_agent/errors.py \
+      app/services/cloud_agent/job_store.py \
       app/services/cloud_agent/factory.py app/controllers/v1/cloud_agent.py \
       app/services/cloud_agent/providers/google_flow.py webui/cloud_agent.py \
       test/services/cloud_agent/test_retry.py \
