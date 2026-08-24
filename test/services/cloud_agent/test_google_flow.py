@@ -379,6 +379,7 @@ class FakePage:
         self,
         *,
         progress_html,
+        reload_progress_html=None,
         download_count=6,
         landing=False,
         agent_available=True,
@@ -393,6 +394,7 @@ class FakePage:
         delete_requires_confirmation=False,
         empty_state_sequence=None,
         document_ready=True,
+        document_ready_sequence=None,
         media_control_available=True,
         media_list_available=True,
         media_list_sequence=None,
@@ -414,6 +416,9 @@ class FakePage:
     ):
         self.url = "about:blank"
         self.progress_html = list(progress_html)
+        self.reload_progress_html = [
+            list(html) for html in (reload_progress_html or [])
+        ]
         self.download_count = download_count
         self.download_attempts = [0 for _ in range(download_count)]
         self.goto_calls = []
@@ -446,6 +451,7 @@ class FakePage:
         self.empty_state_sequence = list(empty_state_sequence or [])
         self.last_empty_state = empty_state_available
         self.document_ready = document_ready
+        self.document_ready_sequence = list(document_ready_sequence or [])
         self.media_control_available = media_control_available
         self.media_list_available = media_list_available
         self.media_list_sequence = list(media_list_sequence or [])
@@ -492,6 +498,9 @@ class FakePage:
 
     def reload(self, **kwargs):
         self.reload_calls.append(kwargs)
+        if self.reload_progress_html:
+            self.progress_html = self.reload_progress_html.pop(0)
+            self._content_index = 0
         if self.pending_clip_names is not None:
             self.clip_names = self.pending_clip_names
             self.pending_clip_names = None
@@ -506,6 +515,8 @@ class FakePage:
         assert expression == "document.readyState"
         if self.evaluate_errors:
             raise self.evaluate_errors.pop(0)
+        if self.document_ready_sequence:
+            self.document_ready = self.document_ready_sequence.pop(0)
         return "complete" if self.document_ready else "interactive"
 
     def locator(self, selector):
@@ -798,6 +809,80 @@ def test_google_flow_fatal_application_error_is_not_actionable():
     client, _ = _client(page)
 
     assert client._is_editor_actionable(page) is False
+
+
+def test_google_flow_healthy_direct_project_does_not_reload():
+    page = FakePage(progress_html=["<div>Ready</div>"])
+    client, _ = _client(page)
+
+    with client.acquire_workspace(_job()) as workspace:
+        assert workspace.page is page
+
+    assert page.reload_calls == []
+    assert client.browser.open_calls == [("google_flow", None, 30.0)]
+
+
+def test_google_flow_direct_fatal_recovers_with_one_same_page_reload():
+    page = FakePage(
+        progress_html=["<main>Application error: a client-side exception has occurred</main>"],
+        reload_progress_html=[["<div>Ready</div>"]],
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=0.02)
+
+    with client.acquire_workspace(_job()) as workspace:
+        assert workspace.page is page
+
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert client.browser.open_calls == [("google_flow", None, 30.0)]
+    assert page.actions == []
+
+
+def test_google_flow_direct_fatal_recovers_with_two_same_page_reloads():
+    page = FakePage(
+        progress_html=["<main>Application error: a client-side exception has occurred</main>"],
+        reload_progress_html=[
+            ["<main>Application error: a client-side exception has occurred</main>"],
+            ["<div>Ready</div>"],
+        ],
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=0.02)
+
+    with client.acquire_workspace(_job()) as workspace:
+        assert workspace.page is page
+
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}] * 2
+    assert client.browser.open_calls == [("google_flow", None, 30.0)]
+
+
+def test_google_flow_persistent_direct_fatal_fails_after_two_reloads():
+    page = FakePage(
+        progress_html=["<main>Application error: a client-side exception has occurred</main>"],
+        reload_progress_html=[
+            ["<main>Application error: a client-side exception has occurred</main>"],
+            ["<main>Application error: a client-side exception has occurred</main>"],
+        ],
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=0.02)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="project editor"):
+        with client.acquire_workspace(_job()):
+            pass
+
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}] * 2
+    assert page.actions == []
+
+
+def test_google_flow_normal_loading_waits_without_direct_fatal_reload():
+    page = FakePage(
+        progress_html=["<div>Loading media inventory</div>"],
+        document_ready_sequence=[False, True, True, True],
+    )
+    client, _ = _client(page)
+
+    with client.acquire_workspace(_job()) as workspace:
+        assert workspace.page is page
+
+    assert page.reload_calls == []
 
 
 def test_flow_workspace_transient_empty_inventory_cannot_pass_generation_gate(

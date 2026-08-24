@@ -47,6 +47,11 @@ _FATAL_APPLICATION_ERROR_RE = re.compile(
     re.IGNORECASE,
 )
 RENAME_CLIPS_INSTRUCTION = "เปลี่ยนชื่อคลิปตามลำดับ ของวีดีโอ"
+_DIRECT_LINK_RECOVERY_CYCLES = 2
+
+
+class _DirectLinkFatalPageError(FlowWorkspaceVerificationError):
+    """A verified fatal direct project page that can be safely reloaded."""
 
 
 @dataclass(frozen=True)
@@ -331,7 +336,16 @@ class GoogleFlowClient:
         ) as context:
             page = BrowserSessionProvider._page(context)
             page.goto(self.service_url, wait_until="domcontentloaded")
-            self._wait_for_settled_editor(page)
+            for recovery_cycle in range(_DIRECT_LINK_RECOVERY_CYCLES + 1):
+                try:
+                    self._wait_for_settled_editor(page)
+                    break
+                except _DirectLinkFatalPageError as exc:
+                    if recovery_cycle >= _DIRECT_LINK_RECOVERY_CYCLES:
+                        raise FlowWorkspaceVerificationError(
+                            "Google Flow project editor could not be verified"
+                        ) from exc
+                    page.reload(wait_until="domcontentloaded")
             yield FlowWorkspaceRun(self, page)
 
     @staticmethod
@@ -482,10 +496,21 @@ class GoogleFlowClient:
         except (FlowWorkspaceVerificationError, PlaywrightError):
             return False
 
+    @staticmethod
+    def _has_fatal_application_error(page: Any) -> bool:
+        try:
+            return bool(_FATAL_APPLICATION_ERROR_RE.search(page.content()))
+        except PlaywrightError:
+            return False
+
     def _wait_for_settled_editor(self, page: Any) -> None:
         deadline = time.monotonic() + self.editor_ready_timeout_seconds
         stable_polls = 0
         while True:
+            if self._has_fatal_application_error(page):
+                raise _DirectLinkFatalPageError(
+                    "Google Flow direct project page has a fatal application error"
+                )
             if self._is_editor_actionable(page):
                 stable_polls += 1
                 if stable_polls >= self.settled_poll_count:
