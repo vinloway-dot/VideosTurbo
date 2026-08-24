@@ -25,6 +25,10 @@ from app.services.cloud_agent.storage import JobPaths
 
 
 _PROGRESS_RE = re.compile(r"\b(\d+)\s*/\s*(\d+)\b")
+_GENERATED_IMAGE_ALT_RE = re.compile(
+    r"^(?:generated image|รูปภาพที่สร้างขึ้น)$",
+    re.IGNORECASE,
+)
 RENAME_CLIPS_INSTRUCTION = "เปลี่ยนชื่อคลิปตามลำดับ ของวีดีโอ"
 
 
@@ -533,6 +537,10 @@ class GoogleFlowClient:
     def _wait_for_generation(self, page: Any, expected_count: int) -> None:
         deadline = time.monotonic() + self.generation_timeout_seconds
         while True:
+            if self._generated_image_output_count(page):
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow generated image output detected before six videos"
+                )
             progress = self._progress_for_expected_count(page.content(), expected_count)
             if progress is not None and progress >= expected_count:
                 return
@@ -541,6 +549,18 @@ class GoogleFlowClient:
                     f"Google Flow generation timed out before {expected_count}/{expected_count}"
                 )
             time.sleep(self.poll_seconds)
+
+    @staticmethod
+    def _generated_image_output_count(page: Any) -> int:
+        """Count observable generated-image cards without reading private asset data."""
+        try:
+            images = page.locator("img[alt]")
+            return sum(
+                bool(_GENERATED_IMAGE_ALT_RE.fullmatch(images.nth(index).get_attribute("alt") or ""))
+                for index in range(images.count())
+            )
+        except PlaywrightError:
+            return 0
 
     @staticmethod
     def _progress_for_expected_count(html: str, expected_count: int) -> int | None:

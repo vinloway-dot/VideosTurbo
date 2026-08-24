@@ -251,6 +251,8 @@ class FakeLocator:
             return int(self.page.busy)
         if self.kind == "progressbar":
             return int(self.page.progressbar)
+        if self.kind == "generated_images":
+            return len(self.page.generated_image_alts)
         if self.kind == "missing":
             return 0
         if self.kind == "semantic_name":
@@ -288,6 +290,8 @@ class FakeLocator:
             if self.page.agent_pressed is None:
                 return None
             return str(self.page.agent_pressed).lower()
+        if self.kind == "generated_image" and name == "alt":
+            return self.page.generated_image_alts[self.index]
         return None
 
     def input_value(self):
@@ -324,6 +328,8 @@ class FakeLocator:
             return FakeLocator(self.page, "download", index=index)
         if self.kind == "checkboxes":
             return FakeLocator(self.page, "checkbox", index=index)
+        if self.kind == "generated_images":
+            return FakeLocator(self.page, "generated_image", index=index)
         raise AssertionError(f"nth is unavailable for {self.kind}")
 
 
@@ -358,6 +364,7 @@ class FakePage:
         default_prompt_visible=False,
         agent_deactivates_on_prompt_fill=False,
         generate_available=True,
+        generated_image_alts=None,
     ):
         self.url = "about:blank"
         self.progress_html = list(progress_html)
@@ -406,6 +413,7 @@ class FakePage:
         self.default_prompt_visible = default_prompt_visible
         self.agent_deactivates_on_prompt_fill = agent_deactivates_on_prompt_fill
         self.generate_available = generate_available
+        self.generated_image_alts = list(generated_image_alts or [])
         self.generate_clicked = False
         self.agent_click_count = 0
         self.fill_agent_pressed_states = []
@@ -438,6 +446,8 @@ class FakePage:
             return FakeLocator(self, "media_list")
         if selector == '[aria-busy="true"]:visible':
             return FakeLocator(self, "busy")
+        if selector == "img[alt]":
+            return FakeLocator(self, "generated_images")
         raise AssertionError(f"unexpected page locator: {selector}")
 
     def get_by_role(self, role, *, name=None, exact=None):
@@ -1186,6 +1196,22 @@ def test_flow_workspace_cleanup_raises_when_zero_state_cannot_be_verified(monkey
     with client.acquire_workspace(_job()) as workspace:
         with pytest.raises(FlowWorkspaceVerificationError, match="empty"):
             workspace.cleanup_and_verify_empty()
+
+
+def test_google_flow_generation_stops_early_when_observable_generated_image_appears(
+    monkeypatch,
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 0 / 6</div>"],
+        generated_image_alts=["รูปภาพที่สร้างขึ้น"],
+    )
+    client, _ = _client(page, timeout_seconds=1800.0)
+    clock = iter([0.0, 1800.1])
+    monkeypatch.setattr(google_flow.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="generated image"):
+        client._wait_for_generation(page, expected_count=6)
 
 
 def test_google_flow_generation_timeout_is_bounded(monkeypatch, tmp_path):
