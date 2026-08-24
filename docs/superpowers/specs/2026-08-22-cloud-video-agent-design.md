@@ -1,7 +1,7 @@
 # VideosTurbo Cloud Video Agent Design
 
-> **Status:** Design Spec v2.5 — Adaptive Six-Clip + durable paid Google Flow generation fence + idempotent Agent activation.
-> **Implementation gate:** Production Google Flow work remains paused until the v2.5 RED→GREEN implementation, full verification, and CI are complete. This document authorizes no paid Flow/TTS operation and does not authorize restarting the production Worker.
+> **Status:** Design Spec v2.6 — Adaptive Six-Clip + durable paid Google Flow generation fence + idempotent Agent activation + safe pre-fence retry.
+> **Implementation gate:** Production Google Flow work remains paused until the v2.6 RED→GREEN implementation, full verification, and CI are complete. This document authorizes no paid Flow/TTS operation and does not authorize restarting the production Worker.
 
 ## 1. Goal
 
@@ -63,7 +63,7 @@ feature/six-clip-media-timeline
 
 Do not merge or modify the baseline as part of this feature. Do not remove the legacy stock/local-render path until the Cloud Agent passes the real Ubuntu End-to-End smoke gate.
 
-The current feature implementation completed Tasks 1–14 through the live paid-flow checkpoint. Those components are retained where compatible. This v2.4 spec keeps the v2.3 dedicated shared Flow workspace and v2.2 Adaptive Six-Clip timing policy, but adds a conservative durable fence before the paid Generate click so a crash at `TTS_READY` cannot cause automatic pre-clean and duplicate generation.
+The current feature implementation completed Tasks 1–14 through the live paid-flow checkpoint. Those components are retained where compatible. This v2.6 spec keeps the v2.3 dedicated shared Flow workspace, v2.2 Adaptive Six-Clip timing policy, v2.4 durable generation fence, and v2.5 Agent contract. It adds an explicit operator retry only for a provably pre-fence transient Flow editor failure, so a valid canonical narration is not needlessly synthesized again.
 
 ## 3. Repository-aligned reuse decisions
 
@@ -309,6 +309,90 @@ The existing production job `c604f5d5-c206-4d49-bad2-cac59e2815a2` remains
 `HUMAN_REQUIRED / TTS_READY / flow_generation_unresolved=true`. Its canonical
 audio and two remote image assets are preserved as evidence and are not used to
 test or remediate this contract.
+
+### 3.12 v2.6 explicit retry for a provably pre-fence Flow editor failure
+
+A transient Google Flow vendor client-error page may make the editor impossible
+to verify before the workspace can be pre-cleaned, the Agent prompt prepared,
+the durable paid-generation fence written, or Generate clicked. The resulting
+durable state is intentionally:
+
+```text
+status=FAILED
+checkpoint=TTS_READY
+error_code=FLOW_WORKSPACE_VERIFICATION_FAILED
+flow_generation_unresolved=false
+flow_cleanup_unresolved=false
+```
+
+`FAILED` is not claimable, so the system exposes one explicit application-level
+operator action instead of an automatic retry loop:
+
+```text
+POST /api/v1/cloud-agent/jobs/{job_id}/retry
+```
+
+The action is implemented by a small retry service composed from the existing
+`config.app`, `CloudJobStore`, `CloudJobStorage`, `validate_audio`, and
+`calculate_adaptive_timing` contracts. It does not open a browser, call TTS,
+call Flow, inspect private browser data, or run production work in FastAPI.
+It may only atomically requeue the **same** job as:
+
+```text
+FAILED / TTS_READY / pre-fence evidence
+→ QUEUED / TTS_READY / same canonical voice.mp3 / same false fence values
+```
+
+The retry service must prove every condition below from the record and job-local
+artifacts, otherwise it fails closed with an HTTP 409 safe, user-facing reason:
+
+- the status is exactly `FAILED`, checkpoint exactly `TTS_READY`, no worker
+  lease is held, and the error is the pre-fence
+  `FLOW_WORKSPACE_VERIFICATION_FAILED` classification;
+- `flow_generation_unresolved` and `flow_cleanup_unresolved` are both false;
+- the canonical `audio/voice.mp3` exists, is a normal file, validates through
+  the existing audio validator, and the recorded `voice_file` is its canonical
+  job-owned path;
+- the timing policy can be recomputed from the newly probed decimal duration
+  under the configured playback floor. The rederived duration, playback speed,
+  and target duration replace stale/inconsistent stored values in the same
+  normal `patch_job()` transition; and
+- no Flow side-effect evidence exists: no canonical `clip_01.mp4` …
+  `clip_06.mp4`, archive, staging content, or quarantined Flow source evidence.
+
+An existing Flow artifact is not discarded or treated as a fresh retry. The
+existing canonical → archive → staging recovery path remains authoritative for
+claimable `TTS_READY` recovery states. A failed job with such evidence is
+rejected by this fresh-retry action and reports that recovery/reconciliation is
+required. In particular, `flow_generation_unresolved=true` is always rejected:
+it remains reconciliation-only and the retry action must never clear, replace,
+or work around that fence.
+
+The retry transition clears only the prior visible error and control request,
+sets `status=QUEUED`, `current_step=queued`, and retains the `TTS_READY`
+checkpoint, canonical audio path, and both false Flow flags. Worker claiming
+then re-enters the existing `TTS_READY` code path, which validates/probes the
+audio again and never invokes `tts.generate()`. There is no automatic retry
+and no new status, schema column, or retry counter.
+
+The WebUI exposes the same explicit `Retry` action beside Pause/Resume/Cancel.
+Success explains that the existing narration will be reused. A 409 displays a
+sanitized reason (for example, that possible paid Flow work requires
+reconciliation) and never shows a browser stack trace.
+
+Google Flow readiness stays fail-closed. Before any future requeued job may
+reach preparation, `GoogleFlowClient.acquire_workspace()` must observe the
+existing actionable-editor contract for `settled_poll_count` consecutive polls:
+the page is complete and live, a verified Agent control/composer is observable,
+the media inventory or empty shell is observable, no visible busy/progress
+state remains, and no observable fatal application-error page prevents the
+editor. The provider explicitly recognizes the observed user-visible
+`Application error: a client-side exception has occurred` state (including its
+recorded undefined-service variant) as non-actionable even if stale controls
+remain in the DOM. A failure at this boundary occurs before the paid fence, preserves
+`TTS_READY` plus canonical audio and false fence values, and returns the job to
+the same explicit retryable `FAILED` classification. It must not auto-retry,
+pre-clean, prepare an Agent prompt, set the generation fence, or click Generate.
 
 ## 4. Runtime architecture
 
