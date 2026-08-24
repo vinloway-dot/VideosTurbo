@@ -620,10 +620,11 @@ class FakeSessionManager:
         return object()
 
 
-def _job():
+def _job(*, flow_generation_unresolved=False):
     return SimpleNamespace(
         id="job-123",
         master_prompt="Create six chronological videos about Saturn's hexagon.",
+        flow_generation_unresolved=flow_generation_unresolved,
     )
 
 
@@ -869,6 +870,20 @@ def test_google_flow_persistent_direct_fatal_fails_after_two_reloads():
             pass
 
     assert page.reload_calls == [{"wait_until": "domcontentloaded"}] * 2
+    assert page.actions == []
+
+
+def test_google_flow_reconciliation_does_not_recover_direct_fatal_page():
+    page = FakePage(
+        progress_html=["<main>Application error: a client-side exception has occurred</main>"],
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=0.02)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="fatal application error"):
+        with client.acquire_workspace(_job(flow_generation_unresolved=True)):
+            pass
+
+    assert page.reload_calls == []
     assert page.actions == []
 
 

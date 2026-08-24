@@ -336,16 +336,19 @@ class GoogleFlowClient:
         ) as context:
             page = BrowserSessionProvider._page(context)
             page.goto(self.service_url, wait_until="domcontentloaded")
-            for recovery_cycle in range(_DIRECT_LINK_RECOVERY_CYCLES + 1):
-                try:
-                    self._wait_for_settled_editor(page)
-                    break
-                except _DirectLinkFatalPageError as exc:
-                    if recovery_cycle >= _DIRECT_LINK_RECOVERY_CYCLES:
-                        raise FlowWorkspaceVerificationError(
-                            "Google Flow project editor could not be verified"
-                        ) from exc
-                    page.reload(wait_until="domcontentloaded")
+            if job.flow_generation_unresolved:
+                self._wait_for_settled_editor(page)
+            else:
+                for recovery_cycle in range(_DIRECT_LINK_RECOVERY_CYCLES + 1):
+                    try:
+                        self._wait_for_settled_editor(page)
+                        break
+                    except _DirectLinkFatalPageError as exc:
+                        if recovery_cycle >= _DIRECT_LINK_RECOVERY_CYCLES:
+                            raise FlowWorkspaceVerificationError(
+                                "Google Flow project editor could not be verified"
+                            ) from exc
+                        page.reload(wait_until="domcontentloaded")
             yield FlowWorkspaceRun(self, page)
 
     @staticmethod
