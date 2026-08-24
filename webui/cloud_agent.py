@@ -13,6 +13,18 @@ def _api(method, path, **kwargs):
     return response.json().get("data")
 
 
+def _api_error_message(error):
+    response = getattr(error, "response", None)
+    if response is not None:
+        try:
+            message = response.json().get("message", "")
+            if message:
+                return str(message)
+        except (ValueError, requests.RequestException):
+            pass
+    return "Cloud Agent request could not be completed."
+
+
 def render_cloud_agent_panel():
     st.subheader("Cloud Agent")
     subject = st.text_input("Video Subject", key="cloud_agent_subject")
@@ -34,9 +46,14 @@ def render_cloud_agent_panel():
     if controls[2].button("Start", key="cloud_agent_start"):
         st.json(_api("POST", "jobs", json={"subject": subject, "target_words": words, "language": language, "script": script, "master_prompt": master_prompt, "tts_provider": provider, "voice_id": voice, "voice_speed": speed}))
     job_id = st.text_input("Job ID", key="cloud_agent_job_id")
-    for action in ("Pause", "Resume", "Cancel"):
+    for action in ("Pause", "Resume", "Retry", "Cancel"):
         if controls[3].button(action, key=f"cloud_agent_{action.lower()}") and job_id:
-            st.json(_api("POST", f"jobs/{job_id}/{action.lower()}"))
+            try:
+                st.json(_api("POST", f"jobs/{job_id}/{action.lower()}"))
+                if action == "Retry":
+                    st.caption("Flow failed before generation. Existing narration will be reused.")
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
     st.caption("job status/history")
     st.caption("final video")
     st.caption("measured narration duration")

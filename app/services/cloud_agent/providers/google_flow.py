@@ -41,6 +41,11 @@ _EMPTY_MEDIA_NAME_RE = re.compile(
     r"(?:start creating or add media|เริ่มสร้างหรือวางสื่อ)",
     re.IGNORECASE,
 )
+_FATAL_APPLICATION_ERROR_RE = re.compile(
+    r"(?:application error:\s*a client-side exception has occurred|"
+    r"cannot read properties of undefined \(reading ['\"]service['\"]\))",
+    re.IGNORECASE,
+)
 RENAME_CLIPS_INSTRUCTION = "เปลี่ยนชื่อคลิปตามลำดับ ของวีดีโอ"
 
 
@@ -463,6 +468,8 @@ class GoogleFlowClient:
         try:
             if page.evaluate("document.readyState") != "complete":
                 return False
+            if _FATAL_APPLICATION_ERROR_RE.search(page.content()):
+                return False
             agent = self._agent_control(page)
             composer = self._observable_composer(agent)
             if not (composer.count() == 1 and composer.is_visible()):
@@ -477,9 +484,14 @@ class GoogleFlowClient:
 
     def _wait_for_settled_editor(self, page: Any) -> None:
         deadline = time.monotonic() + self.editor_ready_timeout_seconds
+        stable_polls = 0
         while True:
             if self._is_editor_actionable(page):
-                return
+                stable_polls += 1
+                if stable_polls >= self.settled_poll_count:
+                    return
+            else:
+                stable_polls = 0
 
             for role in ("link", "button"):
                 launch = page.get_by_role(

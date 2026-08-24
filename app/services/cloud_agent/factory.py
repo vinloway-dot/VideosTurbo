@@ -15,6 +15,7 @@ from app.services.cloud_agent.providers.google_flow import (
 from app.services.cloud_agent.session import SessionManager
 from app.services.cloud_agent.storage import CloudJobStorage
 from app.services.cloud_agent.tts import ExistingVoiceTTSClient
+from app.services.cloud_agent.retry import PreFlowRetryService
 from app.services.cloud_agent.worker import CloudAgentWorker
 from app.services.cloud_agent.workflow import CloudAgentWorkflow
 
@@ -83,6 +84,17 @@ def build_session_manager(
             ),
         },
         headed=not bool(app_config["cloud_agent_browser_headless"]),
+    )
+
+
+def build_pre_flow_retry_service() -> PreFlowRetryService:
+    """Compose retry validation from the existing application configuration."""
+    app_config = config.app
+    return PreFlowRetryService(
+        CloudJobStore(str(app_config["cloud_agent_db_path"])),
+        CloudJobStorage(),
+        tts_min_duration=float(app_config["cloud_agent_tts_min_duration_seconds"]),
+        canva_min_playback_speed=float(app_config["cloud_agent_canva_min_playback_speed"]),
     )
 
 

@@ -771,6 +771,35 @@ def test_google_flow_editor_readiness_retries_destroyed_navigation_context():
         assert workspace.page is page
 
 
+def test_google_flow_editor_requires_consecutive_healthy_observations(monkeypatch):
+    page = FakePage(progress_html=["<div>Ready</div>"])
+    client, _ = _client(page, settled_poll_count=3)
+    observations = iter([True, False, True, True, True])
+    calls = []
+
+    def actionable(_page):
+        calls.append("checked")
+        return next(observations)
+
+    monkeypatch.setattr(client, "_is_editor_actionable", actionable)
+
+    client._wait_for_settled_editor(page)
+
+    assert calls == ["checked"] * 5
+
+
+def test_google_flow_fatal_application_error_is_not_actionable():
+    page = FakePage(
+        progress_html=[
+            "<main>Application error: a client-side exception has occurred "
+            "(reading 'service')</main>"
+        ]
+    )
+    client, _ = _client(page)
+
+    assert client._is_editor_actionable(page) is False
+
+
 def test_flow_workspace_transient_empty_inventory_cannot_pass_generation_gate(
     monkeypatch,
 ):
@@ -787,6 +816,7 @@ def test_flow_workspace_transient_empty_inventory_cannot_pass_generation_gate(
     clock = iter([0.0, 0.0, 0.2, 0.4, 1.1])
     monkeypatch.setattr(google_flow.time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(client, "_wait_for_settled_editor", lambda _page: None)
 
     with client.acquire_workspace(_job()) as workspace:
         with pytest.raises(FlowWorkspaceVerificationError, match="empty product workspace"):
@@ -955,7 +985,7 @@ def test_flow_workspace_preclean_blocks_generation_when_inventory_is_unverifiabl
         empty_state_available=False,
         media_list_sequence=[True, False, False],
     )
-    client, _ = _client(page, timeout_seconds=1.0)
+    client, _ = _client(page, timeout_seconds=1.0, settled_poll_count=1)
     clock = [-0.5]
 
     def monotonic():
@@ -1161,6 +1191,7 @@ def test_flow_workspace_reconciliation_requires_stable_exact_six_before_rename(
 
     monkeypatch.setattr(google_flow.time, "monotonic", monotonic)
     monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(client, "_wait_for_settled_editor", lambda _page: None)
     monkeypatch.setattr(
         google_flow,
         "materialize_flow_archive",
@@ -1367,6 +1398,7 @@ def test_flow_workspace_cleanup_raises_when_zero_state_cannot_be_verified(monkey
         page,
         timeout_seconds=30.0,
         editor_ready_timeout_seconds=1.0,
+        settled_poll_count=3,
     )
     clock = [-0.5]
 
@@ -1376,6 +1408,7 @@ def test_flow_workspace_cleanup_raises_when_zero_state_cannot_be_verified(monkey
 
     monkeypatch.setattr(google_flow.time, "monotonic", monotonic)
     monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(client, "_wait_for_settled_editor", lambda _page: None)
 
     with client.acquire_workspace(_job()) as workspace:
         with pytest.raises(FlowWorkspaceVerificationError, match="empty"):
@@ -1464,6 +1497,7 @@ def test_post_reload_settled_inventory_uses_editor_timeout_not_generation_timeou
 
     monkeypatch.setattr(google_flow.time, "monotonic", monotonic)
     monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(client, "_wait_for_settled_editor", lambda _page: None)
 
     with client.acquire_workspace(_job()) as workspace:
         with pytest.raises(FlowWorkspaceVerificationError, match="empty"):

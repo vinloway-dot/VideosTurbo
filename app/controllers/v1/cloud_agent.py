@@ -15,7 +15,12 @@ from app.models.cloud_agent import (
 from app.models.exception import HttpException
 from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.errors import HumanRequiredError
-from app.services.cloud_agent.factory import build_session_manager
+from app.services.cloud_agent.errors import PreFlowRetryEligibilityError
+from app.services.cloud_agent.factory import (
+    build_pre_flow_retry_service,
+    build_session_manager,
+)
+from app.services.cloud_agent.retry import PreFlowRetryService
 from app.services.cloud_agent.preflight import _probe_storage_writable
 from app.services.cloud_agent.session import SessionManager
 from app.services.cloud_agent.storage import CloudJobStorage
@@ -63,6 +68,10 @@ def get_cloud_job_storage() -> CloudJobStorage:
 
 def get_cloud_agent_sessions() -> SessionManager:
     return build_session_manager()
+
+
+def get_pre_flow_retry_service() -> PreFlowRetryService:
+    return build_pre_flow_retry_service()
 
 
 def _job_data(job) -> dict:
@@ -195,6 +204,24 @@ def resume_cloud_agent_job(
         error_code="",
         error_message="",
     )
+    return utils.get_response(200, _job_data(job))
+
+
+@router.post("/cloud-agent/jobs/{job_id}/retry")
+def retry_cloud_agent_job(
+    job_id: str,
+    request: Request,
+    retry_service: PreFlowRetryService = Depends(get_pre_flow_retry_service),
+):
+    del request
+    try:
+        job = retry_service.retry(job_id)
+    except PreFlowRetryEligibilityError as exc:
+        raise HttpException(
+            task_id=job_id,
+            status_code=409,
+            message=str(exc),
+        ) from exc
     return utils.get_response(200, _job_data(job))
 
 

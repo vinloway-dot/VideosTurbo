@@ -1,4 +1,5 @@
 import importlib
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -28,6 +29,7 @@ EXPECTED_CLOUD_AGENT_PATHS = {
     ("GET", "/api/v1/cloud-agent/jobs/{job_id}"),
     ("POST", "/api/v1/cloud-agent/jobs/{job_id}/pause"),
     ("POST", "/api/v1/cloud-agent/jobs/{job_id}/resume"),
+    ("POST", "/api/v1/cloud-agent/jobs/{job_id}/retry"),
     ("POST", "/api/v1/cloud-agent/jobs/{job_id}/cancel"),
     ("GET", "/api/v1/cloud-agent/jobs/{job_id}/final"),
     ("POST", "/api/v1/cloud-agent/sessions/check"),
@@ -280,6 +282,65 @@ def test_resume_rejects_job_that_is_not_paused_or_human_required(tmp_path):
         cloud_agent.resume_cloud_agent_job(created.id, None, store=store)
 
     assert exc_info.value.status_code == 409
+
+
+def test_retry_route_is_registered_as_an_explicit_job_control(tmp_path):
+    client, store = _client(tmp_path)
+    created = _created_job(store)
+
+    response = client.post(f"/api/v1/cloud-agent/jobs/{created.id}/retry")
+
+    assert response.status_code != 404
+
+
+def test_retry_controller_requeues_only_safe_pre_flow_job_and_sanitizes_refusal(
+    monkeypatch, tmp_path
+):
+    cloud_agent = _cloud_agent_controller()
+    client, store = _client(tmp_path)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    eligible = _created_job(store)
+    blocked = _created_job(store)
+    for job, unresolved in ((eligible, False), (blocked, True)):
+        paths = storage.prepare(job.id)
+        paths.voice_file.write_bytes(b"canonical voice")
+        store.patch_job(
+            job.id,
+            status=CloudJobStatus.FAILED,
+            checkpoint=CloudJobCheckpoint.TTS_READY,
+            current_step="failed",
+            voice_file=str(paths.voice_file),
+            error_code="FLOW_WORKSPACE_VERIFICATION_FAILED",
+            error_message="vendor error",
+            flow_generation_unresolved=unresolved,
+        )
+
+    retry_module = importlib.import_module("app.services.cloud_agent.retry")
+    monkeypatch.setattr(
+        retry_module,
+        "validate_audio",
+        lambda *_args, **_kwargs: SimpleNamespace(duration=63.936),
+    )
+    retry_service = retry_module.PreFlowRetryService(
+        store,
+        storage,
+        tts_min_duration=1.0,
+        canva_min_playback_speed=0.85,
+    )
+    client.app.dependency_overrides[cloud_agent.get_pre_flow_retry_service] = (
+        lambda: retry_service
+    )
+
+    accepted = client.post(f"/api/v1/cloud-agent/jobs/{eligible.id}/retry")
+    refused = client.post(f"/api/v1/cloud-agent/jobs/{blocked.id}/retry")
+
+    assert accepted.status_code == 200
+    assert accepted.json()["data"]["id"] == eligible.id
+    assert accepted.json()["data"]["status"] == CloudJobStatus.QUEUED.value
+    assert accepted.json()["data"]["checkpoint"] == CloudJobCheckpoint.TTS_READY.value
+    assert refused.status_code == 409
+    assert "reconciliation required" in refused.json()["message"]
+    assert "Traceback" not in refused.json()["message"]
 
 
 def test_final_download_requires_final_validated_checkpoint(tmp_path):

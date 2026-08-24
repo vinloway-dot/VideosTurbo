@@ -24,6 +24,7 @@ def test_cloud_agent_ui_is_a_thin_fastapi_client_with_required_controls_and_stat
         "Start",
         "Pause",
         "Resume",
+        "Retry",
         "Cancel",
         "Narration Too Long",
         "shorten script",

@@ -21,3 +21,7 @@ class NarrationTooLongError(MediaValidationError):
 
 class HumanRequiredError(RuntimeError):
     """Raised when workflow progress requires manual human recovery."""
+
+
+class PreFlowRetryEligibilityError(ValueError):
+    """Raised when a failed TTS_READY job cannot safely re-enter Flow."""
