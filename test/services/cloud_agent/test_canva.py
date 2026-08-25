@@ -226,7 +226,10 @@ class FakeCanvaSessions:
         self.calls = []
 
     def ensure_service_ready(self, service, job_id):
-        self.calls.append((service, job_id))
+        self.calls.append(("service", service, job_id))
+
+    def ensure_open_page_ready(self, service, page, job_id):
+        self.calls.append(("page", service, page, job_id))
 
 
 class _VisibleUploadName:
@@ -469,7 +472,7 @@ def test_canva_assembly_uploads_orders_and_exports_adaptive_six_clip_job(tmp_pat
 
     assert result == output
     assert output.read_bytes() == b"final-mp4"
-    assert sessions.calls == [("canva", "job-canva-123")]
+    assert sessions.calls == [("page", "canva", page, "job-canva-123")]
     assert page.actions == [
         ("goto", "https://www.canva.com/design/demo/edit", {"wait_until": "domcontentloaded"}),
         ("upload", ("clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4", "voice.mp3")),

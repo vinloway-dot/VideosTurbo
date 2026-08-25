@@ -21,6 +21,10 @@ class SessionProvider(Protocol):
         job_id: str = "",
     ) -> SessionCheckResult: ...
 
+    def check_open_page(self, page: object, *, job_id: str = "") -> SessionCheckResult: ...
+
+    def repair_open_page(self, page: object, *, job_id: str = "") -> SessionCheckResult: ...
+
 
 class SessionManager:
     """Apply bounded Check -> safe Repair -> Verify policy across services."""
@@ -57,6 +61,32 @@ class SessionManager:
                 ServiceSessionStatus.READY,
             }:
                 verified = provider.check_session(headed=self.headed, job_id=job_id)
+                if verified.status is ServiceSessionStatus.READY:
+                    return verified
+                self._raise_unready(service, job_id, verified)
+            self._raise_unready(service, job_id, repair)
+
+        self._raise_unready(service, job_id, initial)
+
+    def ensure_open_page_ready(
+        self,
+        service: str,
+        page: object,
+        job_id: str,
+    ) -> SessionCheckResult:
+        """Verify or safely repair a service without reopening its browser context."""
+        provider = self._provider(service)
+        initial = provider.check_open_page(page, job_id=job_id)
+        if initial.status is ServiceSessionStatus.READY:
+            return initial
+
+        if initial.status is ServiceSessionStatus.SESSION_EXPIRED:
+            repair = provider.repair_open_page(page, job_id=job_id)
+            if repair.status in {
+                ServiceSessionStatus.AUTO_RELOGIN,
+                ServiceSessionStatus.READY,
+            }:
+                verified = provider.check_open_page(page, job_id=job_id)
                 if verified.status is ServiceSessionStatus.READY:
                     return verified
                 self._raise_unready(service, job_id, verified)

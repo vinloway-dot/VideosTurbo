@@ -39,10 +39,7 @@ class BrowserSessionProvider:
             with self.browser.open(self.service, headed=headed) as context:
                 page = self._page(context)
                 page.goto(self.service_url, wait_until="domcontentloaded")
-                self._wait_for_observable_state(page)
-                status = self.classifier(url=page.url, html=page.content())
-                evidence_path = self._capture(page, job_id, label="session-check")
-                return self._result(status, evidence_path=evidence_path)
+                return self.check_open_page(page, job_id=job_id)
         except TimeoutError:
             return self._result(
                 ServiceSessionStatus.ERROR,
@@ -70,26 +67,7 @@ class BrowserSessionProvider:
             with self.browser.open(self.service, headed=headed) as context:
                 page = self._page(context)
                 page.goto(self.service_url, wait_until="domcontentloaded")
-                self._wait_for_observable_state(page)
-                status = self.classifier(url=page.url, html=page.content())
-                if status is not ServiceSessionStatus.SESSION_EXPIRED:
-                    evidence_path = self._capture(page, job_id, label="session-repair")
-                    return self._result(status, evidence_path=evidence_path)
-
-                continue_google = page.get_by_role(
-                    "button",
-                    name=re.compile(r"continue\s+with\s+google", re.IGNORECASE),
-                )
-                if not continue_google.is_visible():
-                    evidence_path = self._capture(page, job_id, label="session-repair")
-                    return self._result(status, evidence_path=evidence_path)
-
-                continue_google.click()
-                evidence_path = self._capture(page, job_id, label="session-repair")
-                return self._result(
-                    ServiceSessionStatus.AUTO_RELOGIN,
-                    evidence_path=evidence_path,
-                )
+                return self.repair_open_page(page, job_id=job_id)
         except TimeoutError:
             return self._result(
                 ServiceSessionStatus.ERROR,
@@ -100,6 +78,36 @@ class BrowserSessionProvider:
                 ServiceSessionStatus.ERROR,
                 message=f"{self.service} session repair failed: {type(exc).__name__}",
             )
+
+    def check_open_page(self, page: Any, *, job_id: str = "") -> SessionCheckResult:
+        """Classify the already-open service page without reopening its profile."""
+        self._wait_for_observable_state(page)
+        status = self.classifier(url=page.url, html=page.content())
+        evidence_path = self._capture(page, job_id, label="session-check")
+        return self._result(status, evidence_path=evidence_path)
+
+    def repair_open_page(self, page: Any, *, job_id: str = "") -> SessionCheckResult:
+        """Apply the existing bounded auto-relogin policy on an already-open page."""
+        self._wait_for_observable_state(page)
+        status = self.classifier(url=page.url, html=page.content())
+        if status is not ServiceSessionStatus.SESSION_EXPIRED:
+            evidence_path = self._capture(page, job_id, label="session-repair")
+            return self._result(status, evidence_path=evidence_path)
+
+        continue_google = page.get_by_role(
+            "button",
+            name=re.compile(r"continue\s+with\s+google", re.IGNORECASE),
+        )
+        if not continue_google.is_visible():
+            evidence_path = self._capture(page, job_id, label="session-repair")
+            return self._result(status, evidence_path=evidence_path)
+
+        continue_google.click()
+        evidence_path = self._capture(page, job_id, label="session-repair")
+        return self._result(
+            ServiceSessionStatus.AUTO_RELOGIN,
+            evidence_path=evidence_path,
+        )
 
     @staticmethod
     def _page(context: Any) -> Any:

@@ -129,10 +129,10 @@ class CanvaAssemblyClient:
         if target_seconds <= 0:
             raise ValueError("Canva target duration must be positive")
 
-        self.sessions.ensure_service_ready("canva", job.id)
         with self.browser.open("canva", headed=True) as context:
             page = BrowserSessionProvider._page(context)
             page.goto(self.service_url, wait_until="domcontentloaded")
+            self.sessions.ensure_open_page_ready("canva", page, job.id)
             self._clean_uploaded_videos(page)
             self._clear_video_timeline(page)
             self._upload_media(page, [*clip_paths, audio_path])

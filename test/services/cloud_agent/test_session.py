@@ -33,6 +33,25 @@ class SequenceProvider:
         return self.repair
 
 
+class OpenPageSequenceProvider(SequenceProvider):
+    def __init__(self, service: str, checks, repair=None):
+        super().__init__(service, checks, repair)
+        self.page_check_calls = []
+        self.page_repair_calls = []
+
+    def check_open_page(self, page, *, job_id: str = ""):
+        self.page_check_calls.append((page, job_id))
+        if not self.checks:
+            raise AssertionError("unexpected extra page session check")
+        return self.checks.pop(0)
+
+    def repair_open_page(self, page, *, job_id: str = ""):
+        self.page_repair_calls.append((page, job_id))
+        if self.repair is None:
+            raise AssertionError("unexpected page repair attempt")
+        return self.repair
+
+
 def test_check_all_returns_each_service_without_attempting_repair():
     flow = SequenceProvider(
         "google_flow", [_result("google_flow", ServiceSessionStatus.READY)]
@@ -59,6 +78,20 @@ def test_ensure_service_ready_returns_ready_without_repair():
     assert result.status is ServiceSessionStatus.READY
     assert flow.check_calls == [False]
     assert flow.repair_calls == []
+
+
+def test_ensure_open_page_ready_reuses_the_assembly_browser_page():
+    canva = OpenPageSequenceProvider(
+        "canva", [_result("canva", ServiceSessionStatus.READY)]
+    )
+    manager = SessionManager({"canva": canva})
+    page = object()
+
+    result = manager.ensure_open_page_ready("canva", page, job_id="job-1")
+
+    assert result.status is ServiceSessionStatus.READY
+    assert canva.page_check_calls == [(page, "job-1")]
+    assert canva.check_calls == []
 
 
 def test_ensure_service_ready_uses_one_safe_auto_relogin_then_verifies():
