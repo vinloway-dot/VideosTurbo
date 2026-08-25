@@ -239,12 +239,27 @@ class FakeLocator:
                 else self.page.checkbox_count
             )
         if self.kind == "media_cards":
+            if self.page.has_completed_video_polls:
+                return len(self.page.active_completed_video_poll)
             if self.page.card_count_sequence:
                 self.page.last_card_count = self.page.card_count_sequence.pop(0)
                 return self.page.last_card_count
             return len(self.page.clip_names)
         if self.kind == "media_card":
-            return int(self.index is not None and self.index < len(self.page.clip_names))
+            card_count = (
+                len(self.page.active_completed_video_poll)
+                if self.page.has_completed_video_polls
+                else len(self.page.clip_names)
+            )
+            return int(self.index is not None and self.index < card_count)
+        if self.kind == "card_video":
+            if self.index is None or self.index >= len(self.page.active_completed_video_poll):
+                return 0
+            return int(
+                self.page.active_completed_video_poll[self.index].get(
+                    "has_video_element", True
+                )
+            )
         if self.kind == "card_delete":
             return int(
                 self.page.card_delete_available
@@ -292,8 +307,12 @@ class FakeLocator:
             return len(self.page.generated_image_alts)
         if self.kind == "videos":
             return sum(
-                card["media_type"] == "video"
-                and card.get("has_video_element", True)
+                int(
+                    card["media_type"] == "video"
+                    and card.get("has_video_element", True)
+                    and card.get("video_visible", True)
+                )
+                + int(card.get("extra_visible_videos", 0))
                 for card in self.page.active_completed_video_poll
             )
         if self.kind == "missing":
@@ -355,6 +374,8 @@ class FakeLocator:
             return FakeLocator(self.page, prompt_kind)
         if self.kind == "media_list" and "role=\"button\"" in str(selector):
             return FakeLocator(self.page, "inventory_cards")
+        if self.kind == "media_card" and str(selector) == "video":
+            return FakeLocator(self.page, "card_video", index=self.index)
         raise AssertionError(f"unexpected nested locator: {self.kind} {selector}")
 
     def get_by_role(self, role, *, name=None, exact=None):
@@ -480,6 +501,7 @@ class FakePage:
         self.agent_deactivates_on_prompt_fill = agent_deactivates_on_prompt_fill
         self.generate_available = generate_available
         self.generated_image_alts = list(generated_image_alts or [])
+        self.has_completed_video_polls = completed_video_polls is not None
         self.completed_video_polls = list(completed_video_polls or [[]])
         self.active_completed_video_poll = list(self.completed_video_polls[0])
         self.context = FakeCdpContext(self)
@@ -606,7 +628,24 @@ class FakeCdpSession:
     def __init__(self, page):
         self.page = page
 
-    def send(self, method):
+    def send(self, method, params=None):
+        if method == "DOM.describeNode":
+            backend_node_id = str((params or {}).get("backendNodeId", ""))
+            card = next(
+                (
+                    candidate
+                    for candidate in self.page.active_completed_video_poll
+                    if str(candidate["fingerprint"]) == backend_node_id
+                ),
+                None,
+            )
+            if card is None:
+                return {"node": {"nodeName": "DIV", "children": []}}
+            children = []
+            if card.get("has_video_element", True):
+                children.append({"nodeName": "VIDEO"})
+            return {"node": {"nodeName": "DIV", "children": children}}
+
         assert method == "Accessibility.getFullAXTree"
         if self.page.completed_video_polls:
             self.page.active_completed_video_poll = list(
@@ -1343,6 +1382,40 @@ def test_flow_workspace_reconciles_completed_video_cards_without_progress_or_gen
     ) in page.actions
 
 
+def test_flow_workspace_reconciles_completed_hidden_video_cards_without_generate(
+    monkeypatch, tmp_path
+):
+    cards = _completed_video_cards(video_visible=False, ready_state=0)
+    page = FakePage(
+        progress_html=["<div>Generation complete</div>"],
+        completed_video_polls=[cards, cards, cards],
+        clip_names=[f"draft-{number}" for number in range(1, 7)],
+        renamed_clip_names=[f"clip {number}" for number in range(1, 7)],
+        inventory_sequence=[6, 6, 6],
+    )
+    client, _ = _client(page, timeout_seconds=5.0, settled_poll_count=3)
+    _timeout_clock(monkeypatch)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        result = workspace.reconcile_and_download(
+            _job(flow_generation_unresolved=True),
+            paths,
+        )
+
+    assert result == paths.flow_files
+    assert not any(
+        action[:3] == ("fill", "prompt", _job().master_prompt)
+        for action in page.actions
+    )
+    assert ("click", "delete_selected") not in page.actions
+
+
 def test_flow_workspace_partial_reconciliation_retains_remote_results(
     monkeypatch, tmp_path
 ):
@@ -1680,6 +1753,20 @@ def test_google_flow_completed_video_cards_complete_after_three_stable_polls(
     client._wait_for_generation(page, expected_count=6)
 
 
+def test_google_flow_completed_hidden_video_cards_complete_after_three_stable_polls(
+    monkeypatch,
+):
+    cards = _completed_video_cards(video_visible=False, ready_state=0)
+    page = FakePage(
+        progress_html=["<div>Generation complete</div>"],
+        completed_video_polls=[cards, cards, cards],
+    )
+    client, _ = _client(page, timeout_seconds=5.0, settled_poll_count=3)
+    _timeout_clock(monkeypatch)
+
+    client._wait_for_generation(page, expected_count=6)
+
+
 def test_google_flow_completed_video_cards_do_not_complete_after_only_two_polls(
     monkeypatch,
 ):
@@ -1689,6 +1776,38 @@ def test_google_flow_completed_video_cards_do_not_complete_after_only_two_polls(
         completed_video_polls=[cards, cards, []],
     )
     client, _ = _client(page, timeout_seconds=1.0, settled_poll_count=3)
+    _timeout_clock(monkeypatch)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="timed out"):
+        client._wait_for_generation(page, expected_count=6)
+
+
+def test_google_flow_completed_hidden_video_cards_do_not_complete_after_two_polls(
+    monkeypatch,
+):
+    cards = _completed_video_cards(video_visible=False)
+    page = FakePage(
+        progress_html=["<div>Generation complete</div>"],
+        completed_video_polls=[cards, cards, []],
+    )
+    client, _ = _client(page, timeout_seconds=1.0, settled_poll_count=3)
+    _timeout_clock(monkeypatch)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="timed out"):
+        client._wait_for_generation(page, expected_count=6)
+
+
+def test_google_flow_completed_video_cards_require_card_local_video_descendant(
+    monkeypatch,
+):
+    cards = _completed_video_cards()
+    cards[0]["extra_visible_videos"] = 1
+    cards[-1]["has_video_element"] = False
+    page = FakePage(
+        progress_html=["<div>Generation complete</div>"],
+        completed_video_polls=[cards, cards, cards],
+    )
+    client, _ = _client(page, timeout_seconds=5.0, settled_poll_count=3)
     _timeout_clock(monkeypatch)
 
     with pytest.raises(FlowWorkspaceVerificationError, match="timed out"):

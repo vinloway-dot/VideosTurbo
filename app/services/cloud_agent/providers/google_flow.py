@@ -656,7 +656,7 @@ class GoogleFlowClient:
         expected_count: int,
     ) -> tuple[str, ...] | None:
         """Return stable AX card fingerprints only for a safe completed-video set."""
-        if page.locator("video:visible").count() != expected_count:
+        if cls._media_card_count(page) != expected_count:
             return None
         if page.locator('[aria-busy="true"]:visible').count():
             return None
@@ -667,6 +667,40 @@ class GoogleFlowClient:
         try:
             session = page.context.new_cdp_session(page)
             nodes = session.send("Accessibility.getFullAXTree").get("nodes", [])
+            fingerprints: list[str] = []
+            for node in nodes:
+                if cls._ax_value(node, "role") != "button":
+                    continue
+                name = cls._ax_value(node, "name")
+                if not _VIDEO_CARD_NAME_RE.search(name):
+                    continue
+                description = cls._ax_value(node, "description")
+                properties = cls._ax_properties(node)
+                if not description or properties.get("disabled") or properties.get("busy"):
+                    return None
+                if _CARD_PROCESSING_RE.search(f"{name} {description}"):
+                    return None
+                if _CARD_FAILURE_RE.search(f"{name} {description}"):
+                    return None
+                backend_node_id = node.get("backendDOMNodeId")
+                if backend_node_id in {None, ""}:
+                    return None
+                described_node = session.send(
+                    "DOM.describeNode",
+                    {
+                        "backendNodeId": backend_node_id,
+                        "depth": -1,
+                        "pierce": True,
+                    },
+                ).get("node")
+                if not cls._dom_subtree_contains_video(described_node):
+                    return None
+                fingerprints.append(f"ax:{backend_node_id}")
+
+            stable = tuple(sorted(fingerprints))
+            if len(stable) != expected_count or len(set(stable)) != expected_count:
+                return None
+            return stable
         except PlaywrightError:
             return None
         finally:
@@ -676,30 +710,19 @@ class GoogleFlowClient:
                 except PlaywrightError:
                     pass
 
-        fingerprints: list[str] = []
-        for node in nodes:
-            if cls._ax_value(node, "role") != "button":
-                continue
-            name = cls._ax_value(node, "name")
-            if not _VIDEO_CARD_NAME_RE.search(name):
-                continue
-            description = cls._ax_value(node, "description")
-            properties = cls._ax_properties(node)
-            if not description or properties.get("disabled") or properties.get("busy"):
-                return None
-            if _CARD_PROCESSING_RE.search(f"{name} {description}"):
-                return None
-            if _CARD_FAILURE_RE.search(f"{name} {description}"):
-                return None
-            backend_node_id = node.get("backendDOMNodeId")
-            if backend_node_id in {None, ""}:
-                return None
-            fingerprints.append(f"ax:{backend_node_id}")
-
-        stable = tuple(sorted(fingerprints))
-        if len(stable) != expected_count or len(set(stable)) != expected_count:
-            return None
-        return stable
+    @classmethod
+    def _dom_subtree_contains_video(cls, node: Any) -> bool:
+        if not isinstance(node, dict):
+            return False
+        if str(node.get("nodeName", "")).upper() == "VIDEO":
+            return True
+        for child in node.get("children", []):
+            if cls._dom_subtree_contains_video(child):
+                return True
+        for shadow_root in node.get("shadowRoots", []):
+            if cls._dom_subtree_contains_video(shadow_root):
+                return True
+        return False
 
     @staticmethod
     def _ax_value(node: Any, field: str) -> str:
