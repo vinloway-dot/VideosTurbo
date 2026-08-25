@@ -19,11 +19,28 @@ from app.services.cloud_agent.storage import CloudJobStorage, JobPaths
 
 
 _SEMANTIC_CLIP_RE = re.compile(r"^clip\s+([1-6])\.mp4$", re.IGNORECASE)
+_VENDOR_SEMANTIC_CLIP_RE = re.compile(r"^clip_([1-6])_.+\.mp4$", re.IGNORECASE)
 
 
 class FlowArtifactRecovery(NamedTuple):
     paths: tuple[Path, ...]
     source: Literal["canonical", "archive", "staging"]
+
+
+def validate_flow_source_video(path: Path, *, min_size_bytes: int):
+    """Validate a Flow source without weakening the final-video contract."""
+    probe = validate_video(path, min_size_bytes=min_size_bytes)
+    if probe.width is None or probe.height is None:
+        raise MediaValidationError("Flow source video resolution is missing")
+    if probe.width < 720 or probe.height < 1280:
+        raise MediaValidationError(
+            f"Flow source resolution is below 720x1280: {probe.width}x{probe.height}"
+        )
+    if probe.width * 16 != probe.height * 9:
+        raise MediaValidationError(
+            f"Flow source resolution is not portrait 9:16: {probe.width}x{probe.height}"
+        )
+    return probe
 
 
 def _validate_member_safety(member: ZipInfo) -> None:
@@ -58,6 +75,8 @@ def _semantic_members(archive: ZipFile) -> dict[int, ZipInfo]:
         if Path(basename).suffix.lower() != ".mp4":
             continue
         match = _SEMANTIC_CLIP_RE.fullmatch(basename)
+        if match is None:
+            match = _VENDOR_SEMANTIC_CLIP_RE.fullmatch(basename)
         if match is None:
             raise FlowArchiveValidationError("ambiguous or unexpected Flow video entry")
         number = int(match.group(1))
@@ -97,6 +116,9 @@ def materialize_flow_archive(
     expected_width: int,
     expected_height: int,
 ) -> tuple[Path, ...]:
+    # These legacy parameters formerly imposed Canva's final-output size on
+    # Flow sources. Flow exports may be 720x1280 portrait 9:16 instead.
+    del expected_width, expected_height
     archive_path = Path(archive_path)
     try:
         with ZipFile(archive_path) as archive:
@@ -111,11 +133,9 @@ def materialize_flow_archive(
                     staged_path.open("wb") as target,
                 ):
                     shutil.copyfileobj(source, target)
-                validate_video(
+                validate_flow_source_video(
                     staged_path,
                     min_size_bytes=min_size_bytes,
-                    expected_width=expected_width,
-                    expected_height=expected_height,
                 )
                 staged_files.append(staged_path)
     except FlowArchiveValidationError:
@@ -133,15 +153,14 @@ def _validate_video_set(
     expected_width: int,
     expected_height: int,
 ) -> bool:
+    del expected_width, expected_height
     if len(files) != 6 or any(path.is_symlink() or not path.is_file() for path in files):
         return False
     try:
         for path in files:
-            validate_video(
+            validate_flow_source_video(
                 path,
                 min_size_bytes=min_size_bytes,
-                expected_width=expected_width,
-                expected_height=expected_height,
             )
     except (MediaValidationError, OSError):
         return False

@@ -11,6 +11,7 @@ from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
     MediaValidationError,
 )
+from app.services.cloud_agent.media_probe import MediaProbe
 from app.services.cloud_agent.storage import CloudJobStorage
 
 
@@ -34,8 +35,26 @@ def _valid_members() -> list[tuple[str, bytes]]:
     return [(f"clip {number}.mp4", f"video-{number}".encode()) for number in range(1, 7)]
 
 
+def _video_probe(path: Path, *, width: int = 1080, height: int = 1920) -> MediaProbe:
+    return MediaProbe(
+        path=Path(path),
+        size_bytes=64,
+        duration=10.0,
+        has_audio=False,
+        has_video=True,
+        audio_codec="",
+        video_codec="h264",
+        width=width,
+        height=height,
+    )
+
+
 def _accept_video(monkeypatch, flow_archive) -> None:
-    monkeypatch.setattr(flow_archive, "validate_video", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        flow_archive,
+        "validate_video",
+        lambda path, **_kwargs: _video_probe(Path(path)),
+    )
 
 
 def _set_first_member_encrypted(path: Path) -> None:
@@ -67,7 +86,10 @@ def test_shuffled_archive_members_materialize_in_semantic_order(monkeypatch, tmp
     monkeypatch.setattr(
         flow_archive,
         "validate_video",
-        lambda path, **kwargs: validated.append((Path(path), kwargs)),
+        lambda path, **kwargs: (
+            validated.append((Path(path), kwargs)),
+            _video_probe(Path(path)),
+        )[1],
     )
 
     result = flow_archive.materialize_flow_archive(
@@ -97,13 +119,173 @@ def test_shuffled_archive_members_materialize_in_semantic_order(monkeypatch, tmp
     ]
     assert all(
         kwargs
-        == {
-            "min_size_bytes": 1,
-            "expected_width": 1080,
-            "expected_height": 1920,
-        }
+        == {"min_size_bytes": 1}
         for _, kwargs in validated
     )
+
+
+def test_vendor_export_names_materialize_in_semantic_order(monkeypatch, tmp_path):
+    flow_archive = _flow_archive_module()
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    _write_archive(
+        paths.flow_archive_file,
+        [
+            ("CLIP_6_order_timestamp.mp4", b"six"),
+            ("clip_1_polar_timestamp.mp4", b"one"),
+            ("CLIP_4_polygon_timestamp.mp4", b"four"),
+            ("cLiP_2_storm_timestamp.mp4", b"two"),
+            ("CLIP_5_seasons_timestamp.mp4", b"five"),
+            ("CLIP_3_waves_timestamp.mp4", b"three"),
+        ],
+    )
+    _accept_video(monkeypatch, flow_archive)
+
+    result = flow_archive.materialize_flow_archive(
+        paths.flow_archive_file,
+        paths,
+        min_size_bytes=1,
+        expected_width=1080,
+        expected_height=1920,
+    )
+
+    assert result == paths.flow_files
+    assert [path.read_bytes() for path in result] == [
+        b"one",
+        b"two",
+        b"three",
+        b"four",
+        b"five",
+        b"six",
+    ]
+
+
+def test_vendor_export_name_with_unicode_em_dash_is_accepted(monkeypatch, tmp_path):
+    flow_archive = _flow_archive_module()
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    _write_archive(
+        paths.flow_archive_file,
+        [
+            (f"CLIP_{number}_—_title_202608250702.mp4", str(number).encode())
+            for number in range(1, 7)
+        ],
+    )
+    _accept_video(monkeypatch, flow_archive)
+
+    result = flow_archive.materialize_flow_archive(
+        paths.flow_archive_file,
+        paths,
+        min_size_bytes=1,
+        expected_width=1080,
+        expected_height=1920,
+    )
+
+    assert [path.read_bytes() for path in result] == [
+        str(number).encode() for number in range(1, 7)
+    ]
+
+
+def test_vendor_export_rejects_missing_semantic_index(monkeypatch, tmp_path):
+    flow_archive = _flow_archive_module()
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    members = [
+        (f"CLIP_{number}_title_timestamp.mp4", b"video")
+        for number in range(1, 6)
+    ]
+    _write_archive(paths.flow_archive_file, members)
+    _accept_video(monkeypatch, flow_archive)
+
+    with pytest.raises(FlowArchiveValidationError):
+        flow_archive.materialize_flow_archive(
+            paths.flow_archive_file,
+            paths,
+            min_size_bytes=1,
+            expected_width=1080,
+            expected_height=1920,
+        )
+
+
+def test_vendor_export_rejects_duplicate_semantic_index(monkeypatch, tmp_path):
+    flow_archive = _flow_archive_module()
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    members = [
+        (f"CLIP_{number}_title_timestamp.mp4", b"video")
+        for number in range(1, 7)
+    ] + [("CLIP_1_duplicate_timestamp.mp4", b"duplicate")]
+    _write_archive(paths.flow_archive_file, members)
+    _accept_video(monkeypatch, flow_archive)
+
+    with pytest.raises(FlowArchiveValidationError):
+        flow_archive.materialize_flow_archive(
+            paths.flow_archive_file,
+            paths,
+            min_size_bytes=1,
+            expected_width=1080,
+            expected_height=1920,
+        )
+
+
+@pytest.mark.parametrize("name", ["CLIP_10_title_timestamp.mp4", "something_else.mp4"])
+def test_vendor_export_rejects_nonsemantic_video_names(monkeypatch, tmp_path, name):
+    flow_archive = _flow_archive_module()
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    _write_archive(
+        paths.flow_archive_file,
+        [
+            (f"CLIP_{number}_title_timestamp.mp4", b"video")
+            for number in range(1, 7)
+        ]
+        + [(name, b"unexpected")],
+    )
+    _accept_video(monkeypatch, flow_archive)
+
+    with pytest.raises(FlowArchiveValidationError):
+        flow_archive.materialize_flow_archive(
+            paths.flow_archive_file,
+            paths,
+            min_size_bytes=1,
+            expected_width=1080,
+            expected_height=1920,
+        )
+
+
+@pytest.mark.parametrize("width,height", [(720, 1280), (1080, 1920)])
+def test_flow_source_validation_accepts_portrait_nine_by_sixteen(
+    monkeypatch, tmp_path, width, height
+):
+    flow_archive = _flow_archive_module()
+    media_path = tmp_path / "clip.mp4"
+    media_path.write_bytes(b"video")
+    monkeypatch.setattr(
+        flow_archive,
+        "validate_video",
+        lambda path, **_kwargs: _video_probe(Path(path), width=width, height=height),
+    )
+
+    validate_source = getattr(flow_archive, "validate_flow_source_video", None)
+    assert validate_source is not None, "Flow-specific source validation is not implemented"
+    assert validate_source(media_path, min_size_bytes=1).width == width
+
+
+@pytest.mark.parametrize(
+    "width,height",
+    [(540, 960), (360, 640), (720, 720), (1280, 720), (720, 1200)],
+)
+def test_flow_source_validation_rejects_below_minimum_or_wrong_aspect(
+    monkeypatch, tmp_path, width, height
+):
+    flow_archive = _flow_archive_module()
+    media_path = tmp_path / "clip.mp4"
+    media_path.write_bytes(b"video")
+    monkeypatch.setattr(
+        flow_archive,
+        "validate_video",
+        lambda path, **_kwargs: _video_probe(Path(path), width=width, height=height),
+    )
+
+    validate_source = getattr(flow_archive, "validate_flow_source_video", None)
+    assert validate_source is not None, "Flow-specific source validation is not implemented"
+    with pytest.raises(MediaValidationError):
+        validate_source(media_path, min_size_bytes=1)
 
 
 @pytest.mark.parametrize(
@@ -212,6 +394,7 @@ def test_archive_media_failure_is_typed_and_exposes_no_canonical_set(monkeypatch
     def reject_third(path, **_kwargs):
         if Path(path).name == "clip 3.mp4":
             raise MediaValidationError("invalid media")
+        return _video_probe(Path(path))
 
     monkeypatch.setattr(flow_archive, "validate_video", reject_third)
 
@@ -238,7 +421,10 @@ def test_recovery_prefers_complete_valid_canonical_set(monkeypatch, tmp_path):
     monkeypatch.setattr(
         flow_archive,
         "validate_video",
-        lambda path, **kwargs: validations.append((Path(path), kwargs)),
+        lambda path, **kwargs: (
+            validations.append((Path(path), kwargs)),
+            _video_probe(Path(path)),
+        )[1],
     )
 
     recover = getattr(flow_archive, "recover_flow_artifacts", None)

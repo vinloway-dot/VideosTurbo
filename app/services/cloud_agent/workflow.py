@@ -16,7 +16,10 @@ from app.services.cloud_agent.errors import (
     MediaValidationError,
     NarrationTooLongError,
 )
-from app.services.cloud_agent.flow_archive import recover_flow_artifacts
+from app.services.cloud_agent.flow_archive import (
+    recover_flow_artifacts,
+    validate_flow_source_video,
+)
 from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.media_probe import MediaProbe, validate_audio, validate_video
 from app.services.cloud_agent.storage import CloudJobStorage, JobPaths
@@ -173,11 +176,9 @@ class CloudAgentWorkflow:
             )
         for path in paths.flow_files:
             try:
-                validate_video(
+                validate_flow_source_video(
                     path,
                     min_size_bytes=1,
-                    expected_width=self.expected_width,
-                    expected_height=self.expected_height,
                 )
             except MediaValidationError as exc:
                 raise MediaValidationError(
@@ -337,11 +338,9 @@ class CloudAgentWorkflow:
                             f"Flow step did not produce canonical clip: {missing[0]}"
                         )
                     for path in paths.flow_files:
-                        validate_video(
+                        validate_flow_source_video(
                             path,
                             min_size_bytes=1,
-                            expected_width=self.expected_width,
-                            expected_height=self.expected_height,
                         )
                     job = self.store.patch_job(
                         job.id,
