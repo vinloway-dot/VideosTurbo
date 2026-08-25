@@ -336,6 +336,110 @@ The action is implemented by a small retry service composed from the existing
 `config.app`, `CloudJobStore`, `CloudJobStorage`, `validate_audio`, and
 `calculate_adaptive_timing` contracts. It does not open a browser, call TTS,
 call Flow, inspect private browser data, or run production work in FastAPI.
+
+### 3.13 Single-Context Flow Lifecycle v3.0
+
+#### Root-cause evidence and scope
+
+Live, authenticated, read-only diagnosis of the dedicated Flow project found a
+browser/project lifecycle race, separate from the v2.9 completed-video detector:
+
+- current two-context session-check then workspace lifecycle: 2/5 healthy;
+- one owned context warmed through Flow home then project: 5/5 healthy;
+- direct fresh project context: 2/5 healthy;
+- an empty/fatal direct boot did not recover by waiting, but recovered after a
+  same-context reload in 3/3 observed cases;
+- empty boots received successful project/API responses but rendered the vendor
+  client error classified as an undefined-service/fatal application state;
+- once the project was hydrated, its six video cards remained stable and v2.9
+  proved completion with three stable card-local fingerprints without a textual
+  `6/6` marker.
+
+The following contract fixes the lifecycle TOCTOU only. It does not loosen the
+paid-generation fence, alter clip detection, or authorize another Flow request.
+
+#### One owned persistent context
+
+`GoogleFlowClient.acquire_workspace()` is the authority for production Flow
+work. It acquires the existing `google_flow` profile lock and opens exactly one
+persistent browser context. Authentication/session verification, Flow-home
+warmup, project navigation, hydration recovery, completion detection, rename,
+bulk download, and post-`FLOW_READY` cleanup all use that one context/page until
+the workspace context exits.
+
+The generic `BrowserSessionProvider.check_session()` remains a bounded,
+independent preflight diagnostic. Its successful result is not evidence that a
+later production workspace context has a hydrated Flow project. No helper
+called by `acquire_workspace()` may secretly open a second persistent context.
+
+#### Same-context session and warmup verification
+
+After opening the owned context, the client navigates to a safe Flow home route
+derived from the configured project URL, verifies observable authenticated Flow
+state on that page, and then navigates to the configured approved project URL
+in the same page. Page-level classification reuses the existing Flow session and
+security-challenge classification rules; it neither reads cookies nor performs
+password, CAPTCHA, 2FA, device-confirmation, or OAuth interaction. A session
+expiry or active security challenge fails through the existing human/session
+recovery boundary without opening another context.
+
+#### Project hydration is distinct from session readiness and generation
+
+Project hydration requires all of the following observable conditions: the
+approved project route, initialized/alive document, no fatal client page, no
+login/security challenge, an observable Agent/editor shell, and either an
+observable media inventory or its legitimate empty-state shell. The card count
+alone is never hydration proof. A fresh job may legitimately have zero cards
+only after this shell-level hydration proof; a non-hydrated zero-card page is
+not an empty workspace.
+
+#### Bounded same-context recovery
+
+The client uses at most two same-page reload cycles to recover project
+hydration. For a direct fatal vendor boot it reloads immediately; for a
+non-fatal but non-hydrated page it first performs the normal bounded observation
+then reloads. Every reload re-runs the full hydration verification in the same
+context. If the limit is reached, it raises `FlowWorkspaceVerificationError`
+and fails closed. This replaces competing direct-link recovery loops rather
+than adding another browser-launch retry system.
+
+For `flow_generation_unresolved=true`, this recovery is explicitly read-only
+with respect to paid Flow work: wait, inspect, same-page reload, project
+navigation for hydration, completion observation, rename of existing results,
+and download are allowed. Fresh prompt preparation, Generate, pre-clean, remote
+deletion, Retry, and automatic fence clearing remain forbidden until six local
+canonical clips are validated and `FLOW_READY` is atomically persisted.
+
+If reconciliation still cannot prove a hydrated editor and six existing outputs
+after the bounded recovery, it preserves `TTS_READY` and
+`flow_generation_unresolved=true`, returns the existing reconciliation-required
+failure path, and does not perform another paid generation.
+
+#### Fresh-path and v2.9 preservation
+
+For `flow_generation_unresolved=false`, a hydrated, observable empty workspace
+remains valid and may proceed to the existing pre-clean/generation fence path.
+Fatal direct project boot retains the same bounded reload recovery. The v2.9
+completion contract is unchanged: trusted textual progress at the expected
+count, or three stable polls of exactly six card-local completed videos proved
+by AX/backend fingerprints and descendant `VIDEO` nodes, with no images,
+processing, errors, busy state, or progress bar. It must not restore
+`video:visible` or require media `readyState` metadata.
+
+#### Durability, concurrency, and paid-side-effect rules
+
+The existing cross-process Flow profile lock remains the exclusive shared
+workspace lock. `GoogleFlowClient` continues not to write SQLite;
+`CloudAgentWorkflow` alone commits the paid-generation fence and the atomic
+`FLOW_READY` transition. A process restart at `TTS_READY` with the fence set
+re-enters only the same reconciliation rules above; it cannot pre-clean or
+generate. A post-`FLOW_READY` cleanup failure preserves validated local clips
+and `flow_cleanup_unresolved=true`. Across implementation, non-paid validation,
+and reconciliation of existing remote output, new TTS calls and new Flow
+generation requests are both zero.
+
+#### Existing pre-fence retry contract (unchanged)
+
 It may only atomically requeue the **same** job as:
 
 ```text
