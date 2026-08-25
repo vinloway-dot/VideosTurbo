@@ -669,6 +669,20 @@ def test_canva_upload_completion_accepts_scoped_media_card_increase_when_videos_
     )
 
 
+def test_canva_upload_completion_rejects_unscoped_names_when_audio_panel_did_not_gain_voice(
+    monkeypatch,
+):
+    """Catches accepting stale/global filename text when Canva has not uploaded narration."""
+    expected = ["clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4", "voice.mp3"]
+    page = FakeCompletedUploadPage(set(expected))
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.0
+    monkeypatch.setattr(client, "_upload_inventory", lambda _page, _audio_name: (6, 0))
+
+    with pytest.raises(canva.CanvaUIVerificationError, match="upload completion"):
+        client._wait_for_upload_completion(page, expected, baseline_inventory=(0, 0))
+
+
 def test_canva_upload_completion_fails_closed_when_any_media_name_is_absent():
     page = FakeCompletedUploadPage({"clip_01.mp4"})
     client, _ = _assembly_client(FakeCanvaEditorPage())

@@ -399,7 +399,7 @@ class CanvaAssemblyClient:
                 video_before, audio_before = baseline_inventory
                 video_after, audio_after = self._upload_inventory(page, expected_names[-1])
                 inventory_complete = video_after >= video_before + 6 and audio_after >= audio_before + 1
-            if names_visible or inventory_complete:
+            if (baseline_inventory is None and names_visible) or inventory_complete:
                 return
             if time.monotonic() >= deadline:
                 raise CanvaUIVerificationError("Canva upload completion could not be verified")
