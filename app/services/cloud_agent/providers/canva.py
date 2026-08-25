@@ -402,17 +402,19 @@ class CanvaAssemblyClient:
             failed = any(marker in body for marker in ("upload failed", "retry upload", "unsupported file"))
             if failed:
                 raise CanvaUIVerificationError("Canva reported that an upload failed")
+            named_uploads = [page.get_by_text(name, exact=True) for name in expected_names]
+            names_observable = any(upload.count() > 0 for upload in named_uploads)
             names_visible = all(
-                page.get_by_text(name, exact=True).count() == 1
-                and page.get_by_text(name, exact=True).is_visible()
-                for name in expected_names
+                upload.count() == 1 and upload.is_visible() for upload in named_uploads
             )
             inventory_complete = False
             if baseline_inventory is not None:
                 video_before, audio_before = baseline_inventory
                 video_after, audio_after = self._upload_inventory(page, expected_names[-1])
                 inventory_complete = video_after >= video_before + 6 and audio_after >= audio_before + 1
-            if (baseline_inventory is None and names_visible) or inventory_complete:
+            if (baseline_inventory is None and names_visible) or (
+                inventory_complete and (not names_observable or names_visible)
+            ):
                 return
             if time.monotonic() >= deadline:
                 raise CanvaUIVerificationError("Canva upload completion could not be verified")

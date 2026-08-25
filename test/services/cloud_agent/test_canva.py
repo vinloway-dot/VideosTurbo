@@ -243,6 +243,17 @@ class _VisibleUploadName:
         return self.visible
 
 
+class _CountedUploadName:
+    def __init__(self, count: int):
+        self.count_value = count
+
+    def count(self):
+        return self.count_value
+
+    def is_visible(self):
+        return self.count_value == 1
+
+
 class FakeCompletedUploadPage:
     def __init__(self, visible_names):
         self.visible_names = set(visible_names)
@@ -253,6 +264,18 @@ class FakeCompletedUploadPage:
     def get_by_text(self, name, *, exact):
         assert exact is True
         return _VisibleUploadName(name in self.visible_names)
+
+
+class FakePartialNamedUploadPage(FakeCompletedUploadPage):
+    """Models a completed-count UI with duplicate and missing visible upload names."""
+
+    def __init__(self, name_counts):
+        super().__init__(set())
+        self.name_counts = dict(name_counts)
+
+    def get_by_text(self, name, *, exact):
+        assert exact is True
+        return _CountedUploadName(self.name_counts.get(name, 0))
 
 
 class FakeUploadInventoryPage(FakeCompletedUploadPage):
@@ -704,6 +727,31 @@ def test_canva_upload_completion_accepts_observable_media_without_processing_tex
             "voice.mp3",
         ],
     )
+
+
+def test_canva_upload_completion_rejects_complete_count_with_partial_duplicate_names(
+    monkeypatch,
+):
+    """Catches accepting a six-card count when Canva exposes a missing or duplicate clip."""
+    names = [*(f"clip_{index:02d}.mp4" for index in range(1, 7)), "voice.mp3"]
+    page = FakePartialNamedUploadPage(
+        {
+            "clip_01.mp4": 2,
+            "clip_02.mp4": 1,
+            "clip_03.mp4": 1,
+            "clip_04.mp4": 2,
+            "clip_05.mp4": 0,
+            "clip_06.mp4": 1,
+            "voice.mp3": 1,
+        }
+    )
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.0
+    client.poll_seconds = 0.0
+    monkeypatch.setattr(client, "_upload_inventory", lambda _page, _audio_name: (6, 1))
+
+    with pytest.raises(canva.CanvaUIVerificationError, match="upload completion"):
+        client._wait_for_upload_completion(page, names, baseline_inventory=(0, 0))
 
 
 def test_canva_upload_inventory_waits_for_hydrated_media_tabs():
