@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import urlsplit, urlunsplit
 
 from playwright.sync_api import Error as PlaywrightError
 
@@ -13,6 +14,7 @@ from app.models.cloud_agent import CloudJobRecord, ServiceSessionStatus
 from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
     FlowWorkspaceVerificationError,
+    HumanRequiredError,
     MediaValidationError,
 )
 from app.services.cloud_agent.flow_archive import materialize_flow_archive
@@ -340,28 +342,84 @@ class GoogleFlowClient:
         self,
         job: CloudJobRecord,
     ) -> Iterator[FlowWorkspaceRun]:
-        self.sessions.ensure_service_ready("google_flow", job.id)
         with self.browser.open(
             "google_flow",
             headed=None,
             lock_timeout_seconds=self.workspace_lock_timeout_seconds,
         ) as context:
             page = BrowserSessionProvider._page(context)
+            page.goto(self._flow_home_url(), wait_until="domcontentloaded")
             page.goto(self.service_url, wait_until="domcontentloaded")
-            if job.flow_generation_unresolved:
-                self._wait_for_settled_editor(page)
-            else:
-                for recovery_cycle in range(_DIRECT_LINK_RECOVERY_CYCLES + 1):
-                    try:
-                        self._wait_for_settled_editor(page)
-                        break
-                    except _DirectLinkFatalPageError as exc:
-                        if recovery_cycle >= _DIRECT_LINK_RECOVERY_CYCLES:
-                            raise FlowWorkspaceVerificationError(
-                                "Google Flow project editor could not be verified"
-                            ) from exc
-                        page.reload(wait_until="domcontentloaded")
+            self._verify_workspace_session(page, job.id)
+            self._hydrate_project_workspace(
+                page,
+                flow_generation_unresolved=job.flow_generation_unresolved,
+            )
             yield FlowWorkspaceRun(self, page)
+
+    def _flow_home_url(self) -> str:
+        parsed = urlsplit(self.service_url)
+        marker = "/project/"
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or marker not in parsed.path
+        ):
+            raise FlowWorkspaceVerificationError(
+                "Google Flow project URL could not be used for safe home warmup"
+            )
+        home_path = parsed.path.split(marker, 1)[0].rstrip("/")
+        if not home_path:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow project URL could not be used for safe home warmup"
+            )
+        return urlunsplit((parsed.scheme, parsed.netloc, home_path, "", ""))
+
+    @staticmethod
+    def _verify_workspace_session(page: Any, job_id: str) -> None:
+        try:
+            status = classify_google_flow_session(
+                url=page.url,
+                html=page.content(),
+            )
+        except PlaywrightError as exc:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow workspace session could not be verified"
+            ) from exc
+
+        if status is ServiceSessionStatus.READY:
+            return
+        if status is ServiceSessionStatus.ERROR:
+            # A direct project boot can expose a vendor shell before project
+            # hydration. The same owned page's bounded hydration loop decides
+            # whether that shell becomes a usable editor or fails closed.
+            return
+        raise HumanRequiredError(
+            f"google_flow session requires human recovery for job {job_id}: "
+            f"{status.value}"
+        )
+
+    def _hydrate_project_workspace(
+        self,
+        page: Any,
+        *,
+        flow_generation_unresolved: bool,
+    ) -> None:
+        """Prove the project editor in the one owned context, with safe reloads."""
+        del flow_generation_unresolved
+        last_error: FlowWorkspaceVerificationError | None = None
+        for recovery_cycle in range(_DIRECT_LINK_RECOVERY_CYCLES + 1):
+            try:
+                self._wait_for_settled_editor(page)
+                return
+            except (_DirectLinkFatalPageError, FlowWorkspaceVerificationError) as exc:
+                last_error = exc
+                if recovery_cycle >= _DIRECT_LINK_RECOVERY_CYCLES:
+                    break
+                page.reload(wait_until="domcontentloaded")
+        raise FlowWorkspaceVerificationError(
+            "Google Flow project editor could not be verified"
+        ) from last_error
 
     @staticmethod
     def _observable_composer(agent: Any) -> Any:

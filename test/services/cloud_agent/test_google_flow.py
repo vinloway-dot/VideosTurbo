@@ -9,6 +9,7 @@ from playwright.sync_api import Error as PlaywrightError
 from app.models.cloud_agent import ServiceSessionStatus
 from app.services.cloud_agent.errors import (
     FlowWorkspaceVerificationError,
+    HumanRequiredError,
     MediaValidationError,
 )
 from app.services.cloud_agent.storage import CloudJobStorage
@@ -406,7 +407,11 @@ class FakePage:
         self,
         *,
         progress_html,
+        home_progress_html=None,
         reload_progress_html=None,
+        reload_state_updates=None,
+        project_navigation_url=None,
+        session_ready=True,
         download_count=6,
         landing=False,
         agent_available=True,
@@ -443,10 +448,16 @@ class FakePage:
         card_delete_removes=True,
     ):
         self.url = "about:blank"
+        self.project_progress_html = list(progress_html)
         self.progress_html = list(progress_html)
+        self.home_progress_html = list(home_progress_html or ["<main>Flow home</main>"])
+        self.project_navigation_url = project_navigation_url
+        self.session_ready = session_ready
+        self.on_home = False
         self.reload_progress_html = [
             list(html) for html in (reload_progress_html or [])
         ]
+        self.reload_state_updates = list(reload_state_updates or [])
         self.download_count = download_count
         self.download_attempts = [0 for _ in range(download_count)]
         self.goto_calls = []
@@ -526,13 +537,26 @@ class FakePage:
 
     def goto(self, url, **kwargs):
         self.goto_calls.append((url, kwargs))
-        self.url = url
+        if url.rstrip("/").endswith("/tools/flow"):
+            self.url = url
+            self.on_home = True
+            self.progress_html = list(self.home_progress_html)
+        else:
+            self.url = self.project_navigation_url or url
+            self.on_home = False
+            self.progress_html = list(self.project_progress_html)
+        self._content_index = 0
 
     def reload(self, **kwargs):
         self.reload_calls.append(kwargs)
         if self.reload_progress_html:
             self.progress_html = self.reload_progress_html.pop(0)
             self._content_index = 0
+        if self.reload_state_updates:
+            for field, value in self.reload_state_updates.pop(0).items():
+                setattr(self, field, value)
+            self.last_media_list_available = self.media_list_available
+            self.last_empty_state = self.empty_state_available
         if self.pending_clip_names is not None:
             self.clip_names = self.pending_clip_names
             self.pending_clip_names = None
@@ -541,6 +565,8 @@ class FakePage:
         index = min(self._content_index, len(self.progress_html) - 1)
         html = self.progress_html[index]
         self._content_index += 1
+        if self.session_ready and not self.on_home:
+            html += '<button aria-label="Agent">Agent</button><textarea aria-label="Prompt"></textarea>'
         return html
 
     def evaluate(self, expression):
@@ -769,11 +795,15 @@ def test_google_flow_workspace_context_uses_browser_configuration_and_holds_lock
     with acquire_workspace(_job()) as workspace:
         assert browser.context_is_open is True
         assert workspace.page is page
-        assert sessions.calls == [("google_flow", "job-123")]
+        assert sessions.calls == []
 
     assert browser.context_is_open is False
     assert browser.open_calls == [("google_flow", None, 45.0)]
     assert page.goto_calls == [
+        (
+            "https://labs.google/fx/tools/flow",
+            {"wait_until": "domcontentloaded"},
+        ),
         (
             "https://labs.google/fx/tools/flow/project/demo",
             {"wait_until": "domcontentloaded"},
@@ -862,8 +892,13 @@ def test_google_flow_editor_readiness_timeout_is_independent_from_generation(
         timeout_seconds=1800.0,
         editor_ready_timeout_seconds=1.0,
     )
-    clock = iter([0.0, 0.5, 1.1])
-    monkeypatch.setattr(google_flow.time, "monotonic", lambda: next(clock))
+    clock = [-0.5]
+
+    def monotonic():
+        clock[0] += 0.5
+        return clock[0]
+
+    monkeypatch.setattr(google_flow.time, "monotonic", monotonic)
     monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
 
     with pytest.raises(FlowWorkspaceVerificationError, match="project editor"):
@@ -976,18 +1011,204 @@ def test_google_flow_persistent_direct_fatal_fails_after_two_reloads():
     assert page.actions == []
 
 
-def test_google_flow_reconciliation_does_not_recover_direct_fatal_page():
+def test_google_flow_reconciliation_persistent_fatal_fails_after_two_reloads():
     page = FakePage(
         progress_html=["<main>Application error: a client-side exception has occurred</main>"],
     )
     client, _ = _client(page, editor_ready_timeout_seconds=0.02)
 
-    with pytest.raises(FlowWorkspaceVerificationError, match="fatal application error"):
+    with pytest.raises(FlowWorkspaceVerificationError, match="project editor"):
         with client.acquire_workspace(_job(flow_generation_unresolved=True)):
             pass
 
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}] * 2
+    assert page.actions == []
+
+
+def test_google_flow_workspace_warms_home_and_hydrates_project_in_one_context():
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        home_progress_html=["<main>Flow home</main>"],
+    )
+    client, sessions = _client(page)
+
+    with client.acquire_workspace(_job()) as workspace:
+        assert workspace.page is page
+        assert client.browser.context_is_open is True
+
+    assert sessions.calls == []
+    assert client.browser.open_calls == [("google_flow", None, 30.0)]
+    assert [url for url, _ in page.goto_calls] == [
+        "https://labs.google/fx/tools/flow",
+        "https://labs.google/fx/tools/flow/project/demo",
+    ]
+
+
+def test_fenced_workspace_recovers_initial_empty_editor_with_same_page_reload():
+    page = FakePage(
+        progress_html=["<div>Loading media inventory</div>"],
+        clip_names=[f"clip {number}" for number in range(1, 7)],
+        agent_available=False,
+        agent_text_available=False,
+        media_list_available=False,
+        empty_state_available=False,
+        reload_state_updates=[
+            {
+                "agent_available": True,
+                "agent_text_available": True,
+                "media_list_available": True,
+                "empty_state_available": True,
+            }
+        ],
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=0.02)
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)):
+        pass
+
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert ("click", "generate") not in page.actions
+    assert not any(action[0] == "fill" for action in page.actions)
+    assert not any(action[1] == "media_card" for action in page.actions)
+    assert not any("delete" in str(action) for action in page.actions)
+
+
+def test_fenced_workspace_recovers_nonfatal_unclassified_project_after_reload():
+    page = FakePage(
+        progress_html=["<div>Loading media inventory</div>"],
+        clip_names=[f"clip {number}" for number in range(1, 7)],
+        session_ready=False,
+        agent_available=False,
+        agent_text_available=False,
+        media_list_available=False,
+        empty_state_available=False,
+        reload_state_updates=[
+            {
+                "session_ready": True,
+                "agent_available": True,
+                "agent_text_available": True,
+                "media_list_available": True,
+                "empty_state_available": True,
+            }
+        ],
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=0.02)
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)):
+        pass
+
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.actions == []
+
+
+def test_fenced_workspace_recovers_transient_fatal_editor_with_same_page_reload():
+    page = FakePage(
+        progress_html=[
+            "<main>Application error: a client-side exception has occurred "
+            "(reading 'service')</main>"
+        ],
+        reload_progress_html=[["<div>Ready</div>"]],
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=0.02)
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)):
+        pass
+
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.actions == []
+
+
+def test_fenced_workspace_recovers_after_second_same_page_reload():
+    page = FakePage(
+        progress_html=["<div>Loading media inventory</div>"],
+        clip_names=[f"clip {number}" for number in range(1, 7)],
+        agent_available=False,
+        agent_text_available=False,
+        media_list_available=False,
+        empty_state_available=False,
+        reload_state_updates=[
+            {},
+            {
+                "agent_available": True,
+                "agent_text_available": True,
+                "media_list_available": True,
+                "empty_state_available": True,
+            },
+        ],
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=0.02)
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)):
+        pass
+
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}] * 2
+    assert page.actions == []
+
+
+def test_fenced_workspace_persistent_empty_fails_after_two_same_page_reloads():
+    page = FakePage(
+        progress_html=["<div>Loading media inventory</div>"],
+        agent_available=False,
+        agent_text_available=False,
+        media_list_available=False,
+        empty_state_available=False,
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=0.02)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="project editor"):
+        with client.acquire_workspace(_job(flow_generation_unresolved=True)):
+            pass
+
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}] * 2
+    assert page.actions == []
+
+
+def test_google_flow_workspace_detects_session_expiry_on_its_owned_project_page():
+    page = FakePage(
+        progress_html=["<main>Sign in</main>"],
+        project_navigation_url="https://accounts.google.com/v3/signin/identifier",
+    )
+    client, sessions = _client(page)
+
+    with pytest.raises(HumanRequiredError, match="google_flow session requires human recovery"):
+        with client.acquire_workspace(_job()):
+            pass
+
+    assert sessions.calls == []
+    assert client.browser.open_calls == [("google_flow", None, 30.0)]
     assert page.reload_calls == []
     assert page.actions == []
+
+
+def test_google_flow_workspace_detects_security_challenge_on_its_owned_project_page():
+    page = FakePage(
+        progress_html=["<div>Confirm you're not a robot</div>"],
+    )
+    client, sessions = _client(page)
+
+    with pytest.raises(HumanRequiredError, match="google_flow session requires human recovery"):
+        with client.acquire_workspace(_job()):
+            pass
+
+    assert sessions.calls == []
+    assert client.browser.open_calls == [("google_flow", None, 30.0)]
+    assert page.reload_calls == []
+    assert page.actions == []
+
+
+def test_fresh_workspace_accepts_hydrated_observable_empty_inventory_without_reload():
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        clip_names=[],
+        media_list_available=False,
+        empty_state_available=True,
+    )
+    client, _ = _client(page)
+
+    with client.acquire_workspace(_job()) as workspace:
+        assert workspace.page is page
+
+    assert page.reload_calls == []
 
 
 def test_google_flow_normal_loading_waits_without_direct_fatal_reload():
