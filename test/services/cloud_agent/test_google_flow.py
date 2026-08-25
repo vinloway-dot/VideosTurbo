@@ -340,6 +340,8 @@ class FakeLocator:
             return self.page.generate_available
         if self.kind == "generate" and self.page.agent_enabled_states:
             return self.page.agent_enabled_states.pop(0)
+        if self.kind == "generate" and self.page.generate_clicked:
+            return self.page.send_enabled_after_click
         return self.page.agent_ready
 
     def get_attribute(self, name):
@@ -423,6 +425,7 @@ class FakePage:
         generation_completion_names=None,
         renamed_clip_names=None,
         agent_enabled_states=None,
+        send_enabled_after_click=True,
         delete_requires_confirmation=False,
         empty_state_sequence=None,
         document_ready=True,
@@ -485,6 +488,7 @@ class FakePage:
         self.last_filled = ""
         self.agent_ready = True
         self.agent_enabled_states = list(agent_enabled_states or [False, True])
+        self.send_enabled_after_click = send_enabled_after_click
         self.delete_requires_confirmation = delete_requires_confirmation
         self.confirmation_pending = False
         self.empty_state_sequence = list(empty_state_sequence or [])
@@ -1592,6 +1596,160 @@ def test_flow_workspace_reconciliation_skips_rename_when_semantic_names_exist(
         for action in page.actions
     )
     assert ("click", "bulk_download") in page.actions
+
+
+def test_flow_workspace_rename_completes_from_semantic_names_when_send_stays_disabled(
+    monkeypatch, tmp_path
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"draft-{number}" for number in range(1, 7)],
+        renamed_clip_names=[f"clip {number}" for number in range(1, 7)],
+        inventory_sequence=[6, 6, 6],
+        agent_enabled_states=[False],
+        send_enabled_after_click=False,
+    )
+    client, _ = _client(page, timeout_seconds=1.0)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        _timeout_clock(monkeypatch)
+        result = workspace.reconcile_and_download(
+            _job(flow_generation_unresolved=True),
+            paths,
+        )
+
+    assert result == paths.flow_files
+    assert page.actions.count(
+        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
+    ) == 1
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert ("click", "bulk_download") in page.actions
+
+
+def test_flow_workspace_rename_submits_once_across_two_postcondition_reloads(
+    monkeypatch, tmp_path
+):
+    complete_names = [f"clip {number}" for number in range(1, 7)]
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"draft-{number}" for number in range(1, 7)],
+        renamed_clip_names=complete_names[:-1],
+        reload_state_updates=[{}, {"clip_names": complete_names}],
+        inventory_sequence=[6, 6, 6],
+        agent_enabled_states=[False],
+        send_enabled_after_click=False,
+    )
+    client, _ = _client(page, timeout_seconds=1.0)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        _timeout_clock(monkeypatch)
+        result = workspace.reconcile_and_download(
+            _job(flow_generation_unresolved=True),
+            paths,
+        )
+
+    assert result == paths.flow_files
+    assert page.actions.count(
+        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
+    ) == 1
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}] * 2
+
+
+@pytest.mark.parametrize(
+    "renamed_clip_names",
+    [
+        ["clip 1", "clip 2", "clip 3", "clip 4", "clip 5", "draft-6"],
+        ["clip 1", "clip 2", "clip 3", "clip 3", "clip 5", "clip 6"],
+    ],
+)
+def test_flow_workspace_rename_fails_closed_when_semantic_names_stay_incomplete(
+    monkeypatch, tmp_path, renamed_clip_names
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"draft-{number}" for number in range(1, 7)],
+        renamed_clip_names=renamed_clip_names,
+        inventory_sequence=[6, 6, 6],
+        agent_enabled_states=[False],
+        send_enabled_after_click=False,
+    )
+    client, _ = _client(page, timeout_seconds=1.0)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        _timeout_clock(monkeypatch)
+        with pytest.raises(FlowWorkspaceVerificationError, match="semantic clip names"):
+            workspace.reconcile_and_download(
+                _job(flow_generation_unresolved=True),
+                paths,
+            )
+
+    assert page.actions.count(
+        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
+    ) == 1
+    assert not any(
+        action[:3] == ("fill", "prompt", _job().master_prompt)
+        for action in page.actions
+    )
+    assert ("click", "bulk_download") not in page.actions
+    assert ("click", "delete_selected") not in page.actions
+
+
+def test_flow_workspace_rename_recovers_hydration_in_one_context_after_reload(
+    monkeypatch, tmp_path
+):
+    complete_names = [f"clip {number}" for number in range(1, 7)]
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        reload_progress_html=[
+            ["<main>Application error: a client-side exception has occurred</main>"],
+            ["<div>Ready</div>"],
+        ],
+        reload_state_updates=[{}, {"clip_names": complete_names}],
+        clip_names=[f"draft-{number}" for number in range(1, 7)],
+        renamed_clip_names=["clip 1", "clip 2", "clip 3", "clip 4", "clip 5", "draft-6"],
+        inventory_sequence=[6, 6, 6],
+        agent_enabled_states=[False],
+        send_enabled_after_click=False,
+    )
+    client, _ = _client(page, timeout_seconds=1.0)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        _timeout_clock(monkeypatch)
+        result = workspace.reconcile_and_download(
+            _job(flow_generation_unresolved=True),
+            paths,
+        )
+
+    assert result == paths.flow_files
+    assert client.browser.open_calls == [("google_flow", None, 1.0)]
+    assert page.actions.count(
+        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
+    ) == 1
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}] * 2
 
 
 def test_flow_workspace_reconciles_completed_video_cards_without_progress_or_generate(

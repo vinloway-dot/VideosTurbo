@@ -252,8 +252,7 @@ class FlowWorkspaceRun:
                 self.page,
                 RENAME_CLIPS_INSTRUCTION,
             )
-            self.client._wait_for_agent_completion(send)
-            self.page.reload(wait_until="domcontentloaded")
+            self._wait_for_semantic_rename(expected_count, send)
         self._verify_semantic_names(expected_count)
 
         bulk_download = self.page.get_by_role(
@@ -286,6 +285,36 @@ class FlowWorkspaceRun:
             self.page.get_by_text(f"clip {number}", exact=True).count() == 1
             for number in range(1, expected_count + 1)
         )
+
+    def _wait_for_semantic_rename(self, expected_count: int, send: Any) -> None:
+        self._verify_rename_submission_acknowledged(send)
+        for _ in range(2):
+            self.page.reload(wait_until="domcontentloaded")
+            self.client._hydrate_project_workspace(
+                self.page,
+                flow_generation_unresolved=True,
+            )
+            for _ in range(self.client.settled_poll_count):
+                if self._semantic_names_are_complete(expected_count):
+                    return
+                time.sleep(self.client.poll_seconds)
+        raise FlowWorkspaceVerificationError(
+            "Google Flow semantic clip names could not be verified"
+        )
+
+    def _verify_rename_submission_acknowledged(self, send: Any) -> None:
+        deadline = time.monotonic() + self.client.editor_ready_timeout_seconds
+        while True:
+            if not send.is_enabled():
+                return
+            composer = self.client._active_agent_composer(self.page)
+            if self.client._prompt_value(composer.prompt) != RENAME_CLIPS_INSTRUCTION:
+                return
+            if time.monotonic() >= deadline:
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow rename submission could not be verified"
+                )
+            time.sleep(self.client.poll_seconds)
 
     def _verify_semantic_names(self, expected_count: int) -> None:
         if self.page.get_by_role("checkbox").count() != expected_count:
@@ -669,20 +698,6 @@ class GoogleFlowClient:
     def _submit_agent_prompt(self, page: Any, prompt_text: str) -> Any:
         self._prepare_agent_prompt(page, prompt_text)
         return self._submit_prepared_agent_prompt(page, prompt_text)
-
-    def _wait_for_agent_completion(self, send: Any) -> None:
-        deadline = time.monotonic() + self.generation_timeout_seconds
-        saw_busy = False
-        while True:
-            enabled = send.is_enabled()
-            saw_busy = saw_busy or not enabled
-            if saw_busy and enabled:
-                return
-            if time.monotonic() >= deadline:
-                raise FlowWorkspaceVerificationError(
-                    "Google Flow Agent completion could not be verified"
-                )
-            time.sleep(self.poll_seconds)
 
     def _wait_for_generation(self, page: Any, expected_count: int) -> None:
         deadline = time.monotonic() + self.generation_timeout_seconds
