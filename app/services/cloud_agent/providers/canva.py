@@ -160,30 +160,64 @@ class CanvaAssemblyClient:
             page.upload_media(paths)
             return
         page.get_by_role("tab", name="Uploads", exact=True).click()
+        audio_name = paths[-1].name
+        baseline_inventory = self._upload_inventory(page, audio_name)
         upload_input = page.locator('input[type="file"]')
         upload_input.wait_for(
             state="visible",
             timeout=int(self.export_timeout_seconds * 1000),
         )
         upload_input.set_input_files([str(path) for path in paths])
-        self._wait_for_upload_completion(page, [path.name for path in paths])
+        self._wait_for_upload_completion(
+            page,
+            [path.name for path in paths],
+            baseline_inventory=baseline_inventory,
+        )
 
-    def _wait_for_upload_completion(self, page: Any, expected_names: list[str]) -> None:
+    def _upload_inventory(self, page: Any, audio_name: str) -> tuple[int, int]:
+        video_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-videos"]')
+        audio_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-audio"]')
+        if video_tab.count() != 1 or audio_tab.count() != 1:
+            raise CanvaUIVerificationError("Canva upload media tabs cannot be found")
+
+        video_tab.click()
+        video_panel_id = video_tab.get_attribute("aria-controls")
+        audio_tab.click()
+        audio_panel_id = audio_tab.get_attribute("aria-controls")
+        if not video_panel_id or not audio_panel_id:
+            raise CanvaUIVerificationError("Canva upload media panels cannot be found")
+
+        video_panel = page.locator(f'[role="tabpanel"][id="{video_panel_id}"]')
+        audio_panel = page.locator(f'[role="tabpanel"][id="{audio_panel_id}"]')
+        return (
+            video_panel.get_by_text(re.compile(r"^\d+(?:\.\d+)?s$")).count(),
+            audio_panel.get_by_text(audio_name, exact=True).count(),
+        )
+
+    def _wait_for_upload_completion(
+        self,
+        page: Any,
+        expected_names: list[str],
+        *,
+        baseline_inventory: tuple[int, int] | None = None,
+    ) -> None:
         deadline = time.monotonic() + self.export_timeout_seconds
-        saw_upload_activity = False
         while True:
             body = page.content().lower()
-            upload_active = "processing" in body or "uploading" in body
             failed = any(marker in body for marker in ("upload failed", "retry upload", "unsupported file"))
             if failed:
                 raise CanvaUIVerificationError("Canva reported that an upload failed")
-            saw_upload_activity = saw_upload_activity or upload_active
             names_visible = all(
                 page.get_by_text(name, exact=True).count() == 1
                 and page.get_by_text(name, exact=True).is_visible()
                 for name in expected_names
             )
-            if names_visible or (saw_upload_activity and not upload_active):
+            inventory_complete = False
+            if baseline_inventory is not None:
+                video_before, audio_before = baseline_inventory
+                video_after, audio_after = self._upload_inventory(page, expected_names[-1])
+                inventory_complete = video_after >= video_before + 6 and audio_after >= audio_before + 1
+            if names_visible or inventory_complete:
                 return
             if time.monotonic() >= deadline:
                 raise CanvaUIVerificationError("Canva upload completion could not be verified")
