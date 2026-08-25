@@ -160,6 +160,63 @@ class FakeUploadInventoryPage(FakeCompletedUploadPage):
         return "Canva editor By uploading, you confirm that your content complies"
 
 
+class _InventoryCount:
+    def __init__(self, count):
+        self._count = count
+
+    def count(self):
+        return self._count
+
+
+class _HydratingUploadTab:
+    def __init__(self, page, panel_name):
+        self.page = page
+        self.panel_name = panel_name
+
+    def wait_for(self, *, state, timeout):
+        assert state == "visible"
+        assert timeout > 0
+        self.page.tabs_ready = True
+
+    def count(self):
+        return 1 if self.page.tabs_ready else 0
+
+    def click(self):
+        return None
+
+    def get_attribute(self, name):
+        assert name == "aria-controls"
+        return f"test-tabpanel-{self.panel_name}"
+
+
+class _UploadPanel:
+    def __init__(self, count):
+        self._count = count
+
+    def get_by_text(self, _name, *, exact=False):
+        return _InventoryCount(self._count)
+
+
+class FakeHydratingUploadInventoryPage:
+    def __init__(self):
+        self.tabs_ready = False
+        self.video_tab = _HydratingUploadTab(self, "videos")
+        self.audio_tab = _HydratingUploadTab(self, "audio")
+        self.video_panel = _UploadPanel(6)
+        self.audio_panel = _UploadPanel(1)
+
+    def locator(self, selector):
+        if selector.endswith('test-tabpanel-videos"]'):
+            return self.video_panel
+        if selector.endswith('test-tabpanel-audio"]'):
+            return self.audio_panel
+        if selector.endswith('-tabpanel-videos"]'):
+            return self.video_tab
+        if selector.endswith('-tabpanel-audio"]'):
+            return self.audio_tab
+        raise AssertionError(f"unexpected selector: {selector}")
+
+
 def _assembly_job(*, speed=0.95, target_seconds=63.25):
     return SimpleNamespace(
         id="job-canva-123",
@@ -318,6 +375,14 @@ def test_canva_upload_completion_accepts_observable_media_without_processing_tex
             "voice.mp3",
         ],
     )
+
+
+def test_canva_upload_inventory_waits_for_hydrated_media_tabs():
+    """Catches querying Canva's video/audio tabs before their post-click hydration."""
+    page = FakeHydratingUploadInventoryPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    assert client._upload_inventory(page, "voice.mp3") == (6, 1)
 
 
 def test_canva_upload_completion_accepts_scoped_media_card_increase_when_videos_omit_filenames(

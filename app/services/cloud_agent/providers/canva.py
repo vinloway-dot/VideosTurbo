@@ -177,6 +177,12 @@ class CanvaAssemblyClient:
     def _upload_inventory(self, page: Any, audio_name: str) -> tuple[int, int]:
         video_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-videos"]')
         audio_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-audio"]')
+        ready_timeout = int(self.export_timeout_seconds * 1000)
+        try:
+            video_tab.wait_for(state="visible", timeout=ready_timeout)
+            audio_tab.wait_for(state="visible", timeout=ready_timeout)
+        except PlaywrightTimeoutError as exc:
+            raise CanvaUIVerificationError("Canva upload media tabs cannot be found") from exc
         if video_tab.count() != 1 or audio_tab.count() != 1:
             raise CanvaUIVerificationError("Canva upload media tabs cannot be found")
 
