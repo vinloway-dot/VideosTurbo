@@ -269,6 +269,7 @@ class FakeHydratingUploadInventoryPage:
         self.audio_panel = _UploadPanel(1)
 
     def locator(self, selector):
+        selector = selector.removesuffix(":visible")
         if selector.endswith('test-tabpanel-videos"]'):
             return self.video_panel
         if selector.endswith('test-tabpanel-audio"]'):
@@ -297,6 +298,7 @@ class FakeZeroVideoUploadInventoryPage(FakeHydratingUploadInventoryPage):
         self.video_panel = _UploadPanel(0)
 
     def locator(self, selector):
+        selector = selector.removesuffix(":visible")
         if selector.endswith('-tabpanel-videos"]'):
             return _NoVideoUploadTab()
         return super().locator(selector)
@@ -319,6 +321,32 @@ class FakeZeroVideoHiddenAudioTabPage(FakeZeroVideoUploadInventoryPage):
     def __init__(self):
         super().__init__()
         self.audio_tab = _HiddenAudioUploadTab(self)
+
+
+class _InvisibleAudioUploadTab(_HydratingUploadTab):
+    def __init__(self, page):
+        super().__init__(page, "audio")
+
+    def click(self):
+        raise canva.PlaywrightTimeoutError("stale hidden audio tab cannot be clicked")
+
+
+class FakeDuplicateAudioTabPage(FakeZeroVideoUploadInventoryPage):
+    """Models Canva retaining a hidden stale Uploads panel behind the live one."""
+
+    def __init__(self):
+        super().__init__()
+        self.hidden_audio_tab = _InvisibleAudioUploadTab(self)
+        self.visible_audio_tab = _HydratingUploadTab(self, "audio")
+
+    def locator(self, selector):
+        if selector == '[role="tab"][aria-controls$="-tabpanel-audio"]':
+            return self.hidden_audio_tab
+        if selector == '[role="tab"][aria-controls$="-tabpanel-audio"]:visible':
+            return self.visible_audio_tab
+        if selector == '[role="tab"][aria-controls$="-tabpanel-videos"]:visible':
+            return _NoVideoUploadTab()
+        return super().locator(selector)
 
 
 def _assembly_job(*, speed=0.95, target_seconds=63.25):
@@ -560,6 +588,14 @@ def test_canva_upload_inventory_accepts_missing_videos_tab_after_pre_clean():
 def test_canva_upload_inventory_selects_hidden_audio_tab_before_waiting_for_it():
     """Catches waiting forever for Canva's Audio tab before selecting that tab."""
     page = FakeZeroVideoHiddenAudioTabPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    assert client._upload_inventory(page, "voice.mp3") == (0, 1)
+
+
+def test_canva_upload_inventory_uses_visible_audio_tab_when_stale_panel_remains():
+    """Catches selecting Canva's hidden stale Audio tab before the live panel."""
+    page = FakeDuplicateAudioTabPage()
     client, _ = _assembly_client(FakeCanvaEditorPage())
 
     assert client._upload_inventory(page, "voice.mp3") == (0, 1)

@@ -52,7 +52,7 @@ Cleanup is card-scoped and fail-closed: fresh hover, fresh overlapping `Show det
 
 All production behavior follows RED → observed intended failure → smallest GREEN → focused/full verification → commit → push → CI → live evidence.
 
-For one identified issue, count each distinct attempted production fix after root-cause evidence. If it remains unresolved after **five** attempted fixes, stop further fixes and report: attempts and evidence, current durable state, root cause(s), rejected hypotheses, risks, and concrete options requiring a human decision. This counter resets only when a genuinely new root cause is proven.
+Continue resolving routine, reversible implementation and verification failures autonomously: root cause → minimal RED-to-GREEN fix → focused/full verification → CI → live evidence. Stop only for interactive authentication, CAPTCHA/2FA/device/OAuth interaction, destructive or irreversible production changes, a public-security change, or a genuine architecture decision requiring the operator. The former five-attempt reporting ceiling was explicitly withdrawn on 2026-08-25.
 
 ## Immediate continuation
 
