@@ -658,6 +658,25 @@ def test_canva_cleanup_reopens_transiently_missing_videos_tab_after_a_delete(mon
     assert deleted == [2, 1]
 
 
+def test_canva_cleanup_accepts_missing_videos_tab_only_after_retrying_post_delete(
+    monkeypatch,
+):
+    """Catches rejecting Canva's observed zero-video state after the final delete."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    cards = _CleanupCards(1)
+    populated_panel = _CleanupPanel(cards)
+    opened_panels = iter((populated_panel, None, None))
+
+    monkeypatch.setattr(client, "_open_uploaded_videos", lambda _page: next(opened_panels))
+    monkeypatch.setattr(
+        client,
+        "_delete_uploaded_video_card",
+        lambda _page, current_cards: setattr(current_cards, "count_value", 0),
+    )
+
+    client._clean_uploaded_videos(object())
+
+
 def test_canva_open_uploaded_videos_uses_visible_tab_when_hidden_stale_tab_remains():
     """Catches selecting Canva's hidden retained Videos tab instead of the live control."""
     client, _ = _assembly_client(FakeCanvaEditorPage())

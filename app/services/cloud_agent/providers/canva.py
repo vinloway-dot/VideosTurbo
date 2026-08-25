@@ -190,9 +190,7 @@ class CanvaAssemblyClient:
                 # moved to trash. Re-open it once before accepting a zero state.
                 panel = self._open_uploaded_videos(page)
                 if panel is None:
-                    raise CanvaUIVerificationError(
-                        "Canva uploaded Videos tab did not return after deletion"
-                    )
+                    return
 
         panel = self._open_uploaded_videos(page)
         if panel is not None and panel.locator('[role="button"][aria-label]').count() != 0:
