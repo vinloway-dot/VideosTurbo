@@ -130,6 +130,29 @@ class FakeCanvaSessions:
         self.calls.append((service, job_id))
 
 
+class _VisibleUploadName:
+    def __init__(self, visible: bool):
+        self.visible = visible
+
+    def count(self):
+        return 1 if self.visible else 0
+
+    def is_visible(self):
+        return self.visible
+
+
+class FakeCompletedUploadPage:
+    def __init__(self, visible_names):
+        self.visible_names = set(visible_names)
+
+    def content(self):
+        return "Canva editor"
+
+    def get_by_text(self, name, *, exact):
+        assert exact is True
+        return _VisibleUploadName(name in self.visible_names)
+
+
 def _assembly_job(*, speed=0.95, target_seconds=63.25):
     return SimpleNamespace(
         id="job-canva-123",
@@ -260,3 +283,42 @@ def test_canva_assembly_rejects_an_export_without_a_completed_mp4_download(tmp_p
 
     assert ("download", "final.mp4") in page.actions
     assert not output.exists()
+
+
+def test_canva_upload_completion_accepts_observable_media_without_processing_text():
+    page = FakeCompletedUploadPage(
+        {
+            "clip_01.mp4",
+            "clip_02.mp4",
+            "clip_03.mp4",
+            "clip_04.mp4",
+            "clip_05.mp4",
+            "clip_06.mp4",
+            "voice.mp3",
+        }
+    )
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    client._wait_for_upload_completion(
+        page,
+        [
+            "clip_01.mp4",
+            "clip_02.mp4",
+            "clip_03.mp4",
+            "clip_04.mp4",
+            "clip_05.mp4",
+            "clip_06.mp4",
+            "voice.mp3",
+        ],
+    )
+
+
+def test_canva_upload_completion_fails_closed_when_any_media_name_is_absent():
+    page = FakeCompletedUploadPage({"clip_01.mp4"})
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.0
+    error_cls = getattr(canva, "CanvaUIVerificationError", None)
+    assert error_cls is not None
+
+    with pytest.raises(error_cls, match="upload completion"):
+        client._wait_for_upload_completion(page, ["clip_01.mp4", "voice.mp3"])
