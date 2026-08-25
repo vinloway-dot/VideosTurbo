@@ -381,7 +381,11 @@ in the same page. Page-level classification reuses the existing Flow session and
 security-challenge classification rules; it neither reads cookies nor performs
 password, CAPTCHA, 2FA, device-confirmation, or OAuth interaction. A session
 expiry or active security challenge fails through the existing human/session
-recovery boundary without opening another context.
+recovery boundary without opening another context. A plain `ERROR`
+classification on the configured project route, with no explicit login or
+security state, is not accepted as authentication proof or immediately treated
+as a session failure: the bounded project-hydration loop owns that transient
+vendor-shell case and fails closed only after its recovery limit.
 
 #### Project hydration is distinct from session readiness and generation
 

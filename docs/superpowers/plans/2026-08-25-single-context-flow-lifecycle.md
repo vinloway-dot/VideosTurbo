@@ -153,8 +153,10 @@ class GoogleFlowClient:
   `classify_google_flow_session(url=page.url, html=page.content())`. Return only
   `READY`; map `SESSION_EXPIRED`, login, CAPTCHA, two-factor, and verification
   statuses to the existing `HumanRequiredError` boundary with the supplied job
-  id; map `ERROR` to `FlowWorkspaceVerificationError`. This helper performs no
-  browser open, session-manager call, repair, click, or credential access.
+  id. A plain `ERROR` on the configured project route with no explicit human
+  state continues into project hydration, which is responsible for bounded
+  recovery and the eventual fail-closed error. This helper performs no browser
+  open, session-manager call, repair, click, or credential access.
 
 - [ ] **Step 3: Implement one unified same-context hydration loop.**
 
