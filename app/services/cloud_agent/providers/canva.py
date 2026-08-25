@@ -356,15 +356,13 @@ class CanvaAssemblyClient:
             state="visible",
             timeout=int(self.export_timeout_seconds * 1000),
         )
-        for path in paths:
-            upload_input.set_input_files(str(path))
-            self._wait_for_upload_completion(
-                page,
-                [path.name],
-                baseline_inventory=baseline_inventory,
-                audio_name=audio_name,
-            )
-            baseline_inventory = self._upload_inventory(page, audio_name)
+        upload_input.set_input_files([str(path) for path in paths])
+        self._wait_for_upload_completion(
+            page,
+            [path.name for path in paths],
+            baseline_inventory=baseline_inventory,
+            audio_name=audio_name,
+        )
 
     def _upload_inventory(self, page: Any, audio_name: str) -> tuple[int, int]:
         page.get_by_role("tab", name="Elements", exact=True).click()
@@ -405,6 +403,7 @@ class CanvaAssemblyClient:
         audio_name: str | None = None,
     ) -> None:
         deadline = time.monotonic() + self.export_timeout_seconds
+        refreshed = False
         while True:
             body = page.content().lower()
             failed = any(marker in body for marker in ("upload failed", "retry upload", "unsupported file"))
@@ -435,6 +434,11 @@ class CanvaAssemblyClient:
             ):
                 return
             if time.monotonic() >= deadline:
+                if not refreshed:
+                    page.reload(wait_until="domcontentloaded")
+                    refreshed = True
+                    deadline = time.monotonic() + self.export_timeout_seconds
+                    continue
                 raise CanvaUIVerificationError("Canva upload completion could not be verified")
             time.sleep(self.poll_seconds)
 

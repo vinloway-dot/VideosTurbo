@@ -278,6 +278,9 @@ class FakeCompletedUploadPage:
     def content(self):
         return "Canva editor"
 
+    def reload(self, *, wait_until):
+        assert wait_until == "domcontentloaded"
+
     def get_by_text(self, name, *, exact):
         assert exact is True
         return _VisibleUploadName(name in self.visible_names)
@@ -325,6 +328,16 @@ class FakeUploadInventoryPage(FakeCompletedUploadPage):
 
     def content(self):
         return "Canva editor By uploading, you confirm that your content complies"
+
+
+class FakeRefreshableUploadPage(FakeUploadInventoryPage):
+    def __init__(self):
+        super().__init__(set())
+        self.reload_count = 0
+
+    def reload(self, *, wait_until):
+        assert wait_until == "domcontentloaded"
+        self.reload_count += 1
 
 
 class _InventoryCount:
@@ -814,16 +827,14 @@ def test_canva_upload_completion_accepts_observable_media_without_processing_tex
     )
 
 
-def test_canva_uploads_each_canonical_media_file_in_its_own_verified_submission(
+def test_canva_uploads_all_canonical_media_in_one_submission_then_verifies_as_a_set(
     tmp_path, monkeypatch
 ):
-    """Catches Canva accepting only the first files from one seven-file chooser submission."""
+    """Catches breaking Canva's supported batch upload into independent partial uploads."""
     page = FakeSequentialUploadPage()
     client, _ = _assembly_client(FakeCanvaEditorPage())
     clips, audio, _ = _media(tmp_path)
-    inventory = iter(
-        ((0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (6, 1))
-    )
+    inventory = iter(((0, 0),) * 8)
     verified = []
     monkeypatch.setattr(client, "_upload_inventory", lambda _page, _audio: next(inventory))
     monkeypatch.setattr(
@@ -834,10 +845,8 @@ def test_canva_uploads_each_canonical_media_file_in_its_own_verified_submission(
 
     client._upload_media(page, [*clips, audio])
 
-    assert page.upload_input.submissions == [
-        (str(path),) for path in [*clips, audio]
-    ]
-    assert verified == [(path.name,) for path in [*clips, audio]]
+    assert page.upload_input.submissions == [tuple(str(path) for path in [*clips, audio])]
+    assert verified == [tuple(path.name for path in [*clips, audio])]
 
 
 def test_canva_upload_completion_rejects_complete_count_with_partial_duplicate_names(
@@ -926,6 +935,27 @@ def test_canva_upload_completion_accepts_scoped_media_card_increase_when_videos_
         ["clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4", "voice.mp3"],
         baseline_inventory=(11, 4),
     )
+
+
+def test_canva_upload_completion_refreshes_once_before_rejecting_partial_progress(
+    monkeypatch,
+):
+    """Catches rejecting Canva uploads that finish only after its post-upload refresh."""
+    page = FakeRefreshableUploadPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.0
+    client.poll_seconds = 0.0
+    inventories = iter(((2, 1), (6, 1)))
+    monkeypatch.setattr(client, "_upload_inventory", lambda _page, _audio: next(inventories))
+
+    client._wait_for_upload_completion(
+        page,
+        [*(f"clip_{index:02d}.mp4" for index in range(1, 7)), "voice.mp3"],
+        baseline_inventory=(0, 0),
+        audio_name="voice.mp3",
+    )
+
+    assert page.reload_count == 1
 
 
 def test_canva_upload_completion_rejects_unscoped_names_when_audio_panel_did_not_gain_voice(
