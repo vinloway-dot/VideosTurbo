@@ -248,11 +248,11 @@ class FlowWorkspaceRun:
         expected_count: int,
     ) -> tuple[Path, ...]:
         if not self._semantic_names_are_complete(expected_count):
-            send = self.client._submit_agent_prompt(
+            self.client._submit_agent_prompt(
                 self.page,
                 RENAME_CLIPS_INSTRUCTION,
             )
-            self._wait_for_semantic_rename(expected_count, send)
+            self._wait_for_semantic_rename(expected_count)
         self._verify_semantic_names(expected_count)
 
         bulk_download = self.page.get_by_role(
@@ -286,8 +286,7 @@ class FlowWorkspaceRun:
             for number in range(1, expected_count + 1)
         )
 
-    def _wait_for_semantic_rename(self, expected_count: int, send: Any) -> None:
-        self._verify_rename_submission_acknowledged(send)
+    def _wait_for_semantic_rename(self, expected_count: int) -> None:
         for _ in range(2):
             self.page.reload(wait_until="domcontentloaded")
             self.client._hydrate_project_workspace(
@@ -301,20 +300,6 @@ class FlowWorkspaceRun:
         raise FlowWorkspaceVerificationError(
             "Google Flow semantic clip names could not be verified"
         )
-
-    def _verify_rename_submission_acknowledged(self, send: Any) -> None:
-        deadline = time.monotonic() + self.client.editor_ready_timeout_seconds
-        while True:
-            if not send.is_enabled():
-                return
-            composer = self.client._active_agent_composer(self.page)
-            if self.client._prompt_value(composer.prompt) != RENAME_CLIPS_INSTRUCTION:
-                return
-            if time.monotonic() >= deadline:
-                raise FlowWorkspaceVerificationError(
-                    "Google Flow rename submission could not be verified"
-                )
-            time.sleep(self.client.poll_seconds)
 
     def _verify_semantic_names(self, expected_count: int) -> None:
         if self.page.get_by_role("checkbox").count() != expected_count:

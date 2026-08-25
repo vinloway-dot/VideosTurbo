@@ -338,6 +338,8 @@ class FakeLocator:
     def is_enabled(self):
         if self.kind == "generate" and not self.page.generate_clicked:
             return self.page.generate_available
+        if self.kind == "generate" and self.page.send_stale_after_click:
+            raise PlaywrightError("stale Flow rename submit locator")
         if self.kind == "generate" and self.page.agent_enabled_states:
             return self.page.agent_enabled_states.pop(0)
         if self.kind == "generate" and self.page.generate_clicked:
@@ -426,6 +428,7 @@ class FakePage:
         renamed_clip_names=None,
         agent_enabled_states=None,
         send_enabled_after_click=True,
+        send_stale_after_click=False,
         delete_requires_confirmation=False,
         empty_state_sequence=None,
         document_ready=True,
@@ -489,6 +492,7 @@ class FakePage:
         self.agent_ready = True
         self.agent_enabled_states = list(agent_enabled_states or [False, True])
         self.send_enabled_after_click = send_enabled_after_click
+        self.send_stale_after_click = send_stale_after_click
         self.delete_requires_confirmation = delete_requires_confirmation
         self.confirmation_pending = False
         self.empty_state_sequence = list(empty_state_sequence or [])
@@ -1630,6 +1634,78 @@ def test_flow_workspace_rename_completes_from_semantic_names_when_send_stays_dis
     ) == 1
     assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
     assert ("click", "bulk_download") in page.actions
+
+
+def test_flow_workspace_rename_ignores_stale_submit_locator_after_click(
+    monkeypatch, tmp_path
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"draft-{number}" for number in range(1, 7)],
+        renamed_clip_names=[f"clip {number}" for number in range(1, 7)],
+        inventory_sequence=[6, 6, 6],
+        send_stale_after_click=True,
+    )
+    client, _ = _client(page)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        result = workspace.reconcile_and_download(
+            _job(flow_generation_unresolved=True),
+            paths,
+        )
+
+    assert result == paths.flow_files
+    assert page.actions.count(
+        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
+    ) == 1
+    assert not any(
+        action[:3] == ("fill", "prompt", _job().master_prompt)
+        for action in page.actions
+    )
+    assert ("click", "bulk_download") in page.actions
+    assert ("click", "delete_selected") not in page.actions
+
+
+def test_flow_workspace_rename_stale_submit_locator_fails_closed_without_names(
+    monkeypatch, tmp_path
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"draft-{number}" for number in range(1, 7)],
+        renamed_clip_names=["clip 1", "clip 2", "clip 3", "clip 4", "clip 5", "draft-6"],
+        inventory_sequence=[6, 6, 6],
+        send_stale_after_click=True,
+    )
+    client, _ = _client(page)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        with pytest.raises(FlowWorkspaceVerificationError, match="semantic clip names"):
+            workspace.reconcile_and_download(
+                _job(flow_generation_unresolved=True),
+                paths,
+            )
+
+    assert page.actions.count(
+        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
+    ) == 1
+    assert not any(
+        action[:3] == ("fill", "prompt", _job().master_prompt)
+        for action in page.actions
+    )
+    assert ("click", "bulk_download") not in page.actions
+    assert ("click", "delete_selected") not in page.actions
 
 
 def test_flow_workspace_rename_submits_once_across_two_postcondition_reloads(
