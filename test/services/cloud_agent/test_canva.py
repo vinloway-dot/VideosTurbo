@@ -295,6 +295,31 @@ class FakePartialNamedUploadPage(FakeCompletedUploadPage):
         return _CountedUploadName(self.name_counts.get(name, 0))
 
 
+class _SequentialUploadInput:
+    def __init__(self):
+        self.submissions = []
+
+    def wait_for(self, *, state, timeout):
+        assert state == "visible"
+        assert timeout > 0
+
+    def set_input_files(self, paths):
+        self.submissions.append(tuple(paths) if isinstance(paths, list) else (paths,))
+
+
+class FakeSequentialUploadPage:
+    def __init__(self):
+        self.upload_input = _SequentialUploadInput()
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) == ("tab", "Uploads", True)
+        return _ClickOnly()
+
+    def locator(self, selector):
+        assert selector == 'input[type="file"]'
+        return self.upload_input
+
+
 class FakeUploadInventoryPage(FakeCompletedUploadPage):
     """Models the permanent Canva "By uploading" copy with unnamed video cards."""
 
@@ -787,6 +812,32 @@ def test_canva_upload_completion_accepts_observable_media_without_processing_tex
             "voice.mp3",
         ],
     )
+
+
+def test_canva_uploads_each_canonical_media_file_in_its_own_verified_submission(
+    tmp_path, monkeypatch
+):
+    """Catches Canva accepting only the first files from one seven-file chooser submission."""
+    page = FakeSequentialUploadPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    clips, audio, _ = _media(tmp_path)
+    inventory = iter(
+        ((0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (6, 1))
+    )
+    verified = []
+    monkeypatch.setattr(client, "_upload_inventory", lambda _page, _audio: next(inventory))
+    monkeypatch.setattr(
+        client,
+        "_wait_for_upload_completion",
+        lambda _page, names, **_kwargs: verified.append(tuple(names)),
+    )
+
+    client._upload_media(page, [*clips, audio])
+
+    assert page.upload_input.submissions == [
+        (str(path),) for path in [*clips, audio]
+    ]
+    assert verified == [(path.name,) for path in [*clips, audio]]
 
 
 def test_canva_upload_completion_rejects_complete_count_with_partial_duplicate_names(

@@ -356,12 +356,15 @@ class CanvaAssemblyClient:
             state="visible",
             timeout=int(self.export_timeout_seconds * 1000),
         )
-        upload_input.set_input_files([str(path) for path in paths])
-        self._wait_for_upload_completion(
-            page,
-            [path.name for path in paths],
-            baseline_inventory=baseline_inventory,
-        )
+        for path in paths:
+            upload_input.set_input_files(str(path))
+            self._wait_for_upload_completion(
+                page,
+                [path.name],
+                baseline_inventory=baseline_inventory,
+                audio_name=audio_name,
+            )
+            baseline_inventory = self._upload_inventory(page, audio_name)
 
     def _upload_inventory(self, page: Any, audio_name: str) -> tuple[int, int]:
         page.get_by_role("tab", name="Elements", exact=True).click()
@@ -399,6 +402,7 @@ class CanvaAssemblyClient:
         expected_names: list[str],
         *,
         baseline_inventory: tuple[int, int] | None = None,
+        audio_name: str | None = None,
     ) -> None:
         deadline = time.monotonic() + self.export_timeout_seconds
         while True:
@@ -414,8 +418,18 @@ class CanvaAssemblyClient:
             inventory_complete = False
             if baseline_inventory is not None:
                 video_before, audio_before = baseline_inventory
-                video_after, audio_after = self._upload_inventory(page, expected_names[-1])
-                inventory_complete = video_after >= video_before + 6 and audio_after >= audio_before + 1
+                video_after, audio_after = self._upload_inventory(
+                    page, audio_name or expected_names[-1]
+                )
+                expected_video_count = sum(
+                    Path(name).suffix.lower() in {".mp4", ".mov", ".webm"}
+                    for name in expected_names
+                )
+                expected_audio_count = len(expected_names) - expected_video_count
+                inventory_complete = (
+                    video_after >= video_before + expected_video_count
+                    and audio_after >= audio_before + expected_audio_count
+                )
             if (baseline_inventory is None and names_visible) or (
                 inventory_complete and (not names_observable or names_visible)
             ):
