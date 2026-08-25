@@ -347,6 +347,8 @@ class CanvaAssemblyClient:
         )
 
     def _upload_inventory(self, page: Any, audio_name: str) -> tuple[int, int]:
+        page.get_by_role("tab", name="Elements", exact=True).click()
+        page.get_by_role("tab", name="Uploads", exact=True).click()
         video_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-videos"]:visible')
         audio_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-audio"]:visible')
         ready_timeout = int(self.export_timeout_seconds * 1000)

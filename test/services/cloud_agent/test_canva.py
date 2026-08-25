@@ -280,6 +280,12 @@ class FakeHydratingUploadInventoryPage:
             return self.audio_tab
         raise AssertionError(f"unexpected selector: {selector}")
 
+    def get_by_role(self, role, *, name, exact):
+        assert role == "tab"
+        assert exact is True
+        assert name in {"Elements", "Uploads"}
+        return _SidebarTab(self, name)
+
 
 class _NoVideoUploadTab:
     def wait_for(self, *, state, timeout):
@@ -347,6 +353,37 @@ class FakeDuplicateAudioTabPage(FakeZeroVideoUploadInventoryPage):
         if selector == '[role="tab"][aria-controls$="-tabpanel-videos"]:visible':
             return _NoVideoUploadTab()
         return super().locator(selector)
+
+
+class _SidebarTab:
+    def __init__(self, page, name):
+        self.page = page
+        self.name = name
+
+    def click(self):
+        if hasattr(self.page, "sidebar_clicks"):
+            self.page.sidebar_clicks.append(self.name)
+
+
+class _ReactivatedAudioUploadTab(_DelayedAudioUploadTab):
+    def wait_for(self, *, state, timeout):
+        assert self.page.sidebar_clicks == ["Elements", "Uploads"]
+        super().wait_for(state=state, timeout=timeout)
+
+
+class FakeReactivatingUploadInventoryPage(FakeZeroVideoUploadInventoryPage):
+    """Models Canva requiring a side-panel transition to reveal Uploads media tabs."""
+
+    def __init__(self):
+        super().__init__()
+        self.sidebar_clicks = []
+        self.audio_tab = _ReactivatedAudioUploadTab(self)
+
+    def get_by_role(self, role, *, name, exact):
+        assert role == "tab"
+        assert exact is True
+        assert name in {"Elements", "Uploads"}
+        return _SidebarTab(self, name)
 
 
 def _assembly_job(*, speed=0.95, target_seconds=63.25):
@@ -596,6 +633,14 @@ def test_canva_upload_inventory_waits_for_audio_tab_before_selecting_it():
 def test_canva_upload_inventory_uses_visible_audio_tab_when_stale_panel_remains():
     """Catches selecting Canva's hidden stale Audio tab before the live panel."""
     page = FakeDuplicateAudioTabPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    assert client._upload_inventory(page, "voice.mp3") == (0, 1)
+
+
+def test_canva_upload_inventory_reactivates_uploads_before_reading_media_tabs():
+    """Catches Canva keeping Uploads media tabs hidden when its sidebar is already selected."""
+    page = FakeReactivatingUploadInventoryPage()
     client, _ = _assembly_client(FakeCanvaEditorPage())
 
     assert client._upload_inventory(page, "voice.mp3") == (0, 1)
