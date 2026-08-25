@@ -112,18 +112,31 @@ def test_open_uses_dedicated_persistent_profiles_and_headless_policy(tmp_path):
     assert chromium.launches == [
         {
             "user_data_dir": str(tmp_path / "profiles" / "google-flow"),
-            "headless": True,
-            "channel": "chrome",
-            "chromium_sandbox": True,
+                "headless": True,
+                "channel": "chrome",
+                "chromium_sandbox": True,
+                "args": ["--hide-crash-restore-bubble"],
         },
         {
             "user_data_dir": str(tmp_path / "profiles" / "canva"),
-            "headless": False,
-            "channel": "chrome",
-            "chromium_sandbox": True,
+                "headless": False,
+                "channel": "chrome",
+                "chromium_sandbox": True,
+                "args": ["--hide-crash-restore-bubble"],
         },
     ]
     assert all(context.closed for context in chromium.contexts)
+
+
+def test_open_suppresses_chrome_restore_bubble_for_persistent_profiles(tmp_path):
+    """Catches a restarted worker blocking browser automation behind Chrome's restore UI."""
+    chromium = FakeChromium()
+    manager, _ = _manager(tmp_path, chromium)
+
+    with manager.open("canva", headed=True):
+        pass
+
+    assert chromium.launches[0]["args"] == ["--hide-crash-restore-bubble"]
 
 
 def test_open_headed_false_overrides_configured_headless_value(tmp_path):

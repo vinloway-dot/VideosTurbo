@@ -71,6 +71,7 @@ class PersistentBrowserManager:
                     headless=headless,
                     channel="chrome",
                     chromium_sandbox=True,
+                    args=["--hide-crash-restore-bubble"],
                 )
                 try:
                     yield browser_context
