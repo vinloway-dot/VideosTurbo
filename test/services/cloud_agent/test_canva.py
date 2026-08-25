@@ -153,6 +153,20 @@ class FakeCompletedUploadPage:
         return _VisibleUploadName(name in self.visible_names)
 
 
+class FakeUploadTransitionPage(FakeCompletedUploadPage):
+    """Models Canva's observable upload lifecycle when cards omit filenames."""
+
+    def __init__(self):
+        super().__init__(set())
+        self._content_calls = 0
+
+    def content(self):
+        self._content_calls += 1
+        if self._content_calls == 1:
+            return "Canva editor Uploading"
+        return "Canva editor"
+
+
 def _assembly_job(*, speed=0.95, target_seconds=63.25):
     return SimpleNamespace(
         id="job-canva-123",
@@ -311,6 +325,16 @@ def test_canva_upload_completion_accepts_observable_media_without_processing_tex
             "voice.mp3",
         ],
     )
+
+
+def test_canva_upload_completion_accepts_uploading_transition_when_cards_omit_filenames():
+    """Catches waiting forever when Canva only exposes Uploading while files settle."""
+    page = FakeUploadTransitionPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.01
+    client.poll_seconds = 0.0
+
+    client._wait_for_upload_completion(page, ["clip_01.mp4", "voice.mp3"])
 
 
 def test_canva_upload_completion_fails_closed_when_any_media_name_is_absent():

@@ -170,20 +170,20 @@ class CanvaAssemblyClient:
 
     def _wait_for_upload_completion(self, page: Any, expected_names: list[str]) -> None:
         deadline = time.monotonic() + self.export_timeout_seconds
-        saw_processing = False
+        saw_upload_activity = False
         while True:
             body = page.content().lower()
-            processing = "processing" in body
+            upload_active = "processing" in body or "uploading" in body
             failed = any(marker in body for marker in ("upload failed", "retry upload", "unsupported file"))
             if failed:
                 raise CanvaUIVerificationError("Canva reported that an upload failed")
-            saw_processing = saw_processing or processing
+            saw_upload_activity = saw_upload_activity or upload_active
             names_visible = all(
                 page.get_by_text(name, exact=True).count() == 1
                 and page.get_by_text(name, exact=True).is_visible()
                 for name in expected_names
             )
-            if names_visible or (saw_processing and not processing):
+            if names_visible or (saw_upload_activity and not upload_active):
                 return
             if time.monotonic() >= deadline:
                 raise CanvaUIVerificationError("Canva upload completion could not be verified")
