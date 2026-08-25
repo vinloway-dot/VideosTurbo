@@ -205,6 +205,23 @@ class FakeHydratedNoVideosTabPage:
         return _MissingVideosTab()
 
 
+class _CleanupCards:
+    def __init__(self, count):
+        self.count_value = count
+
+    def count(self):
+        return self.count_value
+
+
+class _CleanupPanel:
+    def __init__(self, cards):
+        self.cards = cards
+
+    def locator(self, selector):
+        assert selector == '[role="button"][aria-label]'
+        return self.cards
+
+
 class FakeCanvaContext:
     def __init__(self, page):
         self.pages = [page]
@@ -615,6 +632,30 @@ def test_canva_clean_uploaded_videos_accepts_hydrated_missing_tab_without_export
     monkeypatch.setattr(canva.time, "sleep", lambda _seconds: None)
 
     client._clean_uploaded_videos(FakeHydratedNoVideosTabPage())
+
+
+def test_canva_cleanup_reopens_transiently_missing_videos_tab_after_a_delete(monkeypatch):
+    """Catches treating Canva's post-delete panel hydration gap as a verified empty state."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    cards = _CleanupCards(2)
+    populated_panel = _CleanupPanel(cards)
+    empty_panel = _CleanupPanel(_CleanupCards(0))
+    opened_panels = iter(
+        (populated_panel, None, populated_panel, empty_panel, empty_panel)
+    )
+    deleted = []
+
+    monkeypatch.setattr(client, "_open_uploaded_videos", lambda _page: next(opened_panels))
+
+    def delete_one(_page, current_cards):
+        deleted.append(current_cards.count())
+        current_cards.count_value -= 1
+
+    monkeypatch.setattr(client, "_delete_uploaded_video_card", delete_one)
+
+    client._clean_uploaded_videos(object())
+
+    assert deleted == [2, 1]
 
 
 def test_canva_open_uploaded_videos_uses_visible_tab_when_hidden_stale_tab_remains():
