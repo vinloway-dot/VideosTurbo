@@ -351,13 +351,13 @@ class CanvaAssemblyClient:
         audio_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-audio"]')
         ready_timeout = int(self.export_timeout_seconds * 1000)
         try:
+            audio_tab.click()
             audio_tab.wait_for(state="visible", timeout=ready_timeout)
         except PlaywrightTimeoutError as exc:
             raise CanvaUIVerificationError("Canva upload media tabs cannot be found") from exc
         if video_tab.count() > 1 or audio_tab.count() != 1:
             raise CanvaUIVerificationError("Canva upload media tabs cannot be found")
 
-        audio_tab.click()
         audio_panel_id = audio_tab.get_attribute("aria-controls")
         if not audio_panel_id:
             raise CanvaUIVerificationError("Canva upload media panels cannot be found")

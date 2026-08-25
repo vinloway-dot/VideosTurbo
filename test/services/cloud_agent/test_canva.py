@@ -302,6 +302,25 @@ class FakeZeroVideoUploadInventoryPage(FakeHydratingUploadInventoryPage):
         return super().locator(selector)
 
 
+class _HiddenAudioUploadTab(_HydratingUploadTab):
+    def __init__(self, page):
+        super().__init__(page, "audio")
+        self.clicked = False
+
+    def click(self):
+        self.clicked = True
+
+    def wait_for(self, *, state, timeout):
+        assert self.clicked is True
+        super().wait_for(state=state, timeout=timeout)
+
+
+class FakeZeroVideoHiddenAudioTabPage(FakeZeroVideoUploadInventoryPage):
+    def __init__(self):
+        super().__init__()
+        self.audio_tab = _HiddenAudioUploadTab(self)
+
+
 def _assembly_job(*, speed=0.95, target_seconds=63.25):
     return SimpleNamespace(
         id="job-canva-123",
@@ -533,6 +552,14 @@ def test_canva_upload_inventory_waits_for_hydrated_media_tabs():
 def test_canva_upload_inventory_accepts_missing_videos_tab_after_pre_clean():
     """Catches pre-clean zero state blocking the upload baseline before new clips exist."""
     page = FakeZeroVideoUploadInventoryPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    assert client._upload_inventory(page, "voice.mp3") == (0, 1)
+
+
+def test_canva_upload_inventory_selects_hidden_audio_tab_before_waiting_for_it():
+    """Catches waiting forever for Canva's Audio tab before selecting that tab."""
+    page = FakeZeroVideoHiddenAudioTabPage()
     client, _ = _assembly_client(FakeCanvaEditorPage())
 
     assert client._upload_inventory(page, "voice.mp3") == (0, 1)
