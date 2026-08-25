@@ -280,6 +280,28 @@ class FakeHydratingUploadInventoryPage:
         raise AssertionError(f"unexpected selector: {selector}")
 
 
+class _NoVideoUploadTab:
+    def wait_for(self, *, state, timeout):
+        del state, timeout
+        raise canva.PlaywrightTimeoutError("Videos tab is absent after cleanup")
+
+    def count(self):
+        return 0
+
+
+class FakeZeroVideoUploadInventoryPage(FakeHydratingUploadInventoryPage):
+    """Models the verified post-clean state before current-job videos are uploaded."""
+
+    def __init__(self):
+        super().__init__()
+        self.video_panel = _UploadPanel(0)
+
+    def locator(self, selector):
+        if selector.endswith('-tabpanel-videos"]'):
+            return _NoVideoUploadTab()
+        return super().locator(selector)
+
+
 def _assembly_job(*, speed=0.95, target_seconds=63.25):
     return SimpleNamespace(
         id="job-canva-123",
@@ -506,6 +528,14 @@ def test_canva_upload_inventory_waits_for_hydrated_media_tabs():
     client, _ = _assembly_client(FakeCanvaEditorPage())
 
     assert client._upload_inventory(page, "voice.mp3") == (6, 1)
+
+
+def test_canva_upload_inventory_accepts_missing_videos_tab_after_pre_clean():
+    """Catches pre-clean zero state blocking the upload baseline before new clips exist."""
+    page = FakeZeroVideoUploadInventoryPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    assert client._upload_inventory(page, "voice.mp3") == (0, 1)
 
 
 def test_canva_upload_completion_accepts_scoped_media_card_increase_when_videos_omit_filenames(
