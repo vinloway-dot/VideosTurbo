@@ -326,6 +326,7 @@ class RecordingCanva:
     def __init__(self):
         self.calls: list[tuple[str, list[Path], Path, Path]] = []
         self.job_timings: list[tuple[float, float, float]] = []
+        self.clean_calls: list[str] = []
 
     def assemble_and_export(
         self,
@@ -345,6 +346,9 @@ class RecordingCanva:
         output.write_bytes(b"final")
         return output
 
+    def clean_workspace(self, job_id):
+        self.clean_calls.append(job_id)
+
 
 class EventRecordingCanva(RecordingCanva):
     def __init__(self, events):
@@ -354,6 +358,21 @@ class EventRecordingCanva(RecordingCanva):
     def assemble_and_export(self, job, clips, audio, output):
         self.events.append("canva")
         return super().assemble_and_export(job, clips, audio, output)
+
+
+class PostCleanRecordingCanva(RecordingCanva):
+    def __init__(self, store, *, cleanup_error=None):
+        super().__init__()
+        self.store = store
+        self.cleanup_error = cleanup_error
+        self.clean_calls = []
+
+    def clean_workspace(self, job_id):
+        current = self.store.get_job(job_id)
+        assert current is not None
+        self.clean_calls.append((job_id, current.checkpoint))
+        if self.cleanup_error is not None:
+            raise self.cleanup_error
 
 
 def _workflow(tmp_path, store, *, preflight=None, tts=None, flow=None, canva=None):
@@ -998,6 +1017,65 @@ def test_flow_ready_checkpoint_skips_tts_and_flow_then_calls_canva(monkeypatch, 
     assert result.status is CloudJobStatus.COMPLETED
     assert result.checkpoint is CloudJobCheckpoint.COMPLETED
     assert result.final_video == str(paths.final_file)
+
+
+def test_workflow_post_cleans_canva_only_after_final_validated(monkeypatch, tmp_path):
+    """Catches cleanup being skipped or performed before the final artifact is durable."""
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    paths = storage.prepare(job.id)
+    paths.voice_file.write_bytes(b"voice")
+    for path in paths.flow_files:
+        path.write_bytes(b"clip")
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.FLOW_READY,
+        checkpoint=CloudJobCheckpoint.FLOW_READY,
+        current_step="flow_ready",
+        voice_file=str(paths.voice_file),
+    )
+    canva = PostCleanRecordingCanva(store)
+    _accept_media(monkeypatch)
+
+    result = _workflow(tmp_path, store, canva=canva).run(job.id, worker_id=WORKER_ID)
+
+    assert canva.clean_calls == [(job.id, CloudJobCheckpoint.FINAL_VALIDATED)]
+    assert result.checkpoint is CloudJobCheckpoint.COMPLETED
+    assert result.final_video == str(paths.final_file)
+
+
+def test_workflow_preserves_final_artifact_when_canva_post_clean_fails(monkeypatch, tmp_path):
+    """Catches a post-validation cleanup error invalidating or regenerating the final job."""
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    paths = storage.prepare(job.id)
+    paths.voice_file.write_bytes(b"voice")
+    for path in paths.flow_files:
+        path.write_bytes(b"clip")
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.FLOW_READY,
+        checkpoint=CloudJobCheckpoint.FLOW_READY,
+        current_step="flow_ready",
+        voice_file=str(paths.voice_file),
+    )
+    tts = RecordingTTS()
+    flow = RecordingFlow()
+    canva = PostCleanRecordingCanva(store, cleanup_error=RuntimeError("cleanup unavailable"))
+    _accept_media(monkeypatch)
+
+    result = _workflow(tmp_path, store, tts=tts, flow=flow, canva=canva).run(
+        job.id,
+        worker_id=WORKER_ID,
+    )
+
+    assert canva.clean_calls == [(job.id, CloudJobCheckpoint.FINAL_VALIDATED)]
+    assert result.checkpoint is CloudJobCheckpoint.COMPLETED
+    assert paths.final_file.is_file()
+    assert tts.calls == []
+    assert flow.calls == []
 
 
 def test_pause_request_stops_at_safe_boundary_and_preserves_checkpoint(tmp_path):

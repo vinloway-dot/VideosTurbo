@@ -57,12 +57,25 @@ class FakeCanvaEditorPage:
         self.download_completes = download_completes
         self.actions = []
         self.timeline_end_seconds = 60.0
+        self.timeline_video_count = 0
 
     def goto(self, url, **kwargs):
         self.actions.append(("goto", url, kwargs))
 
     def upload_media(self, paths):
         self.actions.append(("upload", tuple(Path(path).name for path in paths)))
+
+    def clean_uploaded_videos(self):
+        return None
+
+    def clear_video_timeline(self):
+        self.timeline_video_count = 0
+
+    def add_uploaded_clip(self, _name):
+        self.timeline_video_count += 1
+
+    def timeline_video_count_value(self):
+        return self.timeline_video_count
 
     def order_clips(self, expected_names):
         self.actions.append(("order", tuple(expected_names)))
@@ -104,6 +117,56 @@ class FakeCanvaEditorPage:
         self.actions.append(("download", Path(output).name))
         if self.download_completes:
             Path(output).write_bytes(b"final-mp4")
+
+
+class FakePreparedCanvaEditorPage(FakeCanvaEditorPage):
+    """Boundary double for verified workspace preparation operations."""
+
+    def __init__(self, *, add_succeeds=True, **kwargs):
+        super().__init__(**kwargs)
+        self.timeline_video_count = 0
+        self.add_succeeds = add_succeeds
+
+    def clean_uploaded_videos(self):
+        self.actions.append(("clean_uploaded_videos",))
+
+    def clear_video_timeline(self):
+        self.actions.append(("clear_video_timeline",))
+        self.timeline_video_count = 0
+
+    def add_uploaded_clip(self, name):
+        before = self.timeline_video_count
+        if self.add_succeeds:
+            self.timeline_video_count += 1
+        self.actions.append(("add_uploaded_clip", name, before, self.timeline_video_count))
+
+    def timeline_video_count_value(self):
+        return self.timeline_video_count
+
+
+class FakeNoVideosTabPage:
+    no_uploaded_videos_tab = True
+
+
+class _ClickOnly:
+    def click(self):
+        return None
+
+
+class _MissingVideosTab:
+    def count(self):
+        return 0
+
+
+class FakeHydratedNoVideosTabPage:
+    """Canva's live zero state: Uploads is ready, but the Videos subtype is absent."""
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) == ("tab", "Uploads", True)
+        return _ClickOnly()
+
+    def locator(self, _selector):
+        return _MissingVideosTab()
 
 
 class FakeCanvaContext:
@@ -301,6 +364,66 @@ def test_canva_assembly_uploads_orders_and_exports_adaptive_six_clip_job(tmp_pat
         ("export_mp4_1080p",),
         ("download", "final.mp4"),
     ]
+
+
+def test_canva_assembly_prepares_clean_workspace_before_upload_and_adds_clips_in_order(
+    tmp_path,
+):
+    """Catches upload or timeline insertion before the workspace is observably clean."""
+    page = FakePreparedCanvaEditorPage()
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+
+    client.assemble_and_export(_assembly_job(), clips, audio, output)
+
+    actions = page.actions
+    assert actions[:9] == [
+        ("goto", "https://www.canva.com/design/demo/edit", {"wait_until": "domcontentloaded"}),
+        ("clean_uploaded_videos",),
+        ("clear_video_timeline",),
+        ("upload", ("clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4", "voice.mp3")),
+        ("add_uploaded_clip", "clip_01.mp4", 0, 1),
+        ("add_uploaded_clip", "clip_02.mp4", 1, 2),
+        ("add_uploaded_clip", "clip_03.mp4", 2, 3),
+        ("add_uploaded_clip", "clip_04.mp4", 3, 4),
+        ("add_uploaded_clip", "clip_05.mp4", 4, 5),
+    ]
+    assert actions[9] == ("add_uploaded_clip", "clip_06.mp4", 5, 6)
+
+
+def test_canva_clean_uploaded_videos_accepts_missing_videos_tab_as_verified_zero_state():
+    """Catches treating Canva's absent Videos tab as an error after a successful cleanup."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    client._clean_uploaded_videos(FakeNoVideosTabPage())
+
+
+def test_canva_clean_uploaded_videos_accepts_hydrated_missing_tab_without_export_timeout(
+    monkeypatch,
+):
+    """Catches making a known zero-video UI state wait for the 180-second export timeout."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    clock = iter((0.0, 11.0))
+    monkeypatch.setattr(canva.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(canva.time, "sleep", lambda _seconds: None)
+
+    client._clean_uploaded_videos(FakeHydratedNoVideosTabPage())
+
+
+def test_canva_add_uploaded_clips_fails_closed_when_one_click_does_not_add_exactly_one_video(
+    tmp_path,
+):
+    """Catches advancing to later clips when Canva did not add the selected card."""
+    page = FakePreparedCanvaEditorPage(add_succeeds=False)
+    client, _ = _assembly_client(page)
+    client.export_timeout_seconds = 0.0
+    client.poll_seconds = 0.0
+    clips, _, _ = _media(tmp_path)
+
+    with pytest.raises(canva.CanvaUIVerificationError, match="timeline video count"):
+        client._add_uploaded_clips(page, [path.name for path in clips])
+
+    assert page.actions == [("add_uploaded_clip", "clip_01.mp4", 0, 0)]
 
 
 def test_canva_assembly_skips_playback_changes_when_speed_is_one(tmp_path):

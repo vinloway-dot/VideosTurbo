@@ -70,6 +70,8 @@ class CanvaClient(Protocol):
         output: Path,
     ) -> Path: ...
 
+    def clean_workspace(self, job_id: str) -> None: ...
+
 
 _CHECKPOINT_RANK = {
     CloudJobCheckpoint.NONE: 0,
@@ -408,6 +410,14 @@ class CloudAgentWorkflow:
                     progress=95,
                     final_video=str(paths.final_file),
                 )
+                try:
+                    self.canva.clean_workspace(job.id)
+                except Exception as exc:
+                    logger.warning(
+                        "Canva workspace post-clean failed for cloud job {}: {}",
+                        job.id,
+                        type(exc).__name__,
+                    )
                 stopped = self._control_boundary(job.id)
                 if stopped is not None:
                     return stopped

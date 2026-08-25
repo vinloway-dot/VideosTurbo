@@ -81,6 +81,7 @@ class CanvaAssemblyClient:
 
     _VIDEO_START_EDGE = '[role="slider"][aria-label="Trimming, start edge"]'
     _VIDEO_END_EDGE = '[role="slider"][aria-label="Trimming, end edge"]'
+    _WORKSPACE_TAB_HYDRATION_SECONDS = 10.0
 
     def __init__(
         self,
@@ -131,7 +132,10 @@ class CanvaAssemblyClient:
         with self.browser.open("canva", headed=True) as context:
             page = BrowserSessionProvider._page(context)
             page.goto(self.service_url, wait_until="domcontentloaded")
+            self._clean_uploaded_videos(page)
+            self._clear_video_timeline(page)
             self._upload_media(page, [*clip_paths, audio_path])
+            self._add_uploaded_clips(page, [clip.name for clip in clip_paths])
             self._order_clips(page, [clip.name for clip in clip_paths])
             if speed < 1.0:
                 for index in range(1, 7):
@@ -154,6 +158,174 @@ class CanvaAssemblyClient:
         missing = [path.name for path in [*clips, audio] if not path.is_file()]
         if missing:
             raise ValueError(f"Canva assembly media files are missing: {', '.join(missing)}")
+
+    def clean_workspace(self, job_id: str) -> None:
+        """Return this configured workspace's Uploads → Videos surface to zero cards."""
+        self.sessions.ensure_service_ready("canva", job_id)
+        with self.browser.open("canva", headed=True) as context:
+            page = BrowserSessionProvider._page(context)
+            page.goto(self.service_url, wait_until="domcontentloaded")
+            self._clean_uploaded_videos(page)
+
+    def _clean_uploaded_videos(self, page: Any) -> None:
+        """Delete every current video upload using Canva's card-scoped trash menu."""
+        if getattr(page, "no_uploaded_videos_tab", False):
+            return
+        if hasattr(page, "clean_uploaded_videos"):
+            page.clean_uploaded_videos()
+            return
+
+        panel = self._open_uploaded_videos(page)
+        if panel is None:
+            return
+        while True:
+            cards = panel.locator('[role="button"][aria-label]')
+            if cards.count() == 0:
+                break
+            self._delete_uploaded_video_card(page, cards)
+            panel = self._open_uploaded_videos(page)
+            if panel is None:
+                return
+
+        panel = self._open_uploaded_videos(page)
+        if panel is not None and panel.locator('[role="button"][aria-label]').count() != 0:
+            raise CanvaUIVerificationError("Canva uploaded videos could not be cleaned to zero")
+
+    def _open_uploaded_videos(self, page: Any) -> Any | None:
+        page.get_by_role("tab", name="Uploads", exact=True).click()
+        video_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-videos"]')
+        deadline = time.monotonic() + self._WORKSPACE_TAB_HYDRATION_SECONDS
+        while video_tab.count() == 0:
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(self.poll_seconds)
+        if video_tab.count() != 1:
+            raise CanvaUIVerificationError("Canva uploaded Videos tab is ambiguous")
+        video_tab.click()
+        panel_id = video_tab.get_attribute("aria-controls")
+        if not panel_id:
+            raise CanvaUIVerificationError("Canva uploaded Videos panel cannot be found")
+        return page.locator(f'[role="tabpanel"][id="{panel_id}"]')
+
+    def _delete_uploaded_video_card(self, page: Any, cards: Any) -> None:
+        card, card_box = self._first_visible_box(cards)
+        if card is None or card_box is None:
+            raise CanvaUIVerificationError("Canva uploaded video card cannot be found")
+        name = card.get_attribute("aria-label")
+        if not name:
+            raise CanvaUIVerificationError("Canva uploaded video card has no semantic name")
+        page.mouse.move(card_box["x"] + card_box["width"] / 2, card_box["y"] + card_box["height"] / 2)
+        time.sleep(self.poll_seconds)
+        overlay = self._card_details_overlay(page, name, card_box)
+        if overlay is None:
+            raise CanvaUIVerificationError("Canva card-scoped details overlay cannot be verified")
+        _, overlay_box = overlay
+        page.mouse.click(
+            overlay_box["x"] + overlay_box["width"] / 2,
+            overlay_box["y"] + overlay_box["height"] / 2,
+        )
+        trash, trash_box = self._verified_trash_menu_item(page)
+        before = cards.count()
+        page.mouse.click(
+            trash_box["x"] + trash_box["width"] / 2,
+            trash_box["y"] + trash_box["height"] / 2,
+        )
+        deadline = time.monotonic() + self.export_timeout_seconds
+        while cards.count() >= before:
+            if time.monotonic() >= deadline:
+                raise CanvaUIVerificationError("Canva video deletion postcondition cannot be verified")
+            time.sleep(self.poll_seconds)
+
+    @staticmethod
+    def _first_visible_box(locator: Any) -> tuple[Any | None, dict[str, float] | None]:
+        for index in range(locator.count()):
+            candidate = locator.nth(index)
+            box = candidate.bounding_box()
+            if box is not None and box["width"] > 0 and box["height"] > 0:
+                return candidate, box
+        return None, None
+
+    def _card_details_overlay(self, page: Any, name: str, card_box: dict[str, float]) -> tuple[Any, dict[str, float]] | None:
+        overlays = page.get_by_role("button", name=f'Show details for “{name}”', exact=True)
+        for index in range(overlays.count()):
+            candidate = overlays.nth(index)
+            box = candidate.bounding_box()
+            if box is None or not self._boxes_overlap(card_box, box):
+                continue
+            if self._is_hit_testable(page, box):
+                return candidate, box
+        return None
+
+    @staticmethod
+    def _boxes_overlap(first: dict[str, float], second: dict[str, float]) -> bool:
+        return (
+            min(first["x"] + first["width"], second["x"] + second["width"])
+            > max(first["x"], second["x"])
+            and min(first["y"] + first["height"], second["y"] + second["height"])
+            > max(first["y"], second["y"])
+        )
+
+    @staticmethod
+    def _is_hit_testable(page: Any, box: dict[str, float]) -> bool:
+        x = box["x"] + box["width"] / 2
+        y = box["y"] + box["height"] / 2
+        return bool(
+            page.evaluate(
+                "(point) => document.elementFromPoint(point.x, point.y) !== null",
+                {"x": x, "y": y},
+            )
+        )
+
+    def _verified_trash_menu_item(self, page: Any) -> tuple[Any, dict[str, float]]:
+        for action in ("Details", "Download", "Move", "Move to Trash"):
+            visible, _ = self._first_visible_box(page.get_by_text(action, exact=True))
+            if visible is None:
+                raise CanvaUIVerificationError("Canva media-card menu cannot be verified")
+        trash, trash_box = self._first_visible_box(page.get_by_text("Move to Trash", exact=True))
+        if trash is None or trash_box is None or not self._is_hit_testable(page, trash_box):
+            raise CanvaUIVerificationError("Canva Move to Trash control cannot be verified")
+        return trash, trash_box
+
+    def _clear_video_timeline(self, page: Any) -> None:
+        if hasattr(page, "clear_video_timeline"):
+            page.clear_video_timeline()
+            return
+        starts = page.locator(self._VIDEO_START_EDGE)
+        while starts.count() > 0:
+            before = starts.count()
+            starts.nth(0).locator("xpath=..").click()
+            page.keyboard.press("Delete")
+            deadline = time.monotonic() + self.export_timeout_seconds
+            while starts.count() >= before:
+                if time.monotonic() >= deadline:
+                    raise CanvaUIVerificationError("Canva video timeline cannot be cleared")
+                time.sleep(self.poll_seconds)
+
+    def _add_uploaded_clips(self, page: Any, expected_names: list[str]) -> None:
+        if len(expected_names) != 6:
+            raise ValueError("Canva timeline insertion requires exactly six clip names")
+        for name in expected_names:
+            before = self._timeline_video_count(page)
+            if hasattr(page, "add_uploaded_clip"):
+                page.add_uploaded_clip(name)
+            else:
+                card = page.get_by_role("button", name=name, exact=True)
+                if card.count() != 1:
+                    raise CanvaUIVerificationError("Canva uploaded clip card is ambiguous")
+                card.click()
+            deadline = time.monotonic() + self.export_timeout_seconds
+            while self._timeline_video_count(page) == before:
+                if time.monotonic() >= deadline:
+                    raise CanvaUIVerificationError("Canva timeline video count did not increase by one")
+                time.sleep(self.poll_seconds)
+            after = self._timeline_video_count(page)
+            if after != before + 1:
+                raise CanvaUIVerificationError("Canva timeline video count did not increase by one")
+
+    def _timeline_video_count(self, page: Any) -> int:
+        if hasattr(page, "timeline_video_count_value"):
+            return int(page.timeline_video_count_value())
+        return page.locator(self._VIDEO_START_EDGE).count()
 
     def _upload_media(self, page: Any, paths: list[Path]) -> None:
         if hasattr(page, "upload_media"):
