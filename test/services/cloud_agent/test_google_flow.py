@@ -1564,6 +1564,36 @@ def test_flow_workspace_reconciles_existing_six_without_new_generation(
     assert ("click", "delete_selected") not in page.actions
 
 
+def test_flow_workspace_reconciliation_skips_rename_when_semantic_names_exist(
+    monkeypatch, tmp_path
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"clip {number}" for number in range(1, 7)],
+        inventory_sequence=[6, 6, 6],
+    )
+    client, _ = _client(page)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        result = workspace.reconcile_and_download(
+            _job(flow_generation_unresolved=True),
+            paths,
+        )
+
+    assert result == paths.flow_files
+    assert not any(
+        action[:3] == ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
+        for action in page.actions
+    )
+    assert ("click", "bulk_download") in page.actions
+
+
 def test_flow_workspace_reconciles_completed_video_cards_without_progress_or_generate(
     monkeypatch, tmp_path
 ):

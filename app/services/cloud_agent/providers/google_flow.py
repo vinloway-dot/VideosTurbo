@@ -247,12 +247,13 @@ class FlowWorkspaceRun:
         paths: JobPaths,
         expected_count: int,
     ) -> tuple[Path, ...]:
-        send = self.client._submit_agent_prompt(
-            self.page,
-            RENAME_CLIPS_INSTRUCTION,
-        )
-        self.client._wait_for_agent_completion(send)
-        self.page.reload(wait_until="domcontentloaded")
+        if not self._semantic_names_are_complete(expected_count):
+            send = self.client._submit_agent_prompt(
+                self.page,
+                RENAME_CLIPS_INSTRUCTION,
+            )
+            self.client._wait_for_agent_completion(send)
+            self.page.reload(wait_until="domcontentloaded")
         self._verify_semantic_names(expected_count)
 
         bulk_download = self.page.get_by_role(
@@ -276,6 +277,14 @@ class FlowWorkspaceRun:
             min_size_bytes=1,
             expected_width=self.client.expected_width,
             expected_height=self.client.expected_height,
+        )
+
+    def _semantic_names_are_complete(self, expected_count: int) -> bool:
+        if self.page.get_by_role("checkbox").count() != expected_count:
+            return False
+        return all(
+            self.page.get_by_text(f"clip {number}", exact=True).count() == 1
+            for number in range(1, expected_count + 1)
         )
 
     def _verify_semantic_names(self, expected_count: int) -> None:
