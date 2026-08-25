@@ -82,6 +82,7 @@ class CanvaAssemblyClient:
     _VIDEO_START_EDGE = '[role="slider"][aria-label="Trimming, start edge"]'
     _VIDEO_END_EDGE = '[role="slider"][aria-label="Trimming, end edge"]'
     _WORKSPACE_TAB_HYDRATION_SECONDS = 10.0
+    _MEDIA_MENU_HYDRATION_SECONDS = 5.0
 
     def __init__(
         self,
@@ -277,14 +278,26 @@ class CanvaAssemblyClient:
         )
 
     def _verified_trash_menu_item(self, page: Any) -> tuple[Any, dict[str, float]]:
-        for action in ("Details", "Download", "Move", "Move to Trash"):
-            visible, _ = self._first_visible_box(page.get_by_text(action, exact=True))
-            if visible is None:
+        deadline = time.monotonic() + min(
+            self._MEDIA_MENU_HYDRATION_SECONDS,
+            self.export_timeout_seconds,
+        )
+        while True:
+            menu_items = {
+                action: self._first_visible_box(page.get_by_text(action, exact=True))
+                for action in ("Details", "Download", "Move", "Move to Trash")
+            }
+            trash, trash_box = menu_items["Move to Trash"]
+            if (
+                all(item is not None for item, _box in menu_items.values())
+                and trash is not None
+                and trash_box is not None
+                and self._is_hit_testable(page, trash_box)
+            ):
+                return trash, trash_box
+            if time.monotonic() >= deadline:
                 raise CanvaUIVerificationError("Canva media-card menu cannot be verified")
-        trash, trash_box = self._first_visible_box(page.get_by_text("Move to Trash", exact=True))
-        if trash is None or trash_box is None or not self._is_hit_testable(page, trash_box):
-            raise CanvaUIVerificationError("Canva Move to Trash control cannot be verified")
-        return trash, trash_box
+            time.sleep(self.poll_seconds)
 
     def _clear_video_timeline(self, page: Any) -> None:
         if hasattr(page, "clear_video_timeline"):

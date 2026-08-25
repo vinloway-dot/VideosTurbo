@@ -153,6 +153,42 @@ class _ClickOnly:
         return None
 
 
+class _MenuItem:
+    def __init__(self, visible):
+        self.visible = visible
+
+    def bounding_box(self):
+        if not self.visible:
+            return None
+        return {"x": 1.0, "y": 1.0, "width": 10.0, "height": 10.0}
+
+
+class _MenuLocator:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return 1
+
+    def nth(self, _index):
+        return _MenuItem(self.page.menu_query_count >= 5)
+
+
+class FakeDelayedMediaMenuPage:
+    """Models Canva hydrating the card menu immediately after its overlay click."""
+
+    def __init__(self):
+        self.menu_query_count = 0
+
+    def get_by_text(self, _action, *, exact):
+        assert exact is True
+        self.menu_query_count += 1
+        return _MenuLocator(self)
+
+    def evaluate(self, _expression, _point):
+        return True
+
+
 class _MissingVideosTab:
     def count(self):
         return 0
@@ -514,6 +550,17 @@ def test_canva_clean_uploaded_videos_accepts_hydrated_missing_tab_without_export
     monkeypatch.setattr(canva.time, "sleep", lambda _seconds: None)
 
     client._clean_uploaded_videos(FakeHydratedNoVideosTabPage())
+
+
+def test_canva_waits_for_card_menu_hydration_before_verifying_move_to_trash():
+    """Catches treating the immediate post-overlay menu hydration window as a hard failure."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 0.0
+
+    trash, trash_box = client._verified_trash_menu_item(FakeDelayedMediaMenuPage())
+
+    assert trash is not None
+    assert trash_box == {"x": 1.0, "y": 1.0, "width": 10.0, "height": 10.0}
 
 
 def test_canva_add_uploaded_clips_fails_closed_when_one_click_does_not_add_exactly_one_video(
