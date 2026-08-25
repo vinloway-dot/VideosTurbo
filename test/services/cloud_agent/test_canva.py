@@ -394,6 +394,45 @@ class FakeDuplicateAudioTabPage(FakeZeroVideoUploadInventoryPage):
         return super().locator(selector)
 
 
+class _InvisibleVideoUploadTab:
+    def count(self):
+        return 1
+
+    def click(self):
+        raise canva.PlaywrightTimeoutError("stale hidden video tab cannot be clicked")
+
+
+class _VisibleVideoUploadTab:
+    def __init__(self):
+        self.clicked = False
+
+    def count(self):
+        return 1
+
+    def click(self):
+        self.clicked = True
+
+    def get_attribute(self, name):
+        assert name == "aria-controls"
+        return "test-tabpanel-videos"
+
+
+class FakeDuplicateVideoTabPage(FakeHydratingUploadInventoryPage):
+    """Models Canva retaining a hidden stale Videos tab behind the live tab."""
+
+    def __init__(self):
+        super().__init__()
+        self.hidden_video_tab = _InvisibleVideoUploadTab()
+        self.visible_video_tab = _VisibleVideoUploadTab()
+
+    def locator(self, selector):
+        if selector == '[role="tab"][aria-controls$="-tabpanel-videos"]':
+            return self.hidden_video_tab
+        if selector == '[role="tab"][aria-controls$="-tabpanel-videos"]:visible':
+            return self.visible_video_tab
+        return super().locator(selector)
+
+
 class _SidebarTab:
     def __init__(self, page, name):
         self.page = page
@@ -553,6 +592,17 @@ def test_canva_clean_uploaded_videos_accepts_hydrated_missing_tab_without_export
     monkeypatch.setattr(canva.time, "sleep", lambda _seconds: None)
 
     client._clean_uploaded_videos(FakeHydratedNoVideosTabPage())
+
+
+def test_canva_open_uploaded_videos_uses_visible_tab_when_hidden_stale_tab_remains():
+    """Catches selecting Canva's hidden retained Videos tab instead of the live control."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    page = FakeDuplicateVideoTabPage()
+
+    panel = client._open_uploaded_videos(page)
+
+    assert panel is page.video_panel
+    assert page.visible_video_tab.clicked is True
 
 
 def test_canva_waits_for_card_menu_hydration_before_verifying_move_to_trash():

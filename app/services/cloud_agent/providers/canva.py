@@ -194,7 +194,7 @@ class CanvaAssemblyClient:
 
     def _open_uploaded_videos(self, page: Any) -> Any | None:
         page.get_by_role("tab", name="Uploads", exact=True).click()
-        video_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-videos"]')
+        video_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-videos"]:visible')
         deadline = time.monotonic() + self._WORKSPACE_TAB_HYDRATION_SECONDS
         while video_tab.count() == 0:
             if time.monotonic() >= deadline:
