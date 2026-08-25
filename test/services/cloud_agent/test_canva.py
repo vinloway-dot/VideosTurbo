@@ -74,6 +74,9 @@ class FakeCanvaEditorPage:
     def add_uploaded_clip(self, _name):
         self.timeline_video_count += 1
 
+    def add_uploaded_audio(self, name):
+        self.actions.append(("add_uploaded_audio", name))
+
     def timeline_video_count_value(self):
         return self.timeline_video_count
 
@@ -618,6 +621,7 @@ def test_canva_assembly_uploads_orders_and_exports_adaptive_six_clip_job(tmp_pat
         ("open_video_speed",),
         ("set_speed", 0.95),
         ("verify_speed", 0.95),
+        ("add_uploaded_audio", "voice.mp3"),
         ("mute_source_audio",),
         ("narration_at_zero",),
         ("bound_final_end", 63.25),

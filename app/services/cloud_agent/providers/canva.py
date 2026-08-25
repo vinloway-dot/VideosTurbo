@@ -141,6 +141,7 @@ class CanvaAssemblyClient:
             if speed < 1.0:
                 for index in range(1, 7):
                     self._set_and_verify_playback(page, index, speed)
+            self._add_uploaded_audio(page, audio_path.name)
             self._mute_source_audio(page)
             self._position_narration_at_zero(page)
             self._bound_final_visual_end(page, target_seconds)
@@ -502,6 +503,23 @@ class CanvaAssemblyClient:
             control.press("Enter")
             if control.input_value() not in {"0", "0.0", "0.00"}:
                 raise CanvaUIVerificationError("Canva source-video audio mute cannot be verified")
+
+    def _add_uploaded_audio(self, page: Any, audio_name: str) -> None:
+        if hasattr(page, "add_uploaded_audio"):
+            page.add_uploaded_audio(audio_name)
+            return
+        before = page.locator(self._VIDEO_START_EDGE).count()
+        page.get_by_role("tab", name="Elements", exact=True).click()
+        page.get_by_role("tab", name="Uploads", exact=True).click()
+        audio = page.get_by_role("button", name=f"Apply audio: {audio_name}", exact=True)
+        if audio.count() != 1:
+            raise CanvaUIVerificationError("Canva narration upload card is ambiguous")
+        audio.click()
+        deadline = time.monotonic() + self.export_timeout_seconds
+        while page.locator(self._VIDEO_START_EDGE).count() <= before:
+            if time.monotonic() >= deadline:
+                raise CanvaUIVerificationError("Canva narration was not added to the timeline")
+            time.sleep(self.poll_seconds)
 
     def _position_narration_at_zero(self, page: Any) -> None:
         if hasattr(page, "position_narration_at_zero"):
