@@ -175,7 +175,12 @@ def _parse_byte_range(
 def create_video(
     background_tasks: BackgroundTasks, request: Request, body: TaskVideoRequest
 ):
-    return create_task(request, body, stop_at="video")
+    del background_tasks, body
+    raise HttpException(
+        task_id=base.get_task_id(request),
+        status_code=410,
+        message="LEGACY_VIDEO_GENERATION_RETIRED",
+    )
 
 
 @router.post("/subtitle", response_model=TaskResponse, summary="Generate subtitle only")
