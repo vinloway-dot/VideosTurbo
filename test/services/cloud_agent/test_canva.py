@@ -478,6 +478,12 @@ class _UploadPanel:
     def get_by_text(self, _name, *, exact=False):
         return _InventoryCount(self._count)
 
+    def get_by_role(self, role, *, name, exact):
+        assert role == "button"
+        assert name == "Apply audio: voice.mp3"
+        assert exact is True
+        return _InventoryCount(self._count)
+
 
 class FakeHydratingUploadInventoryPage:
     def __init__(self):
@@ -1078,10 +1084,10 @@ def test_canva_upload_completion_accepts_observable_media_without_processing_tex
     )
 
 
-def test_canva_uploads_all_canonical_media_in_one_submission_then_verifies_as_a_set(
+def test_canva_uploads_video_batch_then_canonical_audio_and_verifies_each_set(
     tmp_path, monkeypatch
 ):
-    """Catches breaking Canva's supported batch upload into independent partial uploads."""
+    """Catches mixed Canva uploads silently dropping the canonical narration audio."""
     page = FakeSequentialUploadPage()
     client, _ = _assembly_client(FakeCanvaEditorPage())
     clips, audio, _ = _media(tmp_path)
@@ -1096,8 +1102,14 @@ def test_canva_uploads_all_canonical_media_in_one_submission_then_verifies_as_a_
 
     client._upload_media(page, [*clips, audio])
 
-    assert page.upload_input.submissions == [tuple(str(path) for path in [*clips, audio])]
-    assert verified == [tuple(path.name for path in [*clips, audio])]
+    assert page.upload_input.submissions == [
+        tuple(str(path) for path in clips),
+        (str(audio),),
+    ]
+    assert verified == [
+        tuple(path.name for path in clips),
+        (audio.name,),
+    ]
 
 
 def test_canva_upload_completion_rejects_complete_count_with_partial_duplicate_names(

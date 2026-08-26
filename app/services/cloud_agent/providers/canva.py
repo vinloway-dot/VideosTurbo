@@ -473,19 +473,33 @@ class CanvaAssemblyClient:
             page.upload_media(paths)
             return
         page.get_by_role("tab", name="Uploads", exact=True).click()
-        audio_name = paths[-1].name
-        baseline_inventory = self._upload_inventory(page, audio_name)
+        video_paths = [
+            path for path in paths if path.suffix.lower() in {".mp4", ".mov", ".webm"}
+        ]
+        audio_paths = [path for path in paths if path not in video_paths]
+        if len(audio_paths) != 1:
+            raise ValueError("Canva upload requires exactly one canonical audio file")
+        audio_path = audio_paths[0]
+        baseline_inventory = self._upload_inventory(page, audio_path.name)
         upload_input = page.locator('input[type="file"]')
         upload_input.wait_for(
             state="visible",
             timeout=int(self.export_timeout_seconds * 1000),
         )
-        upload_input.set_input_files([str(path) for path in paths])
+        upload_input.set_input_files([str(path) for path in video_paths])
         self._wait_for_upload_completion(
             page,
-            [path.name for path in paths],
+            [path.name for path in video_paths],
             baseline_inventory=baseline_inventory,
-            audio_name=audio_name,
+            audio_name=None,
+        )
+        audio_baseline = self._upload_inventory(page, audio_path.name)
+        upload_input.set_input_files([str(audio_path)])
+        self._wait_for_upload_completion(
+            page,
+            [audio_path.name],
+            baseline_inventory=audio_baseline,
+            audio_name=audio_path.name,
         )
 
     def _upload_inventory(self, page: Any, audio_name: str) -> tuple[int, int] | None:
@@ -510,7 +524,12 @@ class CanvaAssemblyClient:
             raise CanvaUIVerificationError("Canva upload media panels cannot be found")
         audio_panel = page.locator(f'[role="tabpanel"][id="{audio_panel_id}"]')
         if video_tab.count() == 0:
-            return 0, audio_panel.get_by_text(audio_name, exact=True).count()
+            return (
+                0,
+                audio_panel.get_by_role(
+                    "button", name=f"Apply audio: {audio_name}", exact=True
+                ).count(),
+            )
         video_tab.click()
         video_panel_id = video_tab.get_attribute("aria-controls")
         if not video_panel_id:
@@ -518,7 +537,9 @@ class CanvaAssemblyClient:
         video_panel = page.locator(f'[role="tabpanel"][id="{video_panel_id}"]')
         return (
             video_panel.get_by_text(re.compile(r"^\d+(?:\.\d+)?s$")).count(),
-            audio_panel.get_by_text(audio_name, exact=True).count(),
+            audio_panel.get_by_role(
+                "button", name=f"Apply audio: {audio_name}", exact=True
+            ).count(),
         )
 
     def _wait_for_upload_completion(
@@ -581,15 +602,18 @@ class CanvaAssemblyClient:
             for name in expected_names
             if Path(name).suffix.lower() in {".mp4", ".mov", ".webm"}
         ]
-        if not video_names or not audio_name:
+        if not video_names and not audio_name:
             return False
         try:
-            video_panel = self._open_uploaded_videos(page)
-            if video_panel is None or any(
-                video_panel.get_by_role("button", name=name, exact=True).count() != 1
-                for name in video_names
-            ):
-                return False
+            if video_names:
+                video_panel = self._open_uploaded_videos(page)
+                if video_panel is None or any(
+                    video_panel.get_by_role("button", name=name, exact=True).count() != 1
+                    for name in video_names
+                ):
+                    return False
+            if not audio_name:
+                return True
             audio_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-audio"]:visible')
             if audio_tab.count() != 1:
                 return False
