@@ -87,7 +87,7 @@ class CanvaAssemblyClient:
 
     _VIDEO_START_EDGE = '[role="slider"][aria-label="Trimming, start edge"]'
     _VIDEO_END_EDGE = '[role="slider"][aria-label="Trimming, end edge"]'
-    _WORKSPACE_TAB_HYDRATION_SECONDS = 10.0
+    _WORKSPACE_TAB_HYDRATION_SECONDS = 30.0
     _MEDIA_MENU_HYDRATION_SECONDS = 5.0
     _EDITOR_NAVIGATION_TIMEOUT_SECONDS = 180.0
 
@@ -523,12 +523,13 @@ class CanvaAssemblyClient:
         if not audio_panel_id:
             raise CanvaUIVerificationError("Canva upload media panels cannot be found")
         audio_panel = page.locator(f'[role="tabpanel"][id="{audio_panel_id}"]')
+        audio_count = audio_panel.get_by_role(
+            "button", name=f"Apply audio: {audio_name}", exact=True
+        ).count()
         if video_tab.count() == 0:
             return (
                 0,
-                audio_panel.get_by_role(
-                    "button", name=f"Apply audio: {audio_name}", exact=True
-                ).count(),
+                audio_count,
             )
         video_tab.click()
         video_panel_id = video_tab.get_attribute("aria-controls")
@@ -537,9 +538,7 @@ class CanvaAssemblyClient:
         video_panel = page.locator(f'[role="tabpanel"][id="{video_panel_id}"]')
         return (
             video_panel.get_by_text(re.compile(r"^\d+(?:\.\d+)?s$")).count(),
-            audio_panel.get_by_role(
-                "button", name=f"Apply audio: {audio_name}", exact=True
-            ).count(),
+            audio_count,
         )
 
     def _wait_for_upload_completion(

@@ -514,6 +514,29 @@ class FakeHydratingUploadInventoryPage:
         return _SidebarTab(self, name)
 
 
+class _UnmountingVideoUploadTab(_HydratingUploadTab):
+    def click(self):
+        self.page.audio_panel_unmounted = True
+
+
+class _UnmountingAudioPanel(_UploadPanel):
+    def get_by_role(self, role, *, name, exact):
+        if self.page.audio_panel_unmounted:
+            return _InventoryCount(0)
+        return super().get_by_role(role, name=name, exact=exact)
+
+
+class FakeUnmountingAudioPanelUploadInventoryPage(FakeHydratingUploadInventoryPage):
+    """Canva unmounts Audio's contents when the user switches back to Videos."""
+
+    def __init__(self):
+        super().__init__()
+        self.audio_panel_unmounted = False
+        self.video_tab = _UnmountingVideoUploadTab(self, "videos")
+        self.audio_panel = _UnmountingAudioPanel(1)
+        self.audio_panel.page = self
+
+
 class _NoVideoUploadTab:
     def wait_for(self, *, state, timeout):
         del state, timeout
@@ -566,6 +589,42 @@ class FakeZeroVideoDelayedAudioTabPage(FakeZeroVideoUploadInventoryPage):
     def __init__(self):
         super().__init__()
         self.audio_tab = _DelayedAudioUploadTab(self)
+
+
+class _LateAudioTab:
+    def __init__(self, page):
+        self.page = page
+        self.clicked = False
+
+    def count(self):
+        return 1 if self.page.elapsed_seconds >= 15 else 0
+
+    def click(self):
+        self.clicked = True
+
+    def get_attribute(self, name):
+        assert name == "aria-controls"
+        return "test-tabpanel-audio"
+
+
+class FakeLateAudioTabPage:
+    """Canva exposes existing Audio only after a delayed Uploads hydration."""
+
+    def __init__(self):
+        self.elapsed_seconds = 0.0
+        self.audio_tab = _LateAudioTab(self)
+        self.audio_panel = _UploadPanel(1)
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) == ("tab", "Uploads", True)
+        return _ClickOnly()
+
+    def locator(self, selector):
+        if selector == '[role="tab"][aria-controls$="-tabpanel-audio"]:visible':
+            return self.audio_tab
+        if selector == '[role="tabpanel"][id="test-tabpanel-audio"]':
+            return self.audio_panel
+        raise AssertionError(f"unexpected selector: {selector}")
 
 
 class _InvisibleAudioUploadTab(_HydratingUploadTab):
@@ -893,7 +952,7 @@ def test_canva_clean_uploaded_videos_accepts_hydrated_missing_tab_without_export
 ):
     """Catches making a known zero-video UI state wait for the 180-second export timeout."""
     client, _ = _assembly_client(FakeCanvaEditorPage())
-    clock = iter((0.0, 11.0))
+    clock = iter((0.0, 11.0, 31.0))
     monkeypatch.setattr(canva.time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(canva.time, "sleep", lambda _seconds: None)
 
@@ -1178,6 +1237,14 @@ def test_canva_upload_inventory_waits_for_hydrated_media_tabs():
     assert client._upload_inventory(page, "voice.mp3") == (6, 1)
 
 
+def test_canva_upload_inventory_keeps_audio_count_when_videos_unmount_audio_panel():
+    """Catches Canva returning zero audio cards after its Videos-tab switch unmounts Audio."""
+    page = FakeUnmountingAudioPanelUploadInventoryPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    assert client._upload_inventory(page, "voice.mp3") == (6, 1)
+
+
 def test_canva_upload_inventory_accepts_missing_videos_tab_after_pre_clean():
     """Catches pre-clean zero state blocking the upload baseline before new clips exist."""
     page = FakeZeroVideoUploadInventoryPage()
@@ -1200,6 +1267,22 @@ def test_canva_upload_inventory_waits_for_audio_tab_before_selecting_it():
     client, _ = _assembly_client(FakeCanvaEditorPage())
 
     assert client._upload_inventory(page, "voice.mp3") == (0, 1)
+
+
+def test_canva_audio_cleanup_waits_for_delayed_existing_audio_tab(monkeypatch):
+    """Catches skipping stale narration cleanup while Canva hydrates Uploads."""
+    page = FakeLateAudioTabPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 5.0
+    monkeypatch.setattr(canva.time, "monotonic", lambda: page.elapsed_seconds)
+    monkeypatch.setattr(
+        canva.time,
+        "sleep",
+        lambda seconds: setattr(page, "elapsed_seconds", page.elapsed_seconds + seconds),
+    )
+
+    assert client._open_uploaded_audio(page) is page.audio_panel
+    assert page.audio_tab.clicked is True
 
 
 def test_canva_upload_inventory_uses_visible_audio_tab_when_stale_panel_remains():
