@@ -368,6 +368,18 @@ class SessionRecordingCanva(RecordingCanva):
             self.session_exits += 1
 
 
+class WorkspaceRecordingCanva(RecordingCanva):
+    def __init__(self):
+        super().__init__()
+        self.editor_url = "https://www.canva.com/design/WORKSPACE/edit"
+        self.opened_jobs = []
+
+    @contextmanager
+    def open_job_session(self, job):
+        self.opened_jobs.append(job)
+        yield self
+
+
 class EventRecordingCanva(RecordingCanva):
     def __init__(self, events):
         super().__init__()
@@ -561,6 +573,20 @@ def test_workflow_uses_one_canva_job_session_and_defers_canva_preflight(
     assert canva.session_enters == 1
     assert canva.session_exits == 1
     assert canva.clean_calls == [job.id]
+
+
+def test_workflow_persists_resolved_canva_workspace_before_assembly(monkeypatch, tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    canva = WorkspaceRecordingCanva()
+    _accept_media(monkeypatch)
+
+    _workflow(tmp_path, store, canva=canva).run(job.id, worker_id=WORKER_ID)
+
+    assert canva.opened_jobs[0].id == job.id
+    stored = store.get_job(job.id)
+    assert stored is not None
+    assert stored.canva_design_url == canva.editor_url
 
 
 def test_generation_fence_precedes_submit_and_flow_ready_commit_is_atomic(

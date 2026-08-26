@@ -61,6 +61,7 @@ class FakeCanvaEditorPage:
 
     def goto(self, url, **kwargs):
         self.actions.append(("goto", url, kwargs))
+        self.url = url
 
     def upload_media(self, paths):
         self.actions.append(("upload", tuple(Path(path).name for path in paths)))
@@ -148,6 +149,13 @@ class FakePreparedCanvaEditorPage(FakeCanvaEditorPage):
 
     def timeline_video_count_value(self):
         return self.timeline_video_count
+
+
+class FakeRedirectingCanvaEditorPage(FakeCanvaEditorPage):
+    def goto(self, url, **kwargs):
+        super().goto(url, **kwargs)
+        if "?create" in url:
+            self.url = "https://www.canva.com/design/DEMO/edit"
 
 
 class FakeManagedMediaCleanupPage(FakePreparedCanvaEditorPage):
@@ -725,6 +733,31 @@ def test_canva_job_session_allows_bounded_time_for_new_design_editor_navigation(
         "https://www.canva.com/design/demo/edit",
         {"wait_until": "domcontentloaded", "timeout": 180_000},
     )
+
+
+def test_canva_job_session_persists_resolved_editor_url_from_create_design_url():
+    page = FakeRedirectingCanvaEditorPage()
+    client, _ = _assembly_client(page)
+    client.service_url = "https://www.canva.com/design?create=template"
+    job = SimpleNamespace(id="job-canva-123", canva_design_url="")
+
+    with client.open_job_session(job) as session:
+        assert session.editor_url == "https://www.canva.com/design/DEMO/edit"
+
+
+def test_canva_job_session_reuses_persisted_editor_url_without_create_design_url():
+    page = FakeCanvaEditorPage()
+    client, _ = _assembly_client(page)
+    client.service_url = "https://www.canva.com/design?create=template"
+    job = SimpleNamespace(
+        id="job-canva-123",
+        canva_design_url="https://www.canva.com/design/PERSISTED/edit",
+    )
+
+    with client.open_job_session(job) as session:
+        assert session.editor_url == "https://www.canva.com/design/PERSISTED/edit"
+
+    assert page.actions[0][1] == "https://www.canva.com/design/PERSISTED/edit"
 
 
 def test_canva_assembly_prepares_clean_workspace_before_upload_and_adds_clips_in_order(

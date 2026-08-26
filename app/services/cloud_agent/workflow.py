@@ -79,7 +79,7 @@ class CanvaClient(Protocol):
 
     def clean_workspace(self, job_id: str) -> None: ...
 
-    def open_job_session(self, job_id: str) -> ContextManager["CanvaClient"]: ...
+    def open_job_session(self, job: CloudJobRecord) -> ContextManager["CanvaClient"]: ...
 
 
 _CHECKPOINT_RANK = {
@@ -234,11 +234,11 @@ class CloudAgentWorkflow:
         if self._at_least(checkpoint, CloudJobCheckpoint.FINAL_VALIDATED):
             self._validate_final_checkpoint(job, paths)
 
-    def _open_canva_job_session(self, job_id: str):
+    def _open_canva_job_session(self, job: CloudJobRecord):
         opener = getattr(self.canva, "open_job_session", None)
         if opener is None:
             return nullcontext(self.canva)
-        return opener(job_id)
+        return opener(job)
 
     def run(self, job_id: str, *, worker_id: str) -> CloudJobRecord:
         job = self._get_job(job_id)
@@ -390,10 +390,16 @@ class CloudAgentWorkflow:
 
             job = self._get_job(job.id)
             if job.checkpoint is CloudJobCheckpoint.FLOW_READY:
-                with self._open_canva_job_session(job.id) as canva:
+                with self._open_canva_job_session(job) as canva:
                     stopped = self._control_boundary(job.id)
                     if stopped is not None:
                         return stopped
+                    editor_url = str(getattr(canva, "editor_url", "") or "").strip()
+                    if editor_url:
+                        job = self.store.patch_job(
+                            job.id,
+                            canva_design_url=editor_url,
+                        )
                     self.store.patch_job(
                         job.id,
                         status=CloudJobStatus.CANVA_UPLOADING,

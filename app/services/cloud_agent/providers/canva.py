@@ -5,6 +5,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -120,7 +121,7 @@ class CanvaAssemblyClient:
         audio: Path,
         output: Path,
     ) -> Path:
-        with self.open_job_session(job.id) as session:
+        with self.open_job_session(job) as session:
             return session.assemble_and_export(job, clips, audio, output)
 
     def _assemble_open_page(
@@ -163,17 +164,32 @@ class CanvaAssemblyClient:
         return output_path
 
     @contextmanager
-    def open_job_session(self, job_id: str):
+    def open_job_session(self, job: Any):
         """Own exactly one Canva browser context for assembly and post-final cleanup."""
+        job_id = str(getattr(job, "id", job))
+        persisted_url = str(getattr(job, "canva_design_url", "") or "").strip()
+        destination_url = persisted_url or self.service_url
         with self.browser.open("canva", headed=True) as context:
             page = BrowserSessionProvider._page(context)
             page.goto(
-                self.service_url,
+                destination_url,
                 wait_until="domcontentloaded",
                 timeout=int(self._EDITOR_NAVIGATION_TIMEOUT_SECONDS * 1000),
             )
             self.sessions.ensure_open_page_ready("canva", page, job_id)
-            yield _CanvaJobSession(self, page)
+            yield _CanvaJobSession(self, page, self._editor_url(page))
+
+    @staticmethod
+    def _editor_url(page: Any) -> str:
+        editor_url = str(getattr(page, "url", "") or "").strip()
+        parsed = urlparse(editor_url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc.endswith("canva.com")
+            or re.fullmatch(r"/design/[^/]+/edit", parsed.path) is None
+        ):
+            raise CanvaUIVerificationError("Canva editor URL cannot be verified")
+        return editor_url
 
     @staticmethod
     def _validate_media_inputs(clips: list[Path], audio: Path) -> None:
@@ -776,9 +792,10 @@ class CanvaAssemblyClient:
 class _CanvaJobSession:
     """Page-bound Canva operations; its owner closes the browser context once."""
 
-    def __init__(self, client: CanvaAssemblyClient, page: Any) -> None:
+    def __init__(self, client: CanvaAssemblyClient, page: Any, editor_url: str) -> None:
         self.client = client
         self.page = page
+        self.editor_url = editor_url
 
     def assemble_and_export(
         self,
