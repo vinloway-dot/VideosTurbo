@@ -28,6 +28,11 @@ re-open the live Audio panel, and require the managed-card count to decrease by
 one. After cleanup, reload once and require the hydrated count remains zero; an
 initial zero must first survive the bounded Audio-card hydration window.
 
+An absent Videos or Audio category after normal Uploads hydration is the verified
+zero state for that category. After a delete whose fresh panel count has not
+decreased, reload once and inspect the fresh panel before failing. The existing
+post-`FINAL_VALIDATED` cleanup is one managed Videos-and-Audio pass.
+
 ---
 
 ### Task 1: Durable CloudJob workspace fields

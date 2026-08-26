@@ -1122,6 +1122,14 @@ def test_canva_clean_uploaded_videos_accepts_hydrated_missing_tab_without_export
     client._clean_uploaded_videos(FakeHydratedNoVideosTabPage())
 
 
+def test_canva_audio_cleanup_accepts_missing_audio_tab_as_verified_zero(monkeypatch):
+    """An absent hydrated Audio category means there is no managed narration to delete."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    monkeypatch.setattr(client, "_open_hydrated_uploaded_audio", lambda _page, _name: None)
+
+    client._clean_uploaded_audio(object(), "voice.mp3")
+
+
 def test_canva_cleanup_reopens_transiently_missing_videos_tab_after_a_delete(monkeypatch):
     """Catches treating Canva's post-delete panel hydration gap as a verified empty state."""
     client, _ = _assembly_client(FakeCanvaEditorPage())
@@ -1212,6 +1220,32 @@ def test_canva_audio_cleanup_waits_for_cards_after_an_initial_hydration_zero(
     client._clean_uploaded_audio(page, "voice.mp3")
 
     assert deleted == [1]
+
+
+def test_canva_delete_refreshes_once_before_rejecting_an_unchanged_card_count(
+    monkeypatch,
+):
+    """Catches failing before Canva's post-delete gallery refresh can hydrate."""
+    page = FakeRefreshableAudioCleanupPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.0
+    stale = _CountedAudioPanel(1)
+    empty = _CountedAudioPanel(0)
+    monkeypatch.setattr(
+        client,
+        "_open_uploaded_audio",
+        lambda _page: empty if page.reload_count else stale,
+    )
+
+    client._wait_for_fresh_card_count_decrease(
+        page,
+        1,
+        client._open_uploaded_audio,
+        lambda panel: panel.card,
+        "audio deletion was not observable",
+    )
+
+    assert page.reload_count == 1
 
 
 def test_canva_audio_delete_uses_generic_card_overlay_and_aria_delete(monkeypatch):

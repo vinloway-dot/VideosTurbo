@@ -39,11 +39,11 @@ Status and checkpoint remain separate. Factory composition must reuse `config.ap
 Configured Canva workspace only:
 
 ```text
-open design → pre-clean Uploads/Videos → timeline zero
+open design → pre-clean Uploads/Videos + Uploads/Audio → timeline zero
 → upload existing six clips + existing voice
 → click semantic cards clip_01 … clip_06 and prove each timeline +1
 → existing playback/mute/narration/trim/captions/export
-→ server validation → FINAL_VALIDATED → post-clean Videos → COMPLETED
+→ server validation → FINAL_VALIDATED → one post-clean pass for managed Videos + Audio → COMPLETED
 ```
 
 Video cleanup is card-scoped and fail-closed: fresh hover, fresh overlapping `Show details for “<filename>”` control, fresh hit-tested geometry, verify `Details`/`Download`/`Move`/`Move to Trash`, click Trash immediately, then re-query. Never use fixed coordinates or delete Images/another Canva project. Scope must not silently broaden beyond the dedicated VideosTurbo workspace.
@@ -60,6 +60,13 @@ reload once and wait for Audio hydration; zero is accepted only when it remains
 zero after hydration. An initial zero must wait through the bounded five-second
 Audio-card hydration window before it is treated as empty. This is distinct from
 Video's `Move to Trash` action.
+
+If the active Uploads surface has no Videos or Audio category after its normal
+hydration, that category is a verified zero-media state and assembly continues.
+After each delete, a fresh live-panel count is the primary proof. If it has not
+decreased within the bounded wait, reload the editor exactly once and re-check;
+only then may the cleanup fail closed. The workflow performs this managed-media
+cleanup again once after `FINAL_VALIDATED`.
 
 ## Development and stopping rule
 

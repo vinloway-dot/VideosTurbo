@@ -249,7 +249,7 @@ class CanvaAssemblyClient:
             raise CanvaUIVerificationError("Canva named uploaded videos could not be cleaned to zero")
 
     def _clean_uploaded_audio(self, page: Any, audio_name: str) -> None:
-        """Delete only stale instances of this job's canonical narration upload."""
+        """Delete only stale narration; an absent Audio tab is the verified zero state."""
         if hasattr(page, "clean_uploaded_audio"):
             page.clean_uploaded_audio(audio_name)
             return
@@ -427,6 +427,15 @@ class CanvaAssemblyClient:
             if card_count < before:
                 return
             if time.monotonic() >= deadline:
+                page.reload(wait_until="domcontentloaded")
+                refreshed_panel = open_panel(page)
+                refreshed_count = (
+                    0
+                    if refreshed_panel is None
+                    else cards_for_panel(refreshed_panel).count()
+                )
+                if refreshed_count < before:
+                    return
                 raise CanvaUIVerificationError(error_message)
             time.sleep(self.poll_seconds)
 
