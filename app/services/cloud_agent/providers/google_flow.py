@@ -55,6 +55,10 @@ _CARD_OVERFLOW_NAME_RE = re.compile(
     r"^more_vert\s+(?:more|เพิ่มเติม)$",
     re.IGNORECASE,
 )
+_PROJECT_DOWNLOAD_NAME_RE = re.compile(
+    r"^(?:download project|ดาวน์โหลดโปรเจ็กต์)$",
+    re.IGNORECASE,
+)
 _COMMAND_COMPOSER_SELECTOR = '[data-slate-editor="true"][role="textbox"]:visible'
 _COMMAND_SUBMIT_NAME_RE = re.compile(
     r"^(?:generate|arrow_forward\s+(?:generate|create|สร้าง))$",
@@ -296,24 +300,9 @@ class FlowWorkspaceRun:
                 self.page,
                 RENAME_CLIPS_INSTRUCTION,
             )
-            self._wait_for_semantic_rename(expected_count, response_count)
-        self._verify_semantic_names(expected_count)
+            self._wait_for_rename_response_then_refresh(response_count)
 
-        bulk_download = self.page.get_by_role(
-            "button",
-            name=re.compile(r"^download product clips$", re.IGNORECASE),
-        )
-        if bulk_download.count() != 1:
-            raise FlowArchiveValidationError(
-                "Google Flow bulk Download Product Clips action was not verified"
-            )
-        with self.page.expect_download() as download_info:
-            bulk_download.click()
-        download_info.value.save_as(str(paths.flow_archive_file))
-        if not paths.flow_archive_file.is_file():
-            raise FlowArchiveValidationError(
-                "Google Flow bulk download did not produce an archive"
-            )
+        self._download_project_archive(paths)
         return materialize_flow_archive(
             paths.flow_archive_file,
             paths,
@@ -321,6 +310,40 @@ class FlowWorkspaceRun:
             expected_width=self.client.expected_width,
             expected_height=self.client.expected_height,
         )
+
+    def _download_project_archive(self, paths: JobPaths) -> None:
+        project_menu = self.page.get_by_role(
+            "button",
+            name=_CARD_OVERFLOW_NAME_RE,
+        )
+        if not (
+            project_menu.count() == 1
+            and project_menu.is_visible()
+            and project_menu.is_enabled()
+        ):
+            raise FlowArchiveValidationError(
+                "Google Flow project menu could not be verified"
+            )
+        project_menu.click()
+        download_project = self.page.get_by_role(
+            "menuitem",
+            name=_PROJECT_DOWNLOAD_NAME_RE,
+        )
+        if not (
+            download_project.count() == 1
+            and download_project.is_visible()
+            and download_project.is_enabled()
+        ):
+            raise FlowArchiveValidationError(
+                "Google Flow Download Project action could not be verified"
+            )
+        with self.page.expect_download() as download_info:
+            download_project.click()
+        download_info.value.save_as(str(paths.flow_archive_file))
+        if not paths.flow_archive_file.is_file():
+            raise FlowArchiveValidationError(
+                "Google Flow project download did not produce an archive"
+            )
 
     def _semantic_names_are_complete(self, expected_count: int) -> bool:
         if self.page.get_by_role("checkbox").count() != expected_count:
@@ -330,26 +353,12 @@ class FlowWorkspaceRun:
             for number in range(1, expected_count + 1)
         )
 
-    def _wait_for_semantic_rename(
-        self,
-        expected_count: int,
-        response_count: int,
-    ) -> None:
+    def _wait_for_rename_response_then_refresh(self, response_count: int) -> None:
         self.client._wait_for_agent_response(self.page, response_count)
         self.page.reload(wait_until="domcontentloaded")
         self.client._hydrate_project_workspace(
             self.page,
             flow_generation_unresolved=True,
-        )
-        deadline = time.monotonic() + self.client.editor_ready_timeout_seconds
-        while True:
-            if self._semantic_names_are_complete(expected_count):
-                return
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(self.client.poll_seconds)
-        raise FlowWorkspaceVerificationError(
-            "Google Flow semantic clip names could not be verified"
         )
 
     def _verify_semantic_names(self, expected_count: int) -> None:

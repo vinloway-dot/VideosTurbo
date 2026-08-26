@@ -8,6 +8,7 @@ from playwright.sync_api import Error as PlaywrightError
 
 from app.models.cloud_agent import ServiceSessionStatus
 from app.services.cloud_agent.errors import (
+    FlowArchiveValidationError,
     FlowWorkspaceVerificationError,
     HumanRequiredError,
     MediaValidationError,
@@ -225,6 +226,17 @@ class FakeLocator:
             self.page.active_download.index = 0
             self.page.actions.append(("click", "bulk_download"))
             return
+        if self.kind == "project_menu":
+            self.page.project_menu_open = True
+            self.page.actions.append(("click", "project_menu"))
+            return
+        if self.kind == "project_download":
+            assert self.page.active_download is not None
+            assert self.page.project_menu_open
+            self.page.active_download.index = 0
+            self.page.project_menu_open = False
+            self.page.actions.append(("click", "project_download"))
+            return
         if self.kind == "download":
             assert self.page.active_download is not None
             self.page.active_download.index = self.index
@@ -251,6 +263,10 @@ class FakeLocator:
     def count(self):
         if self.kind == "downloads":
             return self.page.download_count
+        if self.kind == "project_menu":
+            return int(self.page.project_menu_available)
+        if self.kind == "project_download":
+            return int(self.page.project_menu_open)
         if self.kind == "agent_response_feedback":
             self.page.agent_response_reads += 1
             if self.index is None:
@@ -520,6 +536,7 @@ class FakePage:
         card_delete_removes=True,
         card_click_opens_editor=False,
         fallback_composer_available=False,
+        project_menu_available=True,
     ):
         self.url = "about:blank"
         self.project_progress_html = list(progress_html)
@@ -599,6 +616,8 @@ class FakePage:
         self.card_delete_removes = card_delete_removes
         self.card_click_opens_editor = card_click_opens_editor
         self.fallback_composer_available = fallback_composer_available
+        self.project_menu_available = project_menu_available
+        self.project_menu_open = False
         self.in_clip_editor = False
         self.hovered_card_index = None
         self.card_menu_open = False
@@ -686,6 +705,8 @@ class FakePage:
             return FakeLocator(self, "launch")
         if role == "button" and "download product clips" in pattern:
             return FakeLocator(self, "bulk_download")
+        if role == "button" and "more_vert" in pattern:
+            return FakeLocator(self, "project_menu")
         if role == "button" and (
             "thumb_up" in pattern or "good response" in pattern or "คำตอบดี" in pattern
         ):
@@ -706,6 +727,10 @@ class FakePage:
             return FakeLocator(self, "downloads")
         if role == "menuitem" and ("delete" in pattern or "ลบ" in pattern):
             return FakeLocator(self, "card_menu_delete")
+        if role == "menuitem" and (
+            "download project" in pattern or "ดาวน์โหลดโปรเจ็กต์" in pattern
+        ):
+            return FakeLocator(self, "project_download")
         if role == "checkbox":
             return FakeLocator(self, "checkboxes")
         if role == "button" and ("delete" in pattern or "ลบ" in pattern):
@@ -1612,7 +1637,7 @@ def test_flow_generation_does_not_implicitly_preclean_remote_workspace(
     assert ("click", "delete_selected") not in page.actions
 
 
-def test_flow_workspace_renames_out_of_order_results_and_bulk_downloads_zip(
+def test_flow_workspace_renames_out_of_order_results_and_downloads_project_archive(
     monkeypatch, tmp_path
 ):
     page = FakePage(
@@ -1668,7 +1693,7 @@ def test_flow_workspace_renames_out_of_order_results_and_bulk_downloads_zip(
         "clip 3",
     ]
     expect_index = page.actions.index(("expect_download", "registered"))
-    click_index = page.actions.index(("click", "bulk_download"))
+    click_index = page.actions.index(("click", "project_download"))
     assert expect_index < click_index
     assert page.download_attempts == [1, 0, 0, 0, 0, 0]
     assert materializer_calls == [
@@ -1740,7 +1765,45 @@ def test_flow_workspace_reconciliation_skips_rename_when_semantic_names_exist(
         action[:3] == ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
         for action in page.actions
     )
-    assert ("click", "bulk_download") in page.actions
+    assert ("click", "project_download") in page.actions
+
+
+def test_flow_workspace_uses_project_archive_after_rename_response_and_refresh(
+    monkeypatch, tmp_path
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"draft-{number}" for number in range(1, 7)],
+        renamed_clip_names=[f"draft-{number}" for number in range(1, 7)],
+        checkbox_count=0,
+        inventory_sequence=[6, 6, 6],
+        agent_enabled_states=[False],
+        send_enabled_after_click=False,
+    )
+    client, _ = _client(
+        page,
+        timeout_seconds=1.0,
+        editor_ready_timeout_seconds=5.0,
+    )
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        _timeout_clock(monkeypatch)
+        result = workspace.reconcile_and_download(
+            _job(flow_generation_unresolved=True),
+            paths,
+        )
+
+    assert result == paths.flow_files
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert ("click", "project_menu") in page.actions
+    assert ("click", "project_download") in page.actions
+    assert ("click", "bulk_download") not in page.actions
 
 
 def test_flow_workspace_rename_completes_from_semantic_names_when_send_stays_disabled(
@@ -1774,7 +1837,7 @@ def test_flow_workspace_rename_completes_from_semantic_names_when_send_stays_dis
         ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
     ) == 1
     assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
-    assert ("click", "bulk_download") in page.actions
+    assert ("click", "project_download") in page.actions
 
 
 def test_flow_workspace_waits_for_agent_response_before_single_rename_refresh(
@@ -1840,11 +1903,11 @@ def test_flow_workspace_rename_ignores_stale_submit_locator_after_click(
         action[:3] == ("fill", "prompt", _job().master_prompt)
         for action in page.actions
     )
-    assert ("click", "bulk_download") in page.actions
+    assert ("click", "project_download") in page.actions
     assert ("click", "delete_selected") not in page.actions
 
 
-def test_flow_workspace_rename_stale_submit_locator_fails_closed_without_names(
+def test_flow_workspace_rename_stale_submit_locator_downloads_archive_without_card_names(
     monkeypatch, tmp_path
 ):
     page = FakePage(
@@ -1854,9 +1917,6 @@ def test_flow_workspace_rename_stale_submit_locator_fails_closed_without_names(
         inventory_sequence=[6, 6, 6],
         send_stale_after_click=True,
     )
-    # The reconciliation inventory itself needs several bounded observations;
-    # leave enough simulated time for that, then let the rename postcondition
-    # time out without a real sleep.
     client, _ = _client(page, editor_ready_timeout_seconds=5.0)
     paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
     monkeypatch.setattr(
@@ -1867,12 +1927,12 @@ def test_flow_workspace_rename_stale_submit_locator_fails_closed_without_names(
 
     with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
         _timeout_clock(monkeypatch)
-        with pytest.raises(FlowWorkspaceVerificationError, match="semantic clip names"):
-            workspace.reconcile_and_download(
-                _job(flow_generation_unresolved=True),
-                paths,
-            )
+        result = workspace.reconcile_and_download(
+            _job(flow_generation_unresolved=True),
+            paths,
+        )
 
+    assert result == paths.flow_files
     assert page.actions.count(
         ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
     ) == 1
@@ -1880,11 +1940,11 @@ def test_flow_workspace_rename_stale_submit_locator_fails_closed_without_names(
         action[:3] == ("fill", "prompt", _job().master_prompt)
         for action in page.actions
     )
-    assert ("click", "bulk_download") not in page.actions
+    assert ("click", "project_download") in page.actions
     assert ("click", "delete_selected") not in page.actions
 
 
-def test_flow_workspace_rename_fails_closed_when_names_are_incomplete_after_single_refresh(
+def test_flow_workspace_rename_downloads_archive_when_names_are_not_rendered_after_refresh(
     monkeypatch, tmp_path
 ):
     complete_names = [f"clip {number}" for number in range(1, 7)]
@@ -1907,12 +1967,12 @@ def test_flow_workspace_rename_fails_closed_when_names_are_incomplete_after_sing
 
     with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
         _timeout_clock(monkeypatch)
-        with pytest.raises(FlowWorkspaceVerificationError, match="semantic clip names"):
-            workspace.reconcile_and_download(
-                _job(flow_generation_unresolved=True),
-                paths,
-            )
+        result = workspace.reconcile_and_download(
+            _job(flow_generation_unresolved=True),
+            paths,
+        )
 
+    assert result == paths.flow_files
     assert page.actions.count(
         ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
     ) == 1
@@ -1926,7 +1986,7 @@ def test_flow_workspace_rename_fails_closed_when_names_are_incomplete_after_sing
         ["clip 1", "clip 2", "clip 3", "clip 3", "clip 5", "clip 6"],
     ],
 )
-def test_flow_workspace_rename_fails_closed_when_semantic_names_stay_incomplete(
+def test_flow_workspace_rename_downloads_archive_when_card_names_stay_incomplete(
     monkeypatch, tmp_path, renamed_clip_names
 ):
     page = FakePage(
@@ -1947,11 +2007,10 @@ def test_flow_workspace_rename_fails_closed_when_semantic_names_stay_incomplete(
 
     with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
         _timeout_clock(monkeypatch)
-        with pytest.raises(FlowWorkspaceVerificationError, match="semantic clip names"):
-            workspace.reconcile_and_download(
-                _job(flow_generation_unresolved=True),
-                paths,
-            )
+        result = workspace.reconcile_and_download(
+            _job(flow_generation_unresolved=True),
+            paths,
+        )
 
     assert page.actions.count(
         ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
@@ -1960,7 +2019,8 @@ def test_flow_workspace_rename_fails_closed_when_semantic_names_stay_incomplete(
         action[:3] == ("fill", "prompt", _job().master_prompt)
         for action in page.actions
     )
-    assert ("click", "bulk_download") not in page.actions
+    assert result == paths.flow_files
+    assert ("click", "project_download") in page.actions
     assert ("click", "delete_selected") not in page.actions
 
 
@@ -2148,7 +2208,7 @@ def test_flow_workspace_reconciliation_requires_stable_exact_six_before_rename(
     assert ("click", "generate") not in page.actions
 
 
-def test_flow_workspace_rejects_duplicate_semantic_names_before_bulk_download(
+def test_flow_workspace_rejects_invalid_project_archive_after_rename(
     monkeypatch, tmp_path
 ):
     page = FakePage(
@@ -2158,19 +2218,17 @@ def test_flow_workspace_rejects_duplicate_semantic_names_before_bulk_download(
     )
     client, _ = _client(page, editor_ready_timeout_seconds=5.0)
     paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
-    monkeypatch.setattr(
-        google_flow,
-        "materialize_flow_archive",
-        lambda *_args, **_kwargs: paths.flow_files,
-        raising=False,
-    )
+    def reject_archive(*_args, **_kwargs):
+        raise FlowArchiveValidationError("archive must contain semantic clips 1 through 6")
+
+    monkeypatch.setattr(google_flow, "materialize_flow_archive", reject_archive)
 
     with client.acquire_workspace(_job()) as workspace:
         _timeout_clock(monkeypatch)
-        with pytest.raises(FlowWorkspaceVerificationError, match="semantic"):
+        with pytest.raises(FlowArchiveValidationError, match="semantic clips"):
             workspace.generate_and_download(_job(), paths)
 
-    assert ("click", "bulk_download") not in page.actions
+    assert ("click", "project_download") in page.actions
 
 
 def test_google_flow_agent_prompt_uses_observable_composer_when_locale_has_no_prompt_label():
