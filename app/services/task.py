@@ -20,8 +20,6 @@ from app.services import (
     llm,
     loomloom,
     material,
-    six_clip_media,
-    six_clip_render,
     sonilo,
     subtitle,
     task_artifacts,
@@ -1206,22 +1204,6 @@ def _run_pipeline(
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
 
-    if params.six_clip_mode:
-        if params.six_clip_plan is None:
-            return _mark_task_failed(
-                task_id,
-                "preflight",
-                "Cannot generate video. Six-clip plan is missing.",
-            )
-        missing_media = six_clip_media.validate_ready_media(params.six_clip_plan)
-        if missing_media:
-            return _mark_task_failed(
-                task_id,
-                "preflight",
-                "Cannot generate video. Missing media: "
-                + six_clip_media.missing_media_message(params.six_clip_plan),
-            )
-
     # 只有完整成片流程需要视频配乐供应商。尽早阻止缺少 Key 的完整任务，避免
     # 先消耗 LLM、TTS 和素材服务额度；中间产物接口仍可独立使用。
     video_music_provider = _VIDEO_MUSIC_PROVIDERS.get(params.bgm_type)
@@ -1313,16 +1295,6 @@ def _run_pipeline(
             "audio",
             "failed to prepare narration audio",
         )
-    if params.six_clip_mode and float(audio_duration or 0) > 60.0:
-        return _mark_task_failed(
-            task_id,
-            "audio",
-            (
-                f"Narration is {float(audio_duration):.1f} seconds; the six-clip timeline "
-                "is fixed at 60 seconds. Reduce Target Words or increase Voice Rate."
-            ),
-        )
-
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=30)
 
     if stop_at == "audio":
@@ -1351,31 +1323,13 @@ def _run_pipeline(
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
     # 5. Get video materials
-    six_clip_combined_video = None
-    if params.six_clip_mode:
-        try:
-            downloaded_videos = six_clip_render.prepare_six_clip_timeline(
-                task_id,
-                params.six_clip_plan,
-                video_aspect=params.video_aspect,
-                image_motion=params.image_motion,
-                threads=params.n_threads or 2,
-            )
-            six_clip_combined_video = six_clip_render.concat_six_clip_timeline(
-                downloaded_videos,
-                path.join(utils.task_dir(task_id), "combined-six-clip.mp4"),
-                threads=params.n_threads or 2,
-            )
-        except six_clip_render.SixClipRenderError as exc:
-            return _mark_task_failed(task_id, "materials", str(exc))
-    else:
-        downloaded_videos = get_video_materials(
-            task_id,
-            params,
-            video_terms,
-            audio_duration,
-            loomloom_video_request=loomloom_video_request,
-        )
+    downloaded_videos = get_video_materials(
+        task_id,
+        params,
+        video_terms,
+        audio_duration,
+        loomloom_video_request=loomloom_video_request,
+    )
     if not downloaded_videos:
         return _mark_task_failed(
             task_id,
@@ -1408,7 +1362,6 @@ def _run_pipeline(
             audio_file,
             subtitle_path,
             audio_duration,
-            combined_video_override=six_clip_combined_video,
         )
     )
 

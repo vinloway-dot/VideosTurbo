@@ -350,3 +350,11 @@ git diff feature/cloud-video-agent...HEAD --check
 
 Run the non-paid service/session smoke from Task 5. Do not run a paid Flow or
 TTS job as part of this cleanup.
+
+## Approved shared-core refinement
+
+Do not remove `stock_images.py`, `stock_materials.py`, `image_materials.py`,
+`video.py`, MoviePy or the shared task helpers while Music Batch imports them.
+The public legacy Video UI/API and its classic six-clip editor/media/renderer
+remain retirement targets. This refinement supersedes Task 3/4 deletion steps
+that would remove shared Music Batch dependencies.

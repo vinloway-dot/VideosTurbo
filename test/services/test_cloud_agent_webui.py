@@ -47,3 +47,18 @@ def test_main_renders_cloud_agent_without_the_retired_local_generation_flow():
     assert "_render_audio_settings" not in application
     assert "_render_subtitle_settings" not in application
     assert "_render_generation_controls" not in application
+
+
+def test_main_source_has_no_retired_classic_video_generation_dependencies():
+    source = MAIN_SOURCE.read_text(encoding="utf-8")
+
+    assert "cloud_agent.render_cloud_agent_panel" in source
+    for retired_symbol in (
+        "_render_generation_controls",
+        "_render_six_clip_video_settings",
+        "local_video_materials_uploader",
+        "stock_materials",
+        "six_clip_plan",
+        "six_clip_video_aspect_select",
+    ):
+        assert retired_symbol not in source

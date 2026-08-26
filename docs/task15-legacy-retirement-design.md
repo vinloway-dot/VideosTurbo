@@ -79,3 +79,13 @@ The initial inventory found live callers for all candidate legacy categories:
 
 Therefore this retirement is intentionally staged and cannot safely start by
 deleting a purportedly-unused file.
+
+## Approved shared-core refinement
+
+Music Batch directly invokes `task.generate_script`, `task.generate_terms`,
+`task.generate_audio`, `task.get_video_materials`, `task.generate_final_videos`
+and `video.py` codec helpers. It therefore owns the shared stock/local-render
+core and its MoviePy dependency. Task 15 retires the classic public Video
+product, not that retained Music Batch implementation. The removable local
+category is the classic six-clip editor/media/renderer, which has no Music
+Batch caller.
