@@ -43,6 +43,11 @@ def _prepare_draft(*, subject, language, target_words, script):
     )
 
 
+def _open_browser_url(service):
+    service_id = {"google-flow": "google_flow", "canva": "canva"}[service]
+    return _api("GET", f"sessions/{service_id}/open-browser")["url"]
+
+
 def _start_job(
     *,
     subject,
@@ -138,7 +143,7 @@ def render_cloud_agent_panel():
             except requests.RequestException as exc:
                 st.error(_api_error_message(exc))
         if column.button("Open Browser", key=f"{service}-open"):
-            st.link_button("Open Browser", _api("GET", f"sessions/{service}/open-browser")["url"])
+            st.link_button("Open Browser", _open_browser_url(service))
     if controls[2].button("Start", key="cloud_agent_start"):
         clip_plan = st.session_state.get("cloud_agent_clip_plan")
         draft_script = str(st.session_state.get("cloud_agent_draft_script", ""))

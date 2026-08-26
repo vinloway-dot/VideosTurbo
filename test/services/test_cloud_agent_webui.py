@@ -178,6 +178,22 @@ def test_prepare_draft_calls_the_fastapi_draft_endpoint_with_editor_inputs(monke
     }
 
 
+def test_google_flow_open_browser_uses_the_api_service_identifier(monkeypatch):
+    recorded = {}
+
+    def api(method, path, **kwargs):
+        recorded.update(method=method, path=path, **kwargs)
+        return {"url": "https://remote-browser.example"}
+
+    monkeypatch.setattr(cloud_agent, "_api", api)
+
+    assert cloud_agent._open_browser_url("google-flow") == "https://remote-browser.example"
+    assert recorded == {
+        "method": "GET",
+        "path": "sessions/google_flow/open-browser",
+    }
+
+
 def test_start_job_sends_the_draft_clip_plan_required_by_the_api(monkeypatch):
     recorded = {}
 
