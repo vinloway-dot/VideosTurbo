@@ -84,6 +84,21 @@ class CloudJobCreate(BaseModel):
         return self
 
 
+class CloudJobDraftRequest(BaseModel):
+    subject: str
+    script: str = ""
+    language: str = ""
+    target_words: int = Field(default=130, ge=40, le=400)
+
+    @field_validator("subject")
+    @classmethod
+    def _require_subject(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("value must not be blank")
+        return normalized
+
+
 class CloudJobRecord(CloudJobCreate):
     id: str
     status: CloudJobStatus

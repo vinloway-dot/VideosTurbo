@@ -24,6 +24,7 @@ from app.services.cloud_agent.storage import CloudJobStorage
 
 EXPECTED_CLOUD_AGENT_PATHS = {
     ("GET", "/api/v1/cloud-agent/health"),
+    ("POST", "/api/v1/cloud-agent/draft"),
     ("POST", "/api/v1/cloud-agent/jobs"),
     ("GET", "/api/v1/cloud-agent/jobs"),
     ("GET", "/api/v1/cloud-agent/jobs/{job_id}"),
@@ -129,6 +130,58 @@ def test_create_job_persists_queue_without_running_tts_or_browser(monkeypatch, t
     persisted = store.get_job(data["id"])
     assert persisted is not None
     assert persisted.status is CloudJobStatus.QUEUED
+
+
+def test_draft_generates_a_complete_start_payload_without_starting_production_work(
+    monkeypatch, tmp_path
+):
+    client, _store = _client(tmp_path)
+    cloud_agent = _cloud_agent_controller()
+    calls = {}
+
+    def generate_script(**kwargs):
+        calls["script"] = kwargs
+        return "Saturn has a stable hexagonal polar jet."
+
+    def generate_plan(video_script, language, target_words, app_config=None):
+        calls["plan"] = {
+            "video_script": video_script,
+            "language": language,
+            "target_words": target_words,
+            "app_config": app_config,
+        }
+        return empty_six_clip_plan(target_words=target_words)
+
+    monkeypatch.setattr(cloud_agent, "generate_script", generate_script, raising=False)
+    monkeypatch.setattr(
+        cloud_agent, "generate_six_clip_plan", generate_plan, raising=False
+    )
+    monkeypatch.setattr(voice, "tts", lambda *_args, **_kwargs: pytest.fail("no TTS"))
+    monkeypatch.setattr(
+        PersistentBrowserManager,
+        "open",
+        lambda *_args, **_kwargs: pytest.fail("no browser work"),
+    )
+
+    response = client.post(
+        "/api/v1/cloud-agent/draft",
+        json={
+            "subject": "Why Saturn Has a Hexagon",
+            "language": "English",
+            "target_words": 130,
+            "script": "",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["script"] == "Saturn has a stable hexagonal polar jet."
+    assert data["clip_plan"]["target_words"] == 130
+    assert len(data["clip_plan"]["segments"]) == 6
+    assert data["master_prompt"].startswith("Create six videos")
+    assert calls["script"]["video_subject"] == "Why Saturn Has a Hexagon"
+    assert calls["plan"]["video_script"] == data["script"]
+    assert calls["plan"]["target_words"] == 130
 
 
 def test_job_list_and_detail_expose_server_derived_timing_fields(tmp_path):

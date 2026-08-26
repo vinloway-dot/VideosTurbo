@@ -8,10 +8,13 @@ from app.config import config
 from app.controllers.v1.base import new_router
 from app.models.cloud_agent import (
     CloudControlRequest,
+    CloudJobDraftRequest,
     CloudJobCheckpoint,
     CloudJobCreate,
     CloudJobStatus,
 )
+from app.services.llm import generate_script
+from app.services.six_clip_plan import build_master_prompt, generate_six_clip_plan
 from app.models.exception import HttpException
 from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.errors import HumanRequiredError
@@ -127,6 +130,41 @@ def get_cloud_agent_health(
             "free_space_bytes": free_space_bytes,
             "free_space_ok": storage_writable
             and free_space_bytes >= required_free_bytes,
+        },
+    )
+
+
+@router.post("/cloud-agent/draft")
+def create_cloud_agent_draft(request: Request, body: CloudJobDraftRequest):
+    del request
+    script = str(body.script or "").strip()
+    if not script:
+        script = generate_script(
+            video_subject=body.subject,
+            language=body.language,
+            paragraph_number=1,
+            video_script_prompt=(
+                f"Write approximately {body.target_words} words for this narration."
+            ),
+        ).strip()
+    if not script:
+        raise HttpException(
+            task_id="cloud-agent-draft",
+            status_code=422,
+            message="script generation returned no narration",
+        )
+
+    clip_plan = generate_six_clip_plan(
+        script,
+        language=body.language,
+        target_words=body.target_words,
+    )
+    return utils.get_response(
+        200,
+        {
+            "script": script,
+            "master_prompt": build_master_prompt(clip_plan),
+            "clip_plan": clip_plan.model_dump(mode="json"),
         },
     )
 

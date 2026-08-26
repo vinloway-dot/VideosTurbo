@@ -148,3 +148,58 @@ def test_canva_check_timeout_is_shown_as_a_safe_webui_error(monkeypatch):
     cloud_agent.render_cloud_agent_panel()
 
     assert fake_streamlit.errors == ["Cloud Agent request could not be completed."]
+
+
+def test_prepare_draft_calls_the_fastapi_draft_endpoint_with_editor_inputs(monkeypatch):
+    recorded = {}
+
+    def api(method, path, **kwargs):
+        recorded.update(method=method, path=path, **kwargs)
+        return {"script": "Draft", "master_prompt": "Prompt", "clip_plan": {}}
+
+    monkeypatch.setattr(cloud_agent, "_api", api)
+
+    assert cloud_agent._prepare_draft(
+        subject="Why Saturn Has a Hexagon",
+        language="English",
+        target_words=130,
+        script="Edited narration",
+    )["script"] == "Draft"
+    assert recorded == {
+        "method": "POST",
+        "path": "draft",
+        "json": {
+            "subject": "Why Saturn Has a Hexagon",
+            "language": "English",
+            "target_words": 130,
+            "script": "Edited narration",
+        },
+        "timeout": 120,
+    }
+
+
+def test_start_job_sends_the_draft_clip_plan_required_by_the_api(monkeypatch):
+    recorded = {}
+
+    def api(method, path, **kwargs):
+        recorded.update(method=method, path=path, **kwargs)
+        return {"id": "job-123"}
+
+    clip_plan = {"target_words": 130, "segments": [{"index": 1}] * 6}
+    monkeypatch.setattr(cloud_agent, "_api", api)
+
+    assert cloud_agent._start_job(
+        subject="Why Saturn Has a Hexagon",
+        target_words=130,
+        language="English",
+        script="Ready narration",
+        master_prompt="Ready prompt",
+        clip_plan=clip_plan,
+        tts_provider="azure-tts-v1",
+        voice_id="en-AU-NatashaNeural-Female",
+        voice_speed=1.0,
+    ) == {"id": "job-123"}
+    assert recorded["method"] == "POST"
+    assert recorded["path"] == "jobs"
+    assert recorded["json"]["clip_plan"] == clip_plan
+    assert recorded["json"]["script"] == "Ready narration"

@@ -7,6 +7,7 @@ import streamlit as st
 API_PREFIX = "http://127.0.0.1:8080/api/v1/cloud-agent/"
 API_TIMEOUT_SECONDS = 15
 SESSION_CHECK_TIMEOUT_SECONDS = 45
+DRAFT_TIMEOUT_SECONDS = 120
 
 
 def _api(method, path, **kwargs):
@@ -28,18 +29,101 @@ def _api_error_message(error):
     return "Cloud Agent request could not be completed."
 
 
+def _prepare_draft(*, subject, language, target_words, script):
+    return _api(
+        "POST",
+        "draft",
+        json={
+            "subject": subject,
+            "language": language,
+            "target_words": target_words,
+            "script": script,
+        },
+        timeout=DRAFT_TIMEOUT_SECONDS,
+    )
+
+
+def _start_job(
+    *,
+    subject,
+    target_words,
+    language,
+    script,
+    master_prompt,
+    clip_plan,
+    tts_provider,
+    voice_id,
+    voice_speed,
+):
+    return _api(
+        "POST",
+        "jobs",
+        json={
+            "subject": subject,
+            "target_words": target_words,
+            "language": language,
+            "script": script,
+            "master_prompt": master_prompt,
+            "clip_plan": clip_plan,
+            "tts_provider": tts_provider,
+            "voice_id": voice_id,
+            "voice_speed": voice_speed,
+        },
+    )
+
+
+def _store_draft(draft):
+    st.session_state["cloud_agent_script"] = draft["script"]
+    st.session_state["cloud_agent_master_prompt"] = draft["master_prompt"]
+    st.session_state["cloud_agent_clip_plan"] = draft["clip_plan"]
+    st.session_state["cloud_agent_draft_script"] = draft["script"]
+
+
 def render_cloud_agent_panel():
     st.subheader("Cloud Agent")
     subject = st.text_input("Video Subject", key="cloud_agent_subject")
     words = st.number_input("Target Words", min_value=1, value=130, key="cloud_agent_words")
     language = st.text_input("Language", value="English", key="cloud_agent_language")
+    if st.button("Generate Script", key="cloud_agent_generate_script"):
+        if not subject.strip():
+            st.error("Video Subject is required.")
+        else:
+            try:
+                _store_draft(
+                    _prepare_draft(
+                        subject=subject,
+                        language=language,
+                        target_words=words,
+                        script="",
+                    )
+                )
+                st.rerun()
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
+    if st.button("Refresh Draft", key="cloud_agent_refresh_draft"):
+        script_for_refresh = str(st.session_state.get("cloud_agent_script", ""))
+        if not script_for_refresh.strip():
+            st.error("Script Editor is required before refreshing the draft.")
+        else:
+            try:
+                _store_draft(
+                    _prepare_draft(
+                        subject=subject,
+                        language=language,
+                        target_words=words,
+                        script=script_for_refresh,
+                    )
+                )
+                st.rerun()
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
     script = st.text_area("Script Editor", key="cloud_agent_script")
-    master_prompt = st.text_area("View Master Prompt", key="cloud_agent_master_prompt")
+    master_prompt = st.text_area(
+        "View Master Prompt", key="cloud_agent_master_prompt", disabled=True
+    )
     provider = st.text_input("TTS Provider", value="azure-tts-v1", key="cloud_agent_provider")
     voice = st.text_input("Voice", key="cloud_agent_voice")
     speed = st.number_input("Speed", min_value=0.1, value=1.0, key="cloud_agent_speed")
-    if st.button("Generate Script", key="cloud_agent_generate_script"):
-        st.info("Generate Script is prepared in the existing editor.")
     controls = st.columns(4)
     for service, column in (("google-flow", controls[0]), ("canva", controls[1])):
         if column.button("Google Flow" if service == "google-flow" else "Canva", key=f"{service}-check"):
@@ -56,7 +140,29 @@ def render_cloud_agent_panel():
         if column.button("Open Browser", key=f"{service}-open"):
             st.link_button("Open Browser", _api("GET", f"sessions/{service}/open-browser")["url"])
     if controls[2].button("Start", key="cloud_agent_start"):
-        st.json(_api("POST", "jobs", json={"subject": subject, "target_words": words, "language": language, "script": script, "master_prompt": master_prompt, "tts_provider": provider, "voice_id": voice, "voice_speed": speed}))
+        clip_plan = st.session_state.get("cloud_agent_clip_plan")
+        draft_script = str(st.session_state.get("cloud_agent_draft_script", ""))
+        if not clip_plan or draft_script != script.strip():
+            st.error("Generate or refresh the draft before starting the job.")
+        elif not voice.strip():
+            st.error("Voice is required before starting the job.")
+        else:
+            try:
+                st.json(
+                    _start_job(
+                        subject=subject,
+                        target_words=words,
+                        language=language,
+                        script=script,
+                        master_prompt=master_prompt,
+                        clip_plan=clip_plan,
+                        tts_provider=provider,
+                        voice_id=voice,
+                        voice_speed=speed,
+                    )
+                )
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
     job_id = st.text_input("Job ID", key="cloud_agent_job_id")
     for action in ("Pause", "Resume", "Retry", "Cancel"):
         if controls[3].button(action, key=f"cloud_agent_{action.lower()}") and job_id:
