@@ -431,7 +431,11 @@ class CanvaAssemblyClient:
                     and audio_after >= audio_before + expected_audio_count
                 )
             if (baseline_inventory is None and names_visible) or (
-                inventory_complete and (not names_observable or names_visible)
+                inventory_complete
+                and (
+                    self._uploaded_media_cards_complete(page, expected_names, audio_name)
+                    or (not names_observable or names_visible)
+                )
             ):
                 return
             if time.monotonic() >= deadline:
@@ -442,6 +446,40 @@ class CanvaAssemblyClient:
                     continue
                 raise CanvaUIVerificationError("Canva upload completion could not be verified")
             time.sleep(self.poll_seconds)
+
+    def _uploaded_media_cards_complete(
+        self, page: Any, expected_names: list[str], audio_name: str | None
+    ) -> bool:
+        video_names = [
+            name
+            for name in expected_names
+            if Path(name).suffix.lower() in {".mp4", ".mov", ".webm"}
+        ]
+        if not video_names or not audio_name:
+            return False
+        try:
+            video_panel = self._open_uploaded_videos(page)
+            if video_panel is None or any(
+                video_panel.get_by_role("button", name=name, exact=True).count() != 1
+                for name in video_names
+            ):
+                return False
+            audio_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-audio"]:visible')
+            if audio_tab.count() != 1:
+                return False
+            audio_tab.click()
+            audio_panel_id = audio_tab.get_attribute("aria-controls")
+            if not audio_panel_id:
+                return False
+            audio_panel = page.locator(f'[role="tabpanel"][id="{audio_panel_id}"]')
+            return (
+                audio_panel.get_by_role(
+                    "button", name=f"Apply audio: {audio_name}", exact=True
+                ).count()
+                >= 1
+            )
+        except Exception:
+            return False
 
     def _order_clips(self, page: Any, expected_names: list[str]) -> None:
         if hasattr(page, "order_clips"):

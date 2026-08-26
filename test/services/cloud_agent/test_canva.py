@@ -878,6 +878,21 @@ def test_canva_upload_completion_rejects_complete_count_with_partial_duplicate_n
         client._wait_for_upload_completion(page, names, baseline_inventory=(0, 0))
 
 
+def test_canva_upload_completion_accepts_card_scoped_media_when_global_audio_is_duplicated(
+    monkeypatch,
+):
+    """Catches rejecting a completed upload because account-global voice text is duplicated."""
+    names = [*(f"clip_{index:02d}.mp4" for index in range(1, 7)), "voice.mp3"]
+    page = FakePartialNamedUploadPage({name: 2 for name in names})
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    monkeypatch.setattr(client, "_upload_inventory", lambda _page, _audio_name: (6, 20))
+    monkeypatch.setattr(
+        client, "_uploaded_media_cards_complete", lambda _page, _names, _audio: True
+    )
+
+    client._wait_for_upload_completion(page, names, baseline_inventory=(0, 19))
+
+
 def test_canva_upload_inventory_waits_for_hydrated_media_tabs():
     """Catches querying Canva's video/audio tabs before their post-click hydration."""
     page = FakeHydratingUploadInventoryPage()
