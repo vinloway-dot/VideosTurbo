@@ -67,6 +67,22 @@ def test_check_all_returns_each_service_without_attempting_repair():
     assert canva.repair_calls == []
 
 
+def test_ensure_all_ready_skips_canva_without_opening_another_session():
+    flow = SequenceProvider(
+        "google_flow", [_result("google_flow", ServiceSessionStatus.READY)]
+    )
+    canva = SequenceProvider(
+        "canva", [_result("canva", ServiceSessionStatus.READY)]
+    )
+    manager = SessionManager({"google_flow": flow, "canva": canva})
+
+    results = manager.ensure_all_ready("job-1", skip_services=("canva",))
+
+    assert set(results) == {"google_flow"}
+    assert flow.check_calls == [False]
+    assert canva.check_calls == []
+
+
 def test_ensure_service_ready_returns_ready_without_repair():
     flow = SequenceProvider(
         "google_flow", [_result("google_flow", ServiceSessionStatus.READY)]

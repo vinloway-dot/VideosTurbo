@@ -15,8 +15,8 @@ class WorkerAwarePreflight:
         self.store = store
         self.calls = []
 
-    def ensure_ready(self, job_id: str, *, worker_id: str):
-        self.calls.append((job_id, worker_id))
+    def ensure_ready(self, job_id: str, *, worker_id: str, skip_services=()):
+        self.calls.append((job_id, worker_id, tuple(skip_services)))
         self.store.patch_job(job_id, control_request=CloudControlRequest.PAUSE)
 
 
@@ -73,6 +73,6 @@ def test_workflow_passes_claimed_worker_id_into_preflight(tmp_path):
 
     result = workflow.run(created.id, worker_id=worker_id)
 
-    assert preflight.calls == [(created.id, worker_id)]
+    assert preflight.calls == [(created.id, worker_id, ("canva",))]
     assert result.status is CloudJobStatus.PAUSED
     assert result.checkpoint is CloudJobCheckpoint.PREFLIGHT_PASSED

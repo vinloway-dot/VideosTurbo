@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from pathlib import Path
 from typing import ContextManager, Protocol
 
@@ -27,7 +28,13 @@ from app.services.cloud_agent.timing import calculate_adaptive_timing
 
 
 class PreflightClient(Protocol):
-    def ensure_ready(self, job_id: str, *, worker_id: str) -> None: ...
+    def ensure_ready(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        skip_services: tuple[str, ...] = (),
+    ) -> None: ...
 
 
 class TTSClient(Protocol):
@@ -71,6 +78,8 @@ class CanvaClient(Protocol):
     ) -> Path: ...
 
     def clean_workspace(self, job_id: str) -> None: ...
+
+    def open_job_session(self, job_id: str) -> ContextManager["CanvaClient"]: ...
 
 
 _CHECKPOINT_RANK = {
@@ -225,6 +234,12 @@ class CloudAgentWorkflow:
         if self._at_least(checkpoint, CloudJobCheckpoint.FINAL_VALIDATED):
             self._validate_final_checkpoint(job, paths)
 
+    def _open_canva_job_session(self, job_id: str):
+        opener = getattr(self.canva, "open_job_session", None)
+        if opener is None:
+            return nullcontext(self.canva)
+        return opener(job_id)
+
     def run(self, job_id: str, *, worker_id: str) -> CloudJobRecord:
         job = self._get_job(job_id)
         if job.status is CloudJobStatus.COMPLETED or job.checkpoint is CloudJobCheckpoint.COMPLETED:
@@ -249,7 +264,11 @@ class CloudAgentWorkflow:
                     error_code="",
                     error_message="",
                 )
-                self.preflight.ensure_ready(job.id, worker_id=worker_id)
+                self.preflight.ensure_ready(
+                    job.id,
+                    worker_id=worker_id,
+                    skip_services=("canva",),
+                )
                 job = self.store.patch_job(
                     job.id,
                     status=CloudJobStatus.PREFLIGHT_PASSED,
@@ -371,53 +390,54 @@ class CloudAgentWorkflow:
 
             job = self._get_job(job.id)
             if job.checkpoint is CloudJobCheckpoint.FLOW_READY:
-                stopped = self._control_boundary(job.id)
-                if stopped is not None:
-                    return stopped
-                self.store.patch_job(
-                    job.id,
-                    status=CloudJobStatus.CANVA_UPLOADING,
-                    current_step="canva_assembling",
-                    progress=65,
-                )
-                self.canva.assemble_and_export(
-                    job,
-                    list(paths.flow_files),
-                    paths.voice_file,
-                    paths.final_file,
-                )
-                if not paths.final_file.is_file():
-                    raise MediaValidationError("Canva step did not produce the canonical final artifact")
-                self.store.patch_job(
-                    job.id,
-                    status=CloudJobStatus.VALIDATING,
-                    current_step="validating",
-                    progress=90,
-                )
-                probe = validate_video(
-                    paths.final_file,
-                    require_audio=True,
-                    min_size_bytes=self.final_min_size_bytes,
-                    expected_width=self.expected_width,
-                    expected_height=self.expected_height,
-                )
-                self._validate_final_duration(job, probe)
-                job = self.store.patch_job(
-                    job.id,
-                    status=CloudJobStatus.FINAL_VALIDATED,
-                    checkpoint=CloudJobCheckpoint.FINAL_VALIDATED,
-                    current_step="final_validated",
-                    progress=95,
-                    final_video=str(paths.final_file),
-                )
-                try:
-                    self.canva.clean_workspace(job.id)
-                except Exception as exc:
-                    logger.warning(
-                        "Canva workspace post-clean failed for cloud job {}: {}",
+                with self._open_canva_job_session(job.id) as canva:
+                    stopped = self._control_boundary(job.id)
+                    if stopped is not None:
+                        return stopped
+                    self.store.patch_job(
                         job.id,
-                        type(exc).__name__,
+                        status=CloudJobStatus.CANVA_UPLOADING,
+                        current_step="canva_assembling",
+                        progress=65,
                     )
+                    canva.assemble_and_export(
+                        job,
+                        list(paths.flow_files),
+                        paths.voice_file,
+                        paths.final_file,
+                    )
+                    if not paths.final_file.is_file():
+                        raise MediaValidationError("Canva step did not produce the canonical final artifact")
+                    self.store.patch_job(
+                        job.id,
+                        status=CloudJobStatus.VALIDATING,
+                        current_step="validating",
+                        progress=90,
+                    )
+                    probe = validate_video(
+                        paths.final_file,
+                        require_audio=True,
+                        min_size_bytes=self.final_min_size_bytes,
+                        expected_width=self.expected_width,
+                        expected_height=self.expected_height,
+                    )
+                    self._validate_final_duration(job, probe)
+                    job = self.store.patch_job(
+                        job.id,
+                        status=CloudJobStatus.FINAL_VALIDATED,
+                        checkpoint=CloudJobCheckpoint.FINAL_VALIDATED,
+                        current_step="final_validated",
+                        progress=95,
+                        final_video=str(paths.final_file),
+                    )
+                    try:
+                        canva.clean_workspace(job.id)
+                    except Exception as exc:
+                        logger.warning(
+                            "Canva workspace post-clean failed for cloud job {}: {}",
+                            job.id,
+                            type(exc).__name__,
+                        )
                 stopped = self._control_boundary(job.id)
                 if stopped is not None:
                     return stopped

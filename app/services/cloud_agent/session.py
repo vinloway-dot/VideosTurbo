@@ -94,10 +94,17 @@ class SessionManager:
 
         self._raise_unready(service, job_id, initial)
 
-    def ensure_all_ready(self, job_id: str) -> dict[str, SessionCheckResult]:
+    def ensure_all_ready(
+        self,
+        job_id: str,
+        *,
+        skip_services: tuple[str, ...] = (),
+    ) -> dict[str, SessionCheckResult]:
+        skipped = frozenset(skip_services)
         return {
             service: self.ensure_service_ready(service, job_id)
             for service in self.providers
+            if service not in skipped
         }
 
     def _provider(self, service: str) -> SessionProvider:

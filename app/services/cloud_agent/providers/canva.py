@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -118,6 +119,17 @@ class CanvaAssemblyClient:
         audio: Path,
         output: Path,
     ) -> Path:
+        with self.open_job_session(job.id) as session:
+            return session.assemble_and_export(job, clips, audio, output)
+
+    def _assemble_open_page(
+        self,
+        page: Any,
+        job: Any,
+        clips: list[Path],
+        audio: Path,
+        output: Path,
+    ) -> Path:
         clip_paths = [Path(clip) for clip in clips]
         audio_path = Path(audio)
         output_path = Path(output)
@@ -129,27 +141,32 @@ class CanvaAssemblyClient:
         if target_seconds <= 0:
             raise ValueError("Canva target duration must be positive")
 
+        self._clean_uploaded_videos(page)
+        self._clear_video_timeline(page)
+        self._upload_media(page, [*clip_paths, audio_path])
+        self._add_uploaded_clips(page, [clip.name for clip in clip_paths])
+        self._order_clips(page, [clip.name for clip in clip_paths])
+        if speed < 1.0:
+            for index in range(1, 7):
+                self._set_and_verify_playback(page, index, speed)
+        self._add_uploaded_audio(page, audio_path.name)
+        self._mute_source_audio(page)
+        self._position_narration_at_zero(page)
+        self._bound_final_visual_end(page, target_seconds)
+        self._verify_timeline_end(page, target_seconds)
+        self._generate_auto_captions(page)
+        self._export_mp4_1080p(page)
+        self._download_export(page, output_path)
+        return output_path
+
+    @contextmanager
+    def open_job_session(self, job_id: str):
+        """Own exactly one Canva browser context for assembly and post-final cleanup."""
         with self.browser.open("canva", headed=True) as context:
             page = BrowserSessionProvider._page(context)
             page.goto(self.service_url, wait_until="domcontentloaded")
-            self.sessions.ensure_open_page_ready("canva", page, job.id)
-            self._clean_uploaded_videos(page)
-            self._clear_video_timeline(page)
-            self._upload_media(page, [*clip_paths, audio_path])
-            self._add_uploaded_clips(page, [clip.name for clip in clip_paths])
-            self._order_clips(page, [clip.name for clip in clip_paths])
-            if speed < 1.0:
-                for index in range(1, 7):
-                    self._set_and_verify_playback(page, index, speed)
-            self._add_uploaded_audio(page, audio_path.name)
-            self._mute_source_audio(page)
-            self._position_narration_at_zero(page)
-            self._bound_final_visual_end(page, target_seconds)
-            self._verify_timeline_end(page, target_seconds)
-            self._generate_auto_captions(page)
-            self._export_mp4_1080p(page)
-            self._download_export(page, output_path)
-        return output_path
+            self.sessions.ensure_open_page_ready("canva", page, job_id)
+            yield _CanvaJobSession(self, page)
 
     @staticmethod
     def _validate_media_inputs(clips: list[Path], audio: Path) -> None:
@@ -163,11 +180,11 @@ class CanvaAssemblyClient:
 
     def clean_workspace(self, job_id: str) -> None:
         """Return this configured workspace's Uploads → Videos surface to zero cards."""
-        self.sessions.ensure_service_ready("canva", job_id)
-        with self.browser.open("canva", headed=True) as context:
-            page = BrowserSessionProvider._page(context)
-            page.goto(self.service_url, wait_until="domcontentloaded")
-            self._clean_uploaded_videos(page)
+        with self.open_job_session(job_id) as session:
+            session.clean_workspace(job_id)
+
+    def _clean_open_page(self, page: Any) -> None:
+        self._clean_uploaded_videos(page)
 
     def _clean_uploaded_videos(self, page: Any) -> None:
         """Delete every current video upload using Canva's card-scoped trash menu."""
@@ -666,3 +683,24 @@ class CanvaAssemblyClient:
         if value is None:
             raise CanvaUIVerificationError("Canva timeline value cannot be read")
         return float(value) / 1_000_000
+
+
+class _CanvaJobSession:
+    """Page-bound Canva operations; its owner closes the browser context once."""
+
+    def __init__(self, client: CanvaAssemblyClient, page: Any) -> None:
+        self.client = client
+        self.page = page
+
+    def assemble_and_export(
+        self,
+        job: Any,
+        clips: list[Path],
+        audio: Path,
+        output: Path,
+    ) -> Path:
+        return self.client._assemble_open_page(self.page, job, clips, audio, output)
+
+    def clean_workspace(self, job_id: str) -> None:
+        del job_id
+        self.client._clean_open_page(self.page)

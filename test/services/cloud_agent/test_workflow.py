@@ -55,9 +55,10 @@ class RecordingPreflight:
         self.error = error
         self.calls: list[str] = []
 
-    def ensure_ready(self, job_id: str, *, worker_id: str) -> None:
+    def ensure_ready(self, job_id: str, *, worker_id: str, skip_services=()) -> None:
         del worker_id
         self.calls.append(job_id)
+        self.skip_services = tuple(skip_services)
         if self.error is not None:
             raise self.error
 
@@ -67,8 +68,8 @@ class PausingPreflight(RecordingPreflight):
         super().__init__()
         self.store = store
 
-    def ensure_ready(self, job_id: str, *, worker_id: str) -> None:
-        super().ensure_ready(job_id, worker_id=worker_id)
+    def ensure_ready(self, job_id: str, *, worker_id: str, skip_services=()) -> None:
+        super().ensure_ready(job_id, worker_id=worker_id, skip_services=skip_services)
         self.store.patch_job(job_id, control_request=CloudControlRequest.PAUSE)
 
 
@@ -350,6 +351,23 @@ class RecordingCanva:
         self.clean_calls.append(job_id)
 
 
+class SessionRecordingCanva(RecordingCanva):
+    """Records the one Canva browser context owned by a complete CloudJob."""
+
+    def __init__(self):
+        super().__init__()
+        self.session_enters = 0
+        self.session_exits = 0
+
+    @contextmanager
+    def open_job_session(self, job_id):
+        self.session_enters += 1
+        try:
+            yield self
+        finally:
+            self.session_exits += 1
+
+
 class EventRecordingCanva(RecordingCanva):
     def __init__(self, events):
         super().__init__()
@@ -523,6 +541,26 @@ def test_workflow_progresses_from_queue_through_all_durable_checkpoints(monkeypa
     assert result.progress == 100
     assert Path(result.voice_file).is_file()
     assert Path(result.final_video).is_file()
+
+
+def test_workflow_uses_one_canva_job_session_and_defers_canva_preflight(
+    monkeypatch, tmp_path
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    preflight = RecordingPreflight()
+    canva = SessionRecordingCanva()
+    _accept_media(monkeypatch)
+
+    result = _workflow(tmp_path, store, preflight=preflight, canva=canva).run(
+        job.id, worker_id=WORKER_ID
+    )
+
+    assert result.status is CloudJobStatus.COMPLETED
+    assert preflight.skip_services == ("canva",)
+    assert canva.session_enters == 1
+    assert canva.session_exits == 1
+    assert canva.clean_calls == [job.id]
 
 
 def test_generation_fence_precedes_submit_and_flow_ready_commit_is_atomic(

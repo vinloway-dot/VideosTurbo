@@ -38,9 +38,9 @@ class FakeSessions:
         self.events = events if events is not None else []
         self.calls = []
 
-    def ensure_all_ready(self, job_id):
+    def ensure_all_ready(self, job_id, *, skip_services=()):
         self.events.append("sessions")
-        self.calls.append(job_id)
+        self.calls.append((job_id, tuple(skip_services)))
         if self.error is not None:
             raise self.error
         return {
@@ -106,7 +106,7 @@ def test_preflight_success_checks_worker_storage_disk_then_sessions(tmp_path):
     assert result.storage_writable is True
     assert result.free_space_bytes == 20 * GIB
     assert set(result.sessions) == {"google_flow", "canva"}
-    assert sessions.calls == ["job-1"]
+    assert sessions.calls == [("job-1", ())]
 
 
 def test_preflight_rejects_wrong_worker_before_storage_or_sessions(tmp_path):

@@ -12,7 +12,12 @@ from app.services.cloud_agent.storage import CloudJobStorage
 
 
 class SessionReadiness(Protocol):
-    def ensure_all_ready(self, job_id: str) -> dict[str, SessionCheckResult]: ...
+    def ensure_all_ready(
+        self,
+        job_id: str,
+        *,
+        skip_services: tuple[str, ...] = (),
+    ) -> dict[str, SessionCheckResult]: ...
 
 
 @dataclass(frozen=True)
@@ -62,7 +67,13 @@ class PreflightManager:
         self.storage_writable_probe = storage_writable_probe
         self.disk_usage = disk_usage
 
-    def ensure_ready(self, job_id: str, *, worker_id: str) -> PreflightResult:
+    def ensure_ready(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        skip_services: tuple[str, ...] = (),
+    ) -> PreflightResult:
         normalized_worker_id = str(worker_id or "").strip()
         if not normalized_worker_id:
             raise RuntimeError("worker identity is required for preflight")
@@ -95,7 +106,10 @@ class PreflightManager:
                 f"{free_space_bytes} bytes available, {required_bytes} bytes required"
             )
 
-        session_results = self.sessions.ensure_all_ready(job_id)
+        session_results = self.sessions.ensure_all_ready(
+            job_id,
+            skip_services=skip_services,
+        )
         return PreflightResult(
             worker_id=normalized_worker_id,
             storage_writable=True,
