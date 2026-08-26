@@ -56,7 +56,7 @@ _CARD_OVERFLOW_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 _PROJECT_DOWNLOAD_NAME_RE = re.compile(
-    r"^(?:download project|ดาวน์โหลดโปรเจ็กต์)$",
+    r"^(?:download\s+)?(?:download project|ดาวน์โหลดโปรเจ็กต์)$",
     re.IGNORECASE,
 )
 _COMMAND_COMPOSER_SELECTOR = '[data-slate-editor="true"][role="textbox"]:visible'

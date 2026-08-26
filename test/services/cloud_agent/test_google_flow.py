@@ -1845,6 +1845,12 @@ def test_flow_workspace_reuses_existing_rename_confirmation_without_resubmitting
     assert ("click", "project_download") in page.actions
 
 
+def test_project_download_selector_accepts_observed_icon_prefixed_thai_name():
+    assert google_flow._PROJECT_DOWNLOAD_NAME_RE.fullmatch(
+        "download ดาวน์โหลดโปรเจ็กต์"
+    )
+
+
 def test_flow_workspace_rename_completes_from_semantic_names_when_send_stays_disabled(
     monkeypatch, tmp_path
 ):
