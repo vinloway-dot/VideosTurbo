@@ -887,9 +887,7 @@ class CanvaAssemblyClient:
         if hasattr(page, "download_export"):
             page.download_export(output)
         else:
-            final_download = page.get_by_role("button", name="Download", exact=True)
-            if final_download.count() != 1:
-                raise CanvaDownloadVerificationError("Canva final Download control is ambiguous")
+            final_download = self._wait_for_final_download_ready(page)
             try:
                 with page.expect_download(timeout=int(self.export_timeout_seconds * 1000)) as info:
                     final_download.click()
@@ -910,6 +908,20 @@ class CanvaAssemblyClient:
             raise CanvaDownloadVerificationError(
                 "Canva final download did not produce a completed MP4 artifact"
             )
+
+    def _wait_for_final_download_ready(self, page: Any) -> Any:
+        """Wait for Canva to re-enable the final action after editor-side processing."""
+        final_download = page.get_by_role("button", name="Download", exact=True)
+        if final_download.count() != 1:
+            raise CanvaDownloadVerificationError("Canva final Download control is ambiguous")
+        deadline = time.monotonic() + self.export_timeout_seconds
+        while not final_download.is_enabled():
+            if time.monotonic() >= deadline:
+                raise CanvaDownloadVerificationError(
+                    "Canva final Download did not become enabled"
+                )
+            time.sleep(self.poll_seconds)
+        return final_download
 
     def _wait_for_export_state(self, page: Any) -> None:
         deadline = time.monotonic() + self.export_timeout_seconds

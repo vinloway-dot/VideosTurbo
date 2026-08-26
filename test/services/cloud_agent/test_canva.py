@@ -211,6 +211,28 @@ class FakeAccessibleZeroNarrationPage:
         return _NarrationStartSliders()
 
 
+class _EventuallyEnabledDownloadButton:
+    def __init__(self):
+        self.states = [False, True]
+
+    def count(self):
+        return 1
+
+    def is_enabled(self):
+        return self.states.pop(0) if self.states else True
+
+
+class FakeEventuallyEnabledDownloadPage:
+    """Canva keeps final Download disabled while captions are still settling."""
+
+    def __init__(self):
+        self.download = _EventuallyEnabledDownloadButton()
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) == ("button", "Download", True)
+        return self.download
+
+
 class _ScopedAudioCard:
     def __init__(self, page):
         self.page = page
@@ -1031,6 +1053,16 @@ def test_canva_accepts_accessible_zero_seconds_for_narration_position():
     client, _ = _assembly_client(FakeCanvaEditorPage())
 
     client._position_narration_at_zero(FakeAccessibleZeroNarrationPage())
+
+
+def test_canva_waits_for_final_download_to_become_enabled_after_captions():
+    """Catches clicking the final Download while Canva still disables it for captions."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 0
+
+    control = client._wait_for_final_download_ready(FakeEventuallyEnabledDownloadPage())
+
+    assert control.is_enabled() is True
 
 
 def test_canva_job_session_allows_bounded_time_for_new_design_editor_navigation(
