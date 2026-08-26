@@ -1487,6 +1487,12 @@ def start(
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
 ):
     """执行任务流水线，并确保未预期异常也会转换成可查询的失败状态。"""
+    if stop_at == "video":
+        return _mark_task_failed(
+            task_id,
+            "preflight",
+            "LEGACY_VIDEO_GENERATION_RETIRED",
+        )
     try:
         return _run_pipeline(
             task_id,
