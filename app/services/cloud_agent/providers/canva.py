@@ -273,7 +273,7 @@ class CanvaAssemblyClient:
             raise CanvaUIVerificationError("Canva named uploaded audio could not be cleaned to zero")
 
     def _open_uploaded_videos(self, page: Any) -> Any | None:
-        page.get_by_role("tab", name="Uploads", exact=True).click()
+        self._activate_uploads(page)
         video_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-videos"]:visible')
         deadline = time.monotonic() + self._WORKSPACE_TAB_HYDRATION_SECONDS
         while video_tab.count() == 0:
@@ -289,7 +289,7 @@ class CanvaAssemblyClient:
         return page.locator(f'[role="tabpanel"][id="{panel_id}"]')
 
     def _open_uploaded_audio(self, page: Any) -> Any | None:
-        page.get_by_role("tab", name="Uploads", exact=True).click()
+        self._activate_uploads(page)
         audio_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-audio"]:visible')
         deadline = time.monotonic() + self._WORKSPACE_TAB_HYDRATION_SECONDS
         while audio_tab.count() == 0:
@@ -303,6 +303,11 @@ class CanvaAssemblyClient:
         if not panel_id:
             raise CanvaUIVerificationError("Canva uploaded Audio panel cannot be found")
         return page.locator(f'[role="tabpanel"][id="{panel_id}"]')
+
+    @staticmethod
+    def _activate_uploads(page: Any) -> None:
+        page.get_by_role("tab", name="Elements", exact=True).click()
+        page.get_by_role("tab", name="Uploads", exact=True).click()
 
     def _delete_uploaded_video_card(self, page: Any, cards: Any) -> None:
         card, card_box = self._first_visible_box(cards)
@@ -527,8 +532,7 @@ class CanvaAssemblyClient:
         )
 
     def _upload_inventory(self, page: Any, audio_name: str) -> tuple[int, int] | None:
-        page.get_by_role("tab", name="Elements", exact=True).click()
-        page.get_by_role("tab", name="Uploads", exact=True).click()
+        self._activate_uploads(page)
         video_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-videos"]:visible')
         audio_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-audio"]:visible')
         photos_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-photos"]:visible')

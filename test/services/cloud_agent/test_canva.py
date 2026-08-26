@@ -295,7 +295,10 @@ class FakeHydratedNoVideosTabPage:
     """Canva's live zero state: Uploads is ready, but the Videos subtype is absent."""
 
     def get_by_role(self, role, *, name, exact):
-        assert (role, name, exact) == ("tab", "Uploads", True)
+        assert (role, name, exact) in {
+            ("tab", "Elements", True),
+            ("tab", "Uploads", True),
+        }
         return _ClickOnly()
 
     def locator(self, _selector):
@@ -464,7 +467,10 @@ class FakeSequentialUploadPage:
         self.upload_input = _SequentialUploadInput()
 
     def get_by_role(self, role, *, name, exact):
-        assert (role, name, exact) == ("tab", "Uploads", True)
+        assert (role, name, exact) in {
+            ("tab", "Elements", True),
+            ("tab", "Uploads", True),
+        }
         return _ClickOnly()
 
     def locator(self, selector):
@@ -663,7 +669,10 @@ class FakeLateAudioTabPage:
         self.audio_panel = _UploadPanel(1)
 
     def get_by_role(self, role, *, name, exact):
-        assert (role, name, exact) == ("tab", "Uploads", True)
+        assert (role, name, exact) in {
+            ("tab", "Elements", True),
+            ("tab", "Uploads", True),
+        }
         return _ClickOnly()
 
     def locator(self, selector):
@@ -750,6 +759,12 @@ class _SidebarTab:
 
 
 class _ReactivatedAudioUploadTab(_DelayedAudioUploadTab):
+    def count(self):
+        if self.page.sidebar_clicks == ["Elements", "Uploads"]:
+            self.page.tabs_ready = True
+            return 1
+        return 0
+
     def wait_for(self, *, state, timeout):
         assert self.page.sidebar_clicks == ["Elements", "Uploads"]
         super().wait_for(state=state, timeout=timeout)
@@ -1058,6 +1073,21 @@ def test_canva_open_uploaded_videos_uses_visible_tab_when_hidden_stale_tab_remai
 
     assert panel is page.video_panel
     assert page.visible_video_tab.clicked is True
+
+
+def test_canva_open_uploaded_audio_reactivates_uploads_before_reading_media_tabs(
+    monkeypatch,
+):
+    """Catches skipping stale-audio cleanup when Canva leaves its Uploads sidebar closed."""
+    page = FakeReactivatingUploadInventoryPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 0.0
+    clock = iter((0.0, 31.0))
+    monkeypatch.setattr(canva.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(canva.time, "sleep", lambda _seconds: None)
+
+    assert client._open_uploaded_audio(page) is page.audio_panel
+    assert page.sidebar_clicks == ["Elements", "Uploads"]
 
 
 def test_canva_waits_for_card_menu_hydration_before_verifying_move_to_trash():
