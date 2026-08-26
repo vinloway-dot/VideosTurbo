@@ -63,6 +63,9 @@ Video's `Move to Trash` action.
 
 If the active Uploads surface has no Videos or Audio category after its normal
 hydration, that category is a verified zero-media state and assembly continues.
+In particular, after the six-video batch is accepted Canva may keep Videos while
+hiding the empty Audio category; upload inventory must use `(video_count, 0)` as
+the narration-upload baseline instead of waiting for an Audio tab.
 After each delete, a fresh live-panel count is the primary proof. If it has not
 decreased within the bounded wait, reload the editor exactly once and re-check;
 only then may the cleanup fail closed. The workflow performs this managed-media

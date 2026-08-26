@@ -69,6 +69,9 @@ Within the active job design and same persistent context:
 1. Open Uploads -> Audio using the visible tab and its `aria-controls` panel.
    If the Audio category is absent after normal hydration, its managed-card count
    is zero and assembly continues.
+   When Videos is present but Audio is absent after the six-video upload, use
+   `(video_count, 0)` as the upload baseline and submit canonical narration;
+   do not wait for a category Canva intentionally hides while empty.
 2. Before upload, delete every stale exact `Apply audio: voice.mp3` card using
    the card-scoped generic `Show details` overlay and the popup action
    `button[aria-label="Delete"]`. Wait for the popup action, verify each live

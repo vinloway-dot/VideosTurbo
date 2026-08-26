@@ -726,6 +726,20 @@ class FakeNoMediaCategoryUploadInventoryPage(FakeZeroVideoUploadInventoryPage):
         return super().locator(selector)
 
 
+class FakeVideoOnlyUploadInventoryPage(FakeHydratingUploadInventoryPage):
+    """Canva after video upload: Videos is present, while empty Audio is absent."""
+
+    def __init__(self):
+        super().__init__()
+        self.tabs_ready = True
+
+    def locator(self, selector):
+        selector = selector.removesuffix(":visible")
+        if selector.endswith('-tabpanel-audio"]'):
+            return _NoVideoUploadTab()
+        return super().locator(selector)
+
+
 class _DelayedAudioUploadTab(_HydratingUploadTab):
     def __init__(self, page):
         super().__init__(page, "audio")
@@ -1560,6 +1574,14 @@ def test_canva_upload_inventory_defers_baseline_when_fresh_uploads_has_no_media_
     client, _ = _assembly_client(FakeCanvaEditorPage())
 
     assert client._upload_inventory(page, "voice.mp3") is None
+
+
+def test_canva_upload_inventory_treats_missing_audio_tab_as_zero_after_video_upload():
+    """Catches waiting for an Audio tab Canva hides until narration is uploaded."""
+    page = FakeVideoOnlyUploadInventoryPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    assert client._upload_inventory(page, "voice.mp3") == (6, 0)
 
 
 def test_canva_upload_inventory_waits_for_audio_tab_before_selecting_it():

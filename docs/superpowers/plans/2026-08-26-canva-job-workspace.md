@@ -33,6 +33,10 @@ zero state for that category. After a delete whose fresh panel count has not
 decreased, reload once and inspect the fresh panel before failing. The existing
 post-`FINAL_VALIDATED` cleanup is one managed Videos-and-Audio pass.
 
+When the video batch is visible but Audio is absent, the upload baseline is
+`(video_count, 0)` and canonical narration upload proceeds without waiting for
+the currently empty Audio category to exist.
+
 ---
 
 ### Task 1: Durable CloudJob workspace fields

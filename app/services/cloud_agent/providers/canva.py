@@ -600,6 +600,16 @@ class CanvaAssemblyClient:
         photos_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-photos"]:visible')
         if video_tab.count() == 0 and audio_tab.count() == 0 and photos_tab.count() == 1:
             return None
+        if audio_tab.count() == 0 and video_tab.count() == 1:
+            video_tab.click()
+            video_panel_id = video_tab.get_attribute("aria-controls")
+            if not video_panel_id:
+                raise CanvaUIVerificationError("Canva upload media panels cannot be found")
+            video_panel = page.locator(f'[role="tabpanel"][id="{video_panel_id}"]')
+            return (
+                video_panel.get_by_text(re.compile(r"^\d+(?:\.\d+)?s$")).count(),
+                0,
+            )
         ready_timeout = int(self.export_timeout_seconds * 1000)
         try:
             audio_tab.wait_for(state="visible", timeout=ready_timeout)
