@@ -65,7 +65,10 @@ class FakeCanvaEditorPage:
     def upload_media(self, paths):
         self.actions.append(("upload", tuple(Path(path).name for path in paths)))
 
-    def clean_uploaded_videos(self):
+    def clean_uploaded_videos(self, _names=()):
+        return None
+
+    def clean_uploaded_audio(self, _name):
         return None
 
     def clear_video_timeline(self):
@@ -130,8 +133,8 @@ class FakePreparedCanvaEditorPage(FakeCanvaEditorPage):
         self.timeline_video_count = 0
         self.add_succeeds = add_succeeds
 
-    def clean_uploaded_videos(self):
-        self.actions.append(("clean_uploaded_videos",))
+    def clean_uploaded_videos(self, names=()):
+        self.actions.append(("clean_uploaded_videos", tuple(names)))
 
     def clear_video_timeline(self):
         self.actions.append(("clear_video_timeline",))
@@ -145,6 +148,16 @@ class FakePreparedCanvaEditorPage(FakeCanvaEditorPage):
 
     def timeline_video_count_value(self):
         return self.timeline_video_count
+
+
+class FakeManagedMediaCleanupPage(FakePreparedCanvaEditorPage):
+    """Boundary double for cleanup restricted to this CloudJob's media names."""
+
+    def clean_uploaded_videos(self, names=None):
+        self.actions.append(("clean_uploaded_videos", tuple(names or ())))
+
+    def clean_uploaded_audio(self, name=None):
+        self.actions.append(("clean_uploaded_audio", name))
 
 
 class FakeNoVideosTabPage:
@@ -222,6 +235,11 @@ class _CleanupPanel:
 
     def locator(self, selector):
         assert selector == '[role="button"][aria-label]'
+        return self.cards
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, exact) == ("button", True)
+        assert name == "clip_01.mp4"
         return self.cards
 
 
@@ -645,7 +663,17 @@ def test_canva_assembly_prepares_clean_workspace_before_upload_and_adds_clips_in
     actions = page.actions
     assert actions[:9] == [
         ("goto", "https://www.canva.com/design/demo/edit", {"wait_until": "domcontentloaded"}),
-        ("clean_uploaded_videos",),
+        (
+            "clean_uploaded_videos",
+            (
+                "clip_01.mp4",
+                "clip_02.mp4",
+                "clip_03.mp4",
+                "clip_04.mp4",
+                "clip_05.mp4",
+                "clip_06.mp4",
+            ),
+        ),
         ("clear_video_timeline",),
         ("upload", ("clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4", "voice.mp3")),
         ("add_uploaded_clip", "clip_01.mp4", 0, 1),
@@ -655,6 +683,45 @@ def test_canva_assembly_prepares_clean_workspace_before_upload_and_adds_clips_in
         ("add_uploaded_clip", "clip_05.mp4", 4, 5),
     ]
     assert actions[9] == ("add_uploaded_clip", "clip_06.mp4", 5, 6)
+
+
+def test_canva_assembly_cleans_only_current_job_video_and_audio_names_before_upload(
+    tmp_path,
+):
+    """Catches account-wide cleanup and stale narration surviving into a new job."""
+    page = FakeManagedMediaCleanupPage()
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+
+    client.assemble_and_export(_assembly_job(), clips, audio, output)
+
+    assert page.actions[1:5] == [
+        (
+            "clean_uploaded_videos",
+            (
+                "clip_01.mp4",
+                "clip_02.mp4",
+                "clip_03.mp4",
+                "clip_04.mp4",
+                "clip_05.mp4",
+                "clip_06.mp4",
+            ),
+        ),
+        ("clean_uploaded_audio", "voice.mp3"),
+        ("clear_video_timeline",),
+        (
+            "upload",
+            (
+                "clip_01.mp4",
+                "clip_02.mp4",
+                "clip_03.mp4",
+                "clip_04.mp4",
+                "clip_05.mp4",
+                "clip_06.mp4",
+                "voice.mp3",
+            ),
+        ),
+    ]
 
 
 def test_canva_clean_uploaded_videos_accepts_missing_videos_tab_as_verified_zero_state():
@@ -695,7 +762,7 @@ def test_canva_cleanup_reopens_transiently_missing_videos_tab_after_a_delete(mon
 
     monkeypatch.setattr(client, "_delete_uploaded_video_card", delete_one)
 
-    client._clean_uploaded_videos(object())
+    client._clean_uploaded_videos(object(), ("clip_01.mp4",))
 
     assert deleted == [2, 1]
 

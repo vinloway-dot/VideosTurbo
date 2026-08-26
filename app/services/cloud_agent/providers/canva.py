@@ -141,11 +141,13 @@ class CanvaAssemblyClient:
         if target_seconds <= 0:
             raise ValueError("Canva target duration must be positive")
 
-        self._clean_uploaded_videos(page)
+        clip_names = [clip.name for clip in clip_paths]
+        self._clean_uploaded_videos(page, clip_names)
+        self._clean_uploaded_audio(page, audio_path.name)
         self._clear_video_timeline(page)
         self._upload_media(page, [*clip_paths, audio_path])
-        self._add_uploaded_clips(page, [clip.name for clip in clip_paths])
-        self._order_clips(page, [clip.name for clip in clip_paths])
+        self._add_uploaded_clips(page, clip_names)
+        self._order_clips(page, clip_names)
         if speed < 1.0:
             for index in range(1, 7):
                 self._set_and_verify_playback(page, index, speed)
@@ -184,35 +186,66 @@ class CanvaAssemblyClient:
             session.clean_workspace(job_id)
 
     def _clean_open_page(self, page: Any) -> None:
-        self._clean_uploaded_videos(page)
+        self._clean_uploaded_videos(
+            page,
+            tuple(f"clip_{index:02d}.mp4" for index in range(1, 7)),
+        )
+        self._clean_uploaded_audio(page, "voice.mp3")
 
-    def _clean_uploaded_videos(self, page: Any) -> None:
-        """Delete every current video upload using Canva's card-scoped trash menu."""
+    def _clean_uploaded_videos(self, page: Any, names: list[str] | tuple[str, ...] = ()) -> None:
+        """Delete only this job's named video uploads using card-scoped trash menus."""
         if getattr(page, "no_uploaded_videos_tab", False):
             return
         if hasattr(page, "clean_uploaded_videos"):
-            page.clean_uploaded_videos()
+            page.clean_uploaded_videos(names)
             return
 
         panel = self._open_uploaded_videos(page)
         if panel is None:
             return
-        while True:
-            cards = panel.locator('[role="button"][aria-label]')
-            if cards.count() == 0:
-                break
-            self._delete_uploaded_video_card(page, cards)
-            panel = self._open_uploaded_videos(page)
-            if panel is None:
-                # Canva briefly unmounts the Videos sub-tab after a card is
-                # moved to trash. Re-open it once before accepting a zero state.
+        for name in names:
+            while True:
+                cards = panel.get_by_role("button", name=name, exact=True)
+                if cards.count() == 0:
+                    break
+                self._delete_uploaded_video_card(page, cards)
                 panel = self._open_uploaded_videos(page)
                 if panel is None:
-                    return
+                    panel = self._open_uploaded_videos(page)
+                    if panel is None:
+                        return
 
         panel = self._open_uploaded_videos(page)
-        if panel is not None and panel.locator('[role="button"][aria-label]').count() != 0:
-            raise CanvaUIVerificationError("Canva uploaded videos could not be cleaned to zero")
+        if panel is not None and any(
+            panel.get_by_role("button", name=name, exact=True).count() != 0
+            for name in names
+        ):
+            raise CanvaUIVerificationError("Canva named uploaded videos could not be cleaned to zero")
+
+    def _clean_uploaded_audio(self, page: Any, audio_name: str) -> None:
+        """Delete only stale instances of this job's canonical narration upload."""
+        if hasattr(page, "clean_uploaded_audio"):
+            page.clean_uploaded_audio(audio_name)
+            return
+
+        panel = self._open_uploaded_audio(page)
+        if panel is None:
+            return
+        while True:
+            cards = panel.get_by_role("button", name=f"Apply audio: {audio_name}", exact=True)
+            if cards.count() == 0:
+                break
+            self._delete_uploaded_audio_card(page, cards, audio_name)
+            panel = self._open_uploaded_audio(page)
+            if panel is None:
+                return
+
+        panel = self._open_uploaded_audio(page)
+        if (
+            panel is not None
+            and panel.get_by_role("button", name=f"Apply audio: {audio_name}", exact=True).count() != 0
+        ):
+            raise CanvaUIVerificationError("Canva named uploaded audio could not be cleaned to zero")
 
     def _open_uploaded_videos(self, page: Any) -> Any | None:
         page.get_by_role("tab", name="Uploads", exact=True).click()
@@ -228,6 +261,22 @@ class CanvaAssemblyClient:
         panel_id = video_tab.get_attribute("aria-controls")
         if not panel_id:
             raise CanvaUIVerificationError("Canva uploaded Videos panel cannot be found")
+        return page.locator(f'[role="tabpanel"][id="{panel_id}"]')
+
+    def _open_uploaded_audio(self, page: Any) -> Any | None:
+        page.get_by_role("tab", name="Uploads", exact=True).click()
+        audio_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-audio"]:visible')
+        deadline = time.monotonic() + self._WORKSPACE_TAB_HYDRATION_SECONDS
+        while audio_tab.count() == 0:
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(self.poll_seconds)
+        if audio_tab.count() != 1:
+            raise CanvaUIVerificationError("Canva uploaded Audio tab is ambiguous")
+        audio_tab.click()
+        panel_id = audio_tab.get_attribute("aria-controls")
+        if not panel_id:
+            raise CanvaUIVerificationError("Canva uploaded Audio panel cannot be found")
         return page.locator(f'[role="tabpanel"][id="{panel_id}"]')
 
     def _delete_uploaded_video_card(self, page: Any, cards: Any) -> None:
@@ -257,6 +306,35 @@ class CanvaAssemblyClient:
         while cards.count() >= before:
             if time.monotonic() >= deadline:
                 raise CanvaUIVerificationError("Canva video deletion postcondition cannot be verified")
+            time.sleep(self.poll_seconds)
+
+    def _delete_uploaded_audio_card(self, page: Any, cards: Any, audio_name: str) -> None:
+        card, card_box = self._first_visible_box(cards)
+        if card is None or card_box is None:
+            raise CanvaUIVerificationError("Canva uploaded audio card cannot be found")
+        page.mouse.move(card_box["x"] + card_box["width"] / 2, card_box["y"] + card_box["height"] / 2)
+        time.sleep(self.poll_seconds)
+        overlay = self._card_details_overlay(page, audio_name, card_box)
+        if overlay is None:
+            raise CanvaUIVerificationError("Canva audio-card details overlay cannot be verified")
+        _, overlay_box = overlay
+        page.mouse.click(
+            overlay_box["x"] + overlay_box["width"] / 2,
+            overlay_box["y"] + overlay_box["height"] / 2,
+        )
+        delete = page.get_by_role("button", name="Delete", exact=True)
+        delete_box = self._first_visible_box(delete)[1]
+        if delete.count() != 1 or delete_box is None or not self._is_hit_testable(page, delete_box):
+            raise CanvaUIVerificationError("Canva audio Delete action cannot be verified")
+        before = cards.count()
+        page.mouse.click(
+            delete_box["x"] + delete_box["width"] / 2,
+            delete_box["y"] + delete_box["height"] / 2,
+        )
+        deadline = time.monotonic() + self.export_timeout_seconds
+        while cards.count() >= before:
+            if time.monotonic() >= deadline:
+                raise CanvaUIVerificationError("Canva audio deletion postcondition cannot be verified")
             time.sleep(self.poll_seconds)
 
     @staticmethod
