@@ -2013,6 +2013,25 @@ def test_google_flow_agent_prompt_uses_observable_composer_when_locale_has_no_pr
     assert ("click", "generate") in page.actions
 
 
+def test_settled_editor_does_not_require_a_hidden_agent_composer_before_activation(
+    monkeypatch,
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        agent_pressed=False,
+    )
+    client, _ = _client(page)
+    monkeypatch.setattr(
+        client,
+        "_observable_composer",
+        lambda _agent: pytest.fail(
+            "editor readiness must not require an Agent composer before activation"
+        ),
+    )
+
+    assert client._is_editor_actionable(page) is True
+
+
 def test_ensure_agent_active_clicks_an_inactive_toggle_once_and_returns_composer():
     page = FakePage(
         progress_html=["<div>Generation progress 6 / 6</div>"],

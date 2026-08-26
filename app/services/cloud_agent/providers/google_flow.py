@@ -580,10 +580,7 @@ class GoogleFlowClient:
                 return False
             if _FATAL_APPLICATION_ERROR_RE.search(page.content()):
                 return False
-            agent = self._agent_control(page)
-            composer = self._observable_composer(agent)
-            if not (composer.count() == 1 and composer.is_visible()):
-                return False
+            self._agent_control(page)
             return (
                 self._media_inventory_is_observable(page)
                 and page.locator('[aria-busy="true"]:visible').count() == 0
