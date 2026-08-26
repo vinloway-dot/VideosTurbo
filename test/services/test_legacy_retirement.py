@@ -1,3 +1,4 @@
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -34,3 +35,25 @@ def test_task_pipeline_rejects_retired_video_stage_without_running_local_rendere
         "retirement-task", "preflight", "LEGACY_VIDEO_GENERATION_RETIRED"
     )
     run_pipeline.assert_not_called()
+
+
+def test_legacy_video_material_list_endpoint_is_retired():
+    request = SimpleNamespace(headers={"x-task-id": "retirement-materials"})
+
+    with pytest.raises(HttpException) as raised:
+        video_controller.get_video_materials_list(request)
+
+    assert raised.value.status_code == 410
+    assert raised.value.message == "LEGACY_VIDEO_GENERATION_RETIRED"
+
+
+def test_legacy_video_material_upload_endpoint_is_retired(tmp_path):
+    request = SimpleNamespace(headers={"x-task-id": "retirement-materials"})
+    upload = SimpleNamespace(filename="clip.mp4", file=BytesIO(b"video"))
+
+    with patch.object(video_controller.utils, "storage_dir", return_value=str(tmp_path)):
+        with pytest.raises(HttpException) as raised:
+            video_controller.upload_video_material_file(request, upload)
+
+    assert raised.value.status_code == 410
+    assert raised.value.message == "LEGACY_VIDEO_GENERATION_RETIRED"

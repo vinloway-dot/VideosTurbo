@@ -1,4 +1,3 @@
-import glob
 import os
 import pathlib
 import shutil
@@ -387,28 +386,11 @@ def upload_bgm_file(request: Request, file: UploadFile = File(...)):
     "/video_materials", response_model=VideoMaterialRetrieveResponse, summary="Retrieve local video materials"
 )
 def get_video_materials_list(request: Request):
-    allowed_suffixes = ("mp4", "mov", "avi", "flv", "mkv", "jpg", "jpeg", "png")
-    local_videos_dir = utils.storage_dir("local_videos", create=True)
-    files = []
-    for suffix in allowed_suffixes:
-        files.extend(glob.glob(os.path.join(local_videos_dir, f"*.{suffix}")))
-    # 文件系统枚举顺序不稳定，直接返回会导致“顺序拼接”在不同机器或不同
-    # 时刻表现不一致。这里统一按文件名排序，至少保证服务端返回顺序可预测。
-    files.sort(key=lambda file_path: os.path.basename(file_path).lower())
-    video_materials_list = []
-    for file in files:
-        filename = os.path.basename(file)
-        video_materials_list.append(
-            {
-                "name": filename,
-                "size": os.path.getsize(file),
-                # 与 BGM 一样，只返回文件名；创建任务时再在 local_videos
-                # 白名单目录内解析，避免 API 泄露宿主机绝对路径。
-                "file": filename,
-            }
-        )
-    response = {"files": video_materials_list}
-    return utils.get_response(200, response)
+    raise HttpException(
+        task_id=base.get_task_id(request),
+        status_code=410,
+        message="LEGACY_VIDEO_GENERATION_RETIRED",
+    )
 
 
 @router.post(
@@ -417,26 +399,11 @@ def get_video_materials_list(request: Request):
     summary="Upload the video material file to the local videos directory",
 )
 def upload_video_material_file(request: Request, file: UploadFile = File(...)):
-    request_id = base.get_task_id(request)
-    safe_filename = _sanitize_upload_filename(file.filename, request_id)
-    # check file ext
-    allowed_suffixes = ("mp4", "mov", "avi", "flv", "mkv", "jpg", "jpeg", "png")
-    suffix = pathlib.Path(safe_filename).suffix.lower().lstrip(".")
-    # 按完整扩展名校验，既兼容 .MOV 这类大写后缀，也避免 photojpg 这种没有
-    # 点号的文件名因为 endswith("jpg") 被误当成合法图片。
-    if suffix in allowed_suffixes:
-        local_videos_dir = utils.storage_dir("local_videos", create=True)
-        save_path = os.path.join(local_videos_dir, safe_filename)
-        # save file
-        with open(save_path, "wb+") as buffer:
-            # If the file already exists, it will be overwritten
-            file.file.seek(0)
-            buffer.write(file.file.read())
-        response = {"file": safe_filename}
-        return utils.get_response(200, response)
-
+    del file
     raise HttpException(
-        "", status_code=400, message=f"{request_id}: Only files with extensions {', '.join(allowed_suffixes)} can be uploaded"
+        task_id=base.get_task_id(request),
+        status_code=410,
+        message="LEGACY_VIDEO_GENERATION_RETIRED",
     )
 
 @router.get("/stream/{file_path:path}")

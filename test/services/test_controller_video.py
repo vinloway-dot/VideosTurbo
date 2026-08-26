@@ -3,7 +3,6 @@ import os
 import shutil
 import tempfile
 import unittest
-from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -373,35 +372,6 @@ class TestVideoControllerFiles(unittest.TestCase):
         if range_header is not None:
             headers["Range"] = range_header
         return SimpleNamespace(headers=headers)
-
-    def test_upload_video_material_validates_complete_extension(self):
-        """大写合法扩展名应接受，无点号伪扩展名应拒绝。"""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            upload = SimpleNamespace(
-                filename=r"C:\videos\clip.MOV",
-                file=BytesIO(b"video"),
-            )
-            with patch.object(
-                video_controller.utils,
-                "storage_dir",
-                return_value=temp_dir,
-            ):
-                response = video_controller.upload_video_material_file(
-                    self._request(), upload
-                )
-
-            self.assertEqual(response["data"]["file"], "clip.MOV")
-            self.assertEqual(Path(temp_dir, "clip.MOV").read_bytes(), b"video")
-
-            invalid_upload = SimpleNamespace(
-                filename="photojpg",
-                file=BytesIO(b"not-an-image"),
-            )
-            with self.assertRaises(HttpException) as raised:
-                video_controller.upload_video_material_file(
-                    self._request(), invalid_upload
-                )
-            self.assertEqual(raised.exception.status_code, 400)
 
     def test_stream_video_returns_requested_bytes(self):
         """Range 响应的正文和 Content-Range 必须与计算出的区间一致。"""
