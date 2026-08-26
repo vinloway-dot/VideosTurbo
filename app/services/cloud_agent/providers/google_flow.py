@@ -51,6 +51,10 @@ _CARD_DELETE_NAME_RE = re.compile(
     r"(?:delete\s+)?(?:move to trash|ย้ายลงถังขยะ)",
     re.IGNORECASE,
 )
+_PROJECT_BACK_NAME_RE = re.compile(
+    r"(?:back to project|กลับไปที่โปรเจ็กต์)",
+    re.IGNORECASE,
+)
 _EMPTY_MEDIA_NAME_RE = re.compile(
     r"(?:start creating or add media|เริ่มสร้างหรือวางสื่อ)",
     re.IGNORECASE,
@@ -166,10 +170,22 @@ class FlowWorkspaceRun:
                 if confirm.count() != 1:
                     raise FlowWorkspaceVerificationError(
                         "Google Flow delete confirmation could not be verified"
-                )
+                    )
                 confirm.click()
-            if self.client._media_card_count(self.page) < previous_count:
-                return
+            if self.client._media_inventory_is_observable(self.page):
+                if self.client._media_card_count(self.page) < previous_count:
+                    return
+            else:
+                back_to_project = self.page.get_by_role(
+                    "button",
+                    name=_PROJECT_BACK_NAME_RE,
+                )
+                if (
+                    back_to_project.count() == 1
+                    and back_to_project.is_visible()
+                    and back_to_project.is_enabled()
+                ):
+                    back_to_project.click()
             if time.monotonic() >= deadline:
                 raise FlowWorkspaceVerificationError(
                     "Google Flow stale product clip removal could not be verified"

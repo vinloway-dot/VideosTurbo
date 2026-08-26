@@ -160,6 +160,12 @@ class FakeLocator:
         if self.kind == "media_card":
             self.page.active_card_index = self.index
             self.page.actions.append(("click", "media_card", self.index))
+            if self.page.card_click_opens_editor:
+                self.page.in_clip_editor = True
+            return
+        if self.kind == "back_to_project":
+            self.page.in_clip_editor = False
+            self.page.actions.append(("click", "back_to_project"))
             return
         if self.kind == "card_delete":
             self.page.actions.append(("click", "card_delete"))
@@ -227,6 +233,8 @@ class FakeLocator:
             return self.page.download_count
         if self.kind == "launch":
             return int(self.page.landing)
+        if self.kind == "back_to_project":
+            return int(self.page.in_clip_editor)
         if self.kind == "agent_role":
             return int(not self.page.landing and self.page.agent_available)
         if self.kind == "agent":
@@ -240,6 +248,8 @@ class FakeLocator:
                 else self.page.checkbox_count
             )
         if self.kind == "media_cards":
+            if self.page.in_clip_editor:
+                return 0
             if self.page.has_completed_video_polls:
                 return len(self.page.active_completed_video_poll)
             if self.page.card_count_sequence:
@@ -293,6 +303,8 @@ class FakeLocator:
         if self.kind == "media_control":
             return int(self.page.media_control_available)
         if self.kind == "media_list":
+            if self.page.in_clip_editor:
+                return 0
             if self.page.media_list_sequence:
                 self.page.last_media_list_available = self.page.media_list_sequence.pop(0)
             return int(self.page.last_media_list_available)
@@ -452,6 +464,7 @@ class FakePage:
         checkbox_count=None,
         card_delete_available=True,
         card_delete_removes=True,
+        card_click_opens_editor=False,
     ):
         self.url = "about:blank"
         self.project_progress_html = list(progress_html)
@@ -527,6 +540,8 @@ class FakePage:
         self.checkbox_count = checkbox_count
         self.card_delete_available = card_delete_available
         self.card_delete_removes = card_delete_removes
+        self.card_click_opens_editor = card_click_opens_editor
+        self.in_clip_editor = False
         self.active_card_index = None
         self.pending_card_delete_index = None
         self.generate_clicked = False
@@ -609,6 +624,10 @@ class FakePage:
             return FakeLocator(self, "launch")
         if role == "button" and "download product clips" in pattern:
             return FakeLocator(self, "bulk_download")
+        if role == "button" and (
+            "back to project" in pattern or "กลับไปที่โปรเจ็กต์" in pattern
+        ):
+            return FakeLocator(self, "back_to_project")
         if role == "button" and "agent" in pattern:
             return FakeLocator(self, "agent_role")
         if role == "button" and ("all media" in pattern or "สื่อทั้งหมด" in pattern):
@@ -1313,6 +1332,23 @@ def test_flow_workspace_preclean_deletes_card_inventory_when_checkboxes_are_abse
     assert page.clip_names == []
     assert page.actions.count(("click", "card_delete")) == 2
     assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+
+
+def test_flow_workspace_card_delete_returns_to_project_before_verifying_removal():
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        clip_names=["stale-a", "stale-b"],
+        checkbox_count=0,
+        card_click_opens_editor=True,
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=0.1)
+
+    with client.acquire_workspace(_job()) as workspace:
+        workspace._delete_one_current_media_card()
+
+    assert page.in_clip_editor is False
+    assert client._media_card_count(page) == 1
+    assert ("click", "back_to_project") in page.actions
 
 
 def test_flow_workspace_preclean_fails_closed_when_card_delete_is_unavailable():
