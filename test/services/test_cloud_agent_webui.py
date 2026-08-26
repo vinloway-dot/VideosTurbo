@@ -1,5 +1,9 @@
 from pathlib import Path
 
+import requests
+
+from webui import cloud_agent
+
 
 UI_SOURCE = Path("webui/cloud_agent.py")
 MAIN_SOURCE = Path("webui/Main.py")
@@ -62,3 +66,85 @@ def test_main_source_has_no_retired_classic_video_generation_dependencies():
         "six_clip_video_aspect_select",
     ):
         assert retired_symbol not in source
+
+
+def test_cloud_agent_api_allows_a_canva_readiness_timeout_longer_than_the_provider_wait(
+    monkeypatch,
+):
+    recorded = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": {"status": "READY"}}
+
+    def request(*_args, **kwargs):
+        recorded.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(cloud_agent.requests, "request", request)
+
+    assert cloud_agent._api(
+        "POST", "sessions/canva/check", timeout=45
+    ) == {"status": "READY"}
+    assert recorded["timeout"] >= 30
+
+
+def test_canva_check_timeout_is_shown_as_a_safe_webui_error(monkeypatch):
+    class Column:
+        def __init__(self, pressed_key=""):
+            self.pressed_key = pressed_key
+
+        def button(self, _label, *, key):
+            return key == self.pressed_key
+
+        def link_button(self, *_args, **_kwargs):
+            raise AssertionError("Open Browser must not run during a Canva check")
+
+    class Streamlit:
+        def __init__(self):
+            self.errors = []
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def text_input(self, _label, **kwargs):
+            return kwargs.get("value", "")
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def text_area(self, *_args, **_kwargs):
+            return ""
+
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def columns(self, _count):
+            return [Column(), Column("canva-check"), Column(), Column()]
+
+        def json(self, *_args, **_kwargs):
+            raise AssertionError("Canva timeout must not render a success result")
+
+        def error(self, message):
+            self.errors.append(message)
+
+        def caption(self, *_args, **_kwargs):
+            return None
+
+        def info(self, *_args, **_kwargs):
+            return None
+
+    fake_streamlit = Streamlit()
+
+    def request(*_args, **_kwargs):
+        raise requests.ReadTimeout("Canva took longer than the UI request budget")
+
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(cloud_agent.requests, "request", request)
+
+    cloud_agent.render_cloud_agent_panel()
+
+    assert fake_streamlit.errors == ["Cloud Agent request could not be completed."]

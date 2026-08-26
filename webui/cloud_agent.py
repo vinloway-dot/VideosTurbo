@@ -5,10 +5,13 @@ import streamlit as st
 
 
 API_PREFIX = "http://127.0.0.1:8080/api/v1/cloud-agent/"
+API_TIMEOUT_SECONDS = 15
+SESSION_CHECK_TIMEOUT_SECONDS = 45
 
 
 def _api(method, path, **kwargs):
-    response = requests.request(method, API_PREFIX + path, timeout=15, **kwargs)
+    timeout = kwargs.pop("timeout", API_TIMEOUT_SECONDS)
+    response = requests.request(method, API_PREFIX + path, timeout=timeout, **kwargs)
     response.raise_for_status()
     return response.json().get("data")
 
@@ -40,7 +43,16 @@ def render_cloud_agent_panel():
     controls = st.columns(4)
     for service, column in (("google-flow", controls[0]), ("canva", controls[1])):
         if column.button("Google Flow" if service == "google-flow" else "Canva", key=f"{service}-check"):
-            st.json(_api("POST", f"sessions/{service}/check"))
+            try:
+                st.json(
+                    _api(
+                        "POST",
+                        f"sessions/{service}/check",
+                        timeout=SESSION_CHECK_TIMEOUT_SECONDS,
+                    )
+                )
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
         if column.button("Open Browser", key=f"{service}-open"):
             st.link_button("Open Browser", _api("GET", f"sessions/{service}/open-browser")["url"])
     if controls[2].button("Start", key="cloud_agent_start"):
