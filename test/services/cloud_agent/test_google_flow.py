@@ -163,6 +163,20 @@ class FakeLocator:
             if self.page.card_click_opens_editor:
                 self.page.in_clip_editor = True
             return
+        if self.kind == "card_menu":
+            self.page.active_card_index = self.index
+            self.page.card_menu_open = True
+            self.page.actions.append(("click", "card_menu", self.index))
+            return
+        if self.kind == "card_menu_delete":
+            self.page.actions.append(("click", "card_menu_delete"))
+            if self.page.delete_requires_confirmation:
+                self.page.confirmation_pending = True
+                self.page.pending_card_delete_index = self.page.active_card_index
+            elif self.page.card_delete_removes:
+                self.page._remove_active_card()
+            self.page.card_menu_open = False
+            return
         if self.kind == "back_to_project":
             self.page.in_clip_editor = False
             self.page.actions.append(("click", "back_to_project"))
@@ -221,6 +235,11 @@ class FakeLocator:
         self.page.selected_clip_indexes.add(self.index)
         self.page.actions.append(("check", self.index))
 
+    def hover(self):
+        assert self.kind == "media_card"
+        self.page.hovered_card_index = self.index
+        self.page.actions.append(("hover", "media_card", self.index))
+
     def fill(self, value):
         self.page.actions.append(("fill", self.kind, value))
         self.page.fill_agent_pressed_states.append(self.page.agent_pressed)
@@ -263,6 +282,10 @@ class FakeLocator:
                 else len(self.page.clip_names)
             )
             return int(self.index is not None and self.index < card_count)
+        if self.kind == "card_menu":
+            return int(self.page.hovered_card_index == self.index)
+        if self.kind == "card_menu_delete":
+            return int(self.page.card_menu_open and self.page.card_delete_available)
         if self.kind == "card_video":
             if self.index is None or self.index >= len(self.page.active_completed_video_poll):
                 return 0
@@ -400,6 +423,8 @@ class FakeLocator:
         pattern = getattr(name, "pattern", str(name)).lower()
         if self.kind == "composer" and role == "button" and "generate" in pattern:
             return FakeLocator(self.page, "generate")
+        if self.kind == "media_card" and role == "button" and "more" in pattern:
+            return FakeLocator(self.page, "card_menu", index=self.index)
         if self.kind == "dialog" and role == "button" and (
             "delete" in pattern or "ลบ" in pattern
         ):
@@ -542,6 +567,8 @@ class FakePage:
         self.card_delete_removes = card_delete_removes
         self.card_click_opens_editor = card_click_opens_editor
         self.in_clip_editor = False
+        self.hovered_card_index = None
+        self.card_menu_open = False
         self.active_card_index = None
         self.pending_card_delete_index = None
         self.generate_clicked = False
@@ -638,6 +665,8 @@ class FakePage:
             return FakeLocator(self, "generate")
         if role == "button" and "download" in pattern:
             return FakeLocator(self, "downloads")
+        if role == "menuitem" and ("delete" in pattern or "ลบ" in pattern):
+            return FakeLocator(self, "card_menu_delete")
         if role == "checkbox":
             return FakeLocator(self, "checkboxes")
         if role == "button" and ("delete" in pattern or "ลบ" in pattern):
@@ -1307,12 +1336,15 @@ def test_flow_workspace_preclean_deletes_stale_clips_then_verifies_empty():
         preclean()
 
     assert page.actions == [
-        ("click", "media_card", 0),
-        ("click", "card_delete"),
-        ("click", "media_card", 0),
-        ("click", "card_delete"),
-        ("click", "media_card", 0),
-        ("click", "card_delete"),
+        ("hover", "media_card", 0),
+        ("click", "card_menu", 0),
+        ("click", "card_menu_delete"),
+        ("hover", "media_card", 0),
+        ("click", "card_menu", 0),
+        ("click", "card_menu_delete"),
+        ("hover", "media_card", 0),
+        ("click", "card_menu", 0),
+        ("click", "card_menu_delete"),
     ]
     assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
     assert page.clip_names == []
@@ -1330,25 +1362,28 @@ def test_flow_workspace_preclean_deletes_card_inventory_when_checkboxes_are_abse
         workspace.preclean_and_verify_empty()
 
     assert page.clip_names == []
-    assert page.actions.count(("click", "card_delete")) == 2
+    assert page.actions.count(("click", "card_menu_delete")) == 2
     assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
 
 
-def test_flow_workspace_card_delete_returns_to_project_before_verifying_removal():
+def test_flow_workspace_deletes_from_the_hovered_card_overflow_menu():
     page = FakePage(
         progress_html=["<div>Ready</div>"],
         clip_names=["stale-a", "stale-b"],
         checkbox_count=0,
-        card_click_opens_editor=True,
     )
     client, _ = _client(page, editor_ready_timeout_seconds=0.1)
 
     with client.acquire_workspace(_job()) as workspace:
         workspace._delete_one_current_media_card()
 
-    assert page.in_clip_editor is False
-    assert client._media_card_count(page) == 1
-    assert ("click", "back_to_project") in page.actions
+    assert page.clip_names == ["stale-b"]
+    assert page.actions[:3] == [
+        ("hover", "media_card", 0),
+        ("click", "card_menu", 0),
+        ("click", "card_menu_delete"),
+    ]
+    assert not any(action[:2] == ("click", "media_card") for action in page.actions)
 
 
 def test_flow_workspace_preclean_fails_closed_when_card_delete_is_unavailable():
@@ -1383,8 +1418,9 @@ def test_flow_workspace_preclean_fails_closed_when_card_delete_does_not_remove_c
 
     assert page.clip_names == ["generated-image-a"]
     assert page.actions == [
-        ("click", "media_card", 0),
-        ("click", "card_delete"),
+        ("hover", "media_card", 0),
+        ("click", "card_menu", 0),
+        ("click", "card_menu_delete"),
     ]
     assert ("click", "generate") not in page.actions
 
@@ -1402,7 +1438,7 @@ def test_flow_workspace_preclean_confirms_card_delete_then_waits_for_removal():
         workspace.preclean_and_verify_empty()
 
     assert page.clip_names == []
-    assert page.actions.count(("click", "card_delete")) == 2
+    assert page.actions.count(("click", "card_menu_delete")) == 2
     assert page.actions.count(("click", "confirm_delete")) == 2
 
 
@@ -1418,7 +1454,7 @@ def test_flow_workspace_post_ready_cleanup_uses_card_deletion_without_checkboxes
         workspace.cleanup_and_verify_empty()
 
     assert page.clip_names == []
-    assert page.actions.count(("click", "card_delete")) == 2
+    assert page.actions.count(("click", "card_menu_delete")) == 2
 
 
 def test_flow_workspace_preclean_refreshes_even_when_already_empty():
@@ -1443,7 +1479,7 @@ def test_flow_workspace_preclean_confirms_observable_delete_dialog():
     with client.acquire_workspace(_job()) as workspace:
         workspace.preclean_and_verify_empty()
 
-    assert page.actions.count(("click", "card_delete")) == 2
+    assert page.actions.count(("click", "card_menu_delete")) == 2
     assert page.actions.count(("click", "confirm_delete")) == 2
     assert page.clip_names == []
 

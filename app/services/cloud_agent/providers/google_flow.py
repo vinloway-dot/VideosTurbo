@@ -51,8 +51,8 @@ _CARD_DELETE_NAME_RE = re.compile(
     r"(?:delete\s+)?(?:move to trash|ย้ายลงถังขยะ)",
     re.IGNORECASE,
 )
-_PROJECT_BACK_NAME_RE = re.compile(
-    r"(?:back to project|กลับไปที่โปรเจ็กต์)",
+_CARD_OVERFLOW_NAME_RE = re.compile(
+    r"^more_vert\s+(?:more|เพิ่มเติม)$",
     re.IGNORECASE,
 )
 _EMPTY_MEDIA_NAME_RE = re.compile(
@@ -143,11 +143,29 @@ class FlowWorkspaceRun:
             raise FlowWorkspaceVerificationError(
                 "Google Flow stale product card could not be selected reliably"
             )
-        card.click()
+        card.hover()
 
         deadline = time.monotonic() + self.client.editor_ready_timeout_seconds
         while True:
-            delete = self.page.get_by_role("button", name=_CARD_DELETE_NAME_RE)
+            overflow = card.get_by_role(
+                "button",
+                name=_CARD_OVERFLOW_NAME_RE,
+            )
+            if (
+                overflow.count() == 1
+                and overflow.is_visible()
+                and overflow.is_enabled()
+            ):
+                overflow.click()
+                break
+            if time.monotonic() >= deadline:
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow stale product card menu could not be selected reliably"
+                )
+            time.sleep(self.client.poll_seconds)
+
+        while True:
+            delete = self.page.get_by_role("menuitem", name=_CARD_DELETE_NAME_RE)
             if delete.count() == 1 and delete.is_visible() and delete.is_enabled():
                 delete.click()
                 self._confirm_delete_or_wait_for_removal(previous_count)
@@ -172,20 +190,11 @@ class FlowWorkspaceRun:
                         "Google Flow delete confirmation could not be verified"
                     )
                 confirm.click()
-            if self.client._media_inventory_is_observable(self.page):
-                if self.client._media_card_count(self.page) < previous_count:
-                    return
-            else:
-                back_to_project = self.page.get_by_role(
-                    "button",
-                    name=_PROJECT_BACK_NAME_RE,
-                )
-                if (
-                    back_to_project.count() == 1
-                    and back_to_project.is_visible()
-                    and back_to_project.is_enabled()
-                ):
-                    back_to_project.click()
+            if (
+                self.client._media_inventory_is_observable(self.page)
+                and self.client._media_card_count(self.page) < previous_count
+            ):
+                return
             if time.monotonic() >= deadline:
                 raise FlowWorkspaceVerificationError(
                     "Google Flow stale product clip removal could not be verified"
