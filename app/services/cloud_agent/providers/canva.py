@@ -339,12 +339,15 @@ class CanvaAssemblyClient:
     def _add_uploaded_clips(self, page: Any, expected_names: list[str]) -> None:
         if len(expected_names) != 6:
             raise ValueError("Canva timeline insertion requires exactly six clip names")
+        panel = None if hasattr(page, "add_uploaded_clip") else self._open_uploaded_videos(page)
+        if panel is None and not hasattr(page, "add_uploaded_clip"):
+            raise CanvaUIVerificationError("Canva uploaded Videos panel cannot be found")
         for name in expected_names:
             before = self._timeline_video_count(page)
             if hasattr(page, "add_uploaded_clip"):
                 page.add_uploaded_clip(name)
             else:
-                card = page.get_by_role("button", name=name, exact=True)
+                card = panel.get_by_role("button", name=name, exact=True)
                 if card.count() != 1:
                     raise CanvaUIVerificationError("Canva uploaded clip card is ambiguous")
                 card.click()
