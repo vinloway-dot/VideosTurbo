@@ -20,6 +20,10 @@ from app.services.cloud_agent.session import SessionManager
 class CanvaUIVerificationError(RuntimeError):
     """Raised when an essential, observable Canva editor state cannot be proved."""
 
+    def __init__(self, message: str, *, audio_card_count: int | None = None) -> None:
+        super().__init__(message)
+        self.audio_card_count = audio_card_count
+
 
 class CanvaPlaybackVerificationError(CanvaUIVerificationError):
     """Raised when Canva cannot prove a playback or timeline change."""
@@ -671,8 +675,12 @@ class CanvaAssemblyClient:
         if panel is None:
             raise CanvaUIVerificationError("Canva uploaded Audio panel cannot be found")
         audio = panel.get_by_role("button", name=f"Apply audio: {audio_name}", exact=True)
-        if audio.count() != 1:
-            raise CanvaUIVerificationError("Canva narration upload card is ambiguous")
+        audio_card_count = audio.count()
+        if audio_card_count != 1:
+            raise CanvaUIVerificationError(
+                f"Canva narration audio cards: {audio_card_count}",
+                audio_card_count=audio_card_count,
+            )
         audio.click()
         deadline = time.monotonic() + self.export_timeout_seconds
         while page.locator(self._VIDEO_START_EDGE).count() <= before:

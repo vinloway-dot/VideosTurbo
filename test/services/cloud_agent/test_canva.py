@@ -203,6 +203,23 @@ class _ScopedAudioPanel:
         return self.card
 
 
+class _CountedAudioCard:
+    def __init__(self, count):
+        self.count_value = count
+
+    def count(self):
+        return self.count_value
+
+
+class _CountedAudioPanel:
+    def __init__(self, count):
+        self.card = _CountedAudioCard(count)
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) == ("button", "Apply audio: voice.mp3", True)
+        return self.card
+
+
 class FakeScopedAudioAddPage:
     """Models hidden duplicate narration controls outside the live Audio panel."""
 
@@ -951,6 +968,20 @@ def test_canva_adds_narration_from_the_live_uploads_audio_panel_not_global_dupli
 
     assert panel.card.clicked is True
     assert page.timeline_count == 7
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_canva_audio_card_count_not_one_raises_sanitized_typed_evidence(
+    monkeypatch, count
+):
+    page = FakeScopedAudioAddPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    monkeypatch.setattr(client, "_open_uploaded_audio", lambda _page: _CountedAudioPanel(count))
+
+    with pytest.raises(canva.CanvaUIVerificationError, match=f"audio cards: {count}") as exc_info:
+        client._add_uploaded_audio(page, "voice.mp3")
+
+    assert exc_info.value.audio_card_count == count
 
 
 def test_canva_assembly_skips_playback_changes_when_speed_is_one(tmp_path):

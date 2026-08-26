@@ -20,6 +20,7 @@ from app.services.cloud_agent.errors import (
 )
 from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.media_probe import MediaProbe
+from app.services.cloud_agent.providers.canva import CanvaUIVerificationError
 from app.services.cloud_agent.storage import CloudJobStorage
 from app.services.cloud_agent.workflow import CloudAgentWorkflow
 from app.services.cloud_agent.worker import CloudAgentWorker
@@ -380,6 +381,19 @@ class WorkspaceRecordingCanva(RecordingCanva):
         yield self
 
 
+class AudioEvidenceCanva(RecordingCanva):
+    def __init__(self, count):
+        super().__init__()
+        self.count = count
+
+    def assemble_and_export(self, job, clips, audio, output):
+        del job, clips, audio, output
+        raise CanvaUIVerificationError(
+            f"Canva narration audio cards: {self.count}",
+            audio_card_count=self.count,
+        )
+
+
 class EventRecordingCanva(RecordingCanva):
     def __init__(self, events):
         super().__init__()
@@ -587,6 +601,23 @@ def test_workflow_persists_resolved_canva_workspace_before_assembly(monkeypatch,
     stored = store.get_job(job.id)
     assert stored is not None
     assert stored.canva_design_url == canva.editor_url
+
+
+def test_workflow_preserves_flow_ready_and_persists_audio_card_evidence(
+    monkeypatch, tmp_path
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    _accept_media(monkeypatch)
+
+    result = _workflow(tmp_path, store, canva=AudioEvidenceCanva(0)).run(
+        job.id,
+        worker_id=WORKER_ID,
+    )
+
+    assert result.status is CloudJobStatus.HUMAN_REQUIRED
+    assert result.checkpoint is CloudJobCheckpoint.FLOW_READY
+    assert result.canva_audio_card_count == 0
 
 
 def test_generation_fence_precedes_submit_and_flow_ready_commit_is_atomic(
