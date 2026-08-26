@@ -1084,6 +1084,24 @@ def test_canva_upload_completion_accepts_observable_media_without_processing_tex
     )
 
 
+def test_canva_upload_completion_accepts_card_proof_without_an_initial_inventory(
+    monkeypatch,
+):
+    page = FakeCompletedUploadPage(set())
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.0
+    client.poll_seconds = 0.0
+    monkeypatch.setattr(
+        client, "_uploaded_media_cards_complete", lambda _page, _names, _audio: True
+    )
+
+    client._wait_for_upload_completion(
+        page,
+        [*(f"clip_{index:02d}.mp4" for index in range(1, 7))],
+        baseline_inventory=None,
+    )
+
+
 def test_canva_uploads_video_batch_then_canonical_audio_and_verifies_each_set(
     tmp_path, monkeypatch
 ):

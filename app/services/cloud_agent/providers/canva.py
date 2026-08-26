@@ -577,10 +577,13 @@ class CanvaAssemblyClient:
                     video_after >= video_before + expected_video_count
                     and audio_after >= audio_before + expected_audio_count
                 )
-            if (baseline_inventory is None and names_visible) or (
+            cards_complete = self._uploaded_media_cards_complete(
+                page, expected_names, audio_name
+            )
+            if (baseline_inventory is None and (names_visible or cards_complete)) or (
                 inventory_complete
                 and (
-                    self._uploaded_media_cards_complete(page, expected_names, audio_name)
+                    cards_complete
                     or (not names_observable or names_visible)
                 )
             ):
