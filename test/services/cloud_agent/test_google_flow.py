@@ -537,6 +537,7 @@ class FakePage:
         card_click_opens_editor=False,
         fallback_composer_available=False,
         project_menu_available=True,
+        rename_response_text="",
     ):
         self.url = "about:blank"
         self.project_progress_html = list(progress_html)
@@ -618,6 +619,7 @@ class FakePage:
         self.fallback_composer_available = fallback_composer_available
         self.project_menu_available = project_menu_available
         self.project_menu_open = False
+        self.rename_response_text = rename_response_text
         self.in_clip_editor = False
         self.hovered_card_index = None
         self.card_menu_open = False
@@ -669,6 +671,7 @@ class FakePage:
         self._content_index += 1
         if self.session_ready and not self.on_home:
             html += '<button aria-label="Agent">Agent</button><textarea aria-label="Prompt"></textarea>'
+        html += self.rename_response_text
         return html
 
     def evaluate(self, expression):
@@ -1804,6 +1807,42 @@ def test_flow_workspace_uses_project_archive_after_rename_response_and_refresh(
     assert ("click", "project_menu") in page.actions
     assert ("click", "project_download") in page.actions
     assert ("click", "bulk_download") not in page.actions
+
+
+def test_flow_workspace_reuses_existing_rename_confirmation_without_resubmitting(
+    monkeypatch, tmp_path
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"draft-{number}" for number in range(1, 7)],
+        checkbox_count=0,
+        inventory_sequence=[6, 6, 6],
+        rename_response_text=(
+            "ผมได้เปลี่ยนชื่อคลิปทั้ง 6 เป็น CLIP 1 ถึง CLIP 6 "
+            "ตามชื่อที่คุณระบุไว้เรียบร้อยแล้วครับ"
+        ),
+    )
+    client, _ = _client(page)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        result = workspace.reconcile_and_download(
+            _job(flow_generation_unresolved=True),
+            paths,
+        )
+
+    assert result == paths.flow_files
+    assert not any(
+        action[:3] == ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
+        for action in page.actions
+    )
+    assert page.reload_calls == []
+    assert ("click", "project_download") in page.actions
 
 
 def test_flow_workspace_rename_completes_from_semantic_names_when_send_stays_disabled(

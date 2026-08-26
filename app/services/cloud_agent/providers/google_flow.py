@@ -68,6 +68,15 @@ _AGENT_RESPONSE_FEEDBACK_NAME_RE = re.compile(
     r"^thumb_up\s+(?:good response|คำตอบดี)$",
     re.IGNORECASE,
 )
+_RENAME_COMPLETION_RESPONSE_RE = re.compile(
+    r"(?:"
+    r"ผมได้เปลี่ยนชื่อคลิปทั้ง\s*6\s*เป็น\s*clip\s*1\s*ถึง\s*clip\s*6"
+    r".*?(?:เรียบร้อย|สำเร็จ)"
+    r"|(?:renamed|have\s+renamed)\s+(?:all\s+)?six\s+clips?"
+    r".*?clip\s*1.*?clip\s*6"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
 _EMPTY_MEDIA_NAME_RE = re.compile(
     r"(?:start creating or add media|เริ่มสร้างหรือวางสื่อ)",
     re.IGNORECASE,
@@ -294,7 +303,10 @@ class FlowWorkspaceRun:
         paths: JobPaths,
         expected_count: int,
     ) -> tuple[Path, ...]:
-        if not self._semantic_names_are_complete(expected_count):
+        if not (
+            self._semantic_names_are_complete(expected_count)
+            or self.client._has_completed_rename_response(self.page)
+        ):
             response_count = self.client._agent_response_count(self.page)
             self.client._submit_agent_prompt(
                 self.page,
@@ -951,6 +963,21 @@ class GoogleFlowClient:
                     "Google Flow Agent rename completion could not be verified"
                 )
             time.sleep(self.poll_seconds)
+
+    @staticmethod
+    def _has_completed_rename_response(page: Any) -> bool:
+        """Recognize a prior Agent completion only to avoid duplicate submission.
+
+        Archive member names remain the sole proof that all six remote assets were
+        renamed correctly; this check merely preserves an already-confirmed Agent
+        action after an interrupted run.
+        """
+        try:
+            return bool(_RENAME_COMPLETION_RESPONSE_RE.search(page.content()))
+        except PlaywrightError as exc:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow Agent rename response could not be observed"
+            ) from exc
 
     @staticmethod
     def _progress_for_expected_count(html: str, expected_count: int) -> int | None:
