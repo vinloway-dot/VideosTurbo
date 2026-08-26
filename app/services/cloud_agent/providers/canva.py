@@ -822,7 +822,14 @@ class CanvaAssemblyClient:
             page.position_narration_at_zero()
             return
         starts = page.locator(self._VIDEO_START_EDGE)
-        if starts.count() < 7 or self._slider_seconds(starts.nth(6)) != 0:
+        if starts.count() < 7:
+            raise CanvaUIVerificationError("Canva narration cannot be verified at timeline time 0")
+        narration_start = starts.nth(6)
+        accessible_position = str(
+            narration_start.get_attribute("aria-valuetext") or ""
+        ).strip().lower()
+        raw_position = self._slider_seconds(narration_start)
+        if accessible_position not in {"0 second", "0 seconds"} and raw_position > 0.05:
             raise CanvaUIVerificationError("Canva narration cannot be verified at timeline time 0")
 
     def _bound_final_visual_end(self, page: Any, target_seconds: float) -> None:

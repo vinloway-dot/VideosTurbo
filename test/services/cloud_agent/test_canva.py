@@ -176,6 +176,41 @@ class _TimelineStarts:
         return self.page.timeline_count
 
 
+class _NarrationStartSlider:
+    def __init__(self, raw_value, text):
+        self.raw_value = raw_value
+        self.text = text
+
+    def get_attribute(self, name):
+        if name == "aria-valuenow":
+            return str(self.raw_value)
+        if name == "aria-valuetext":
+            return self.text
+        return None
+
+
+class _NarrationStartSliders:
+    def __init__(self):
+        self.sliders = [
+            _NarrationStartSlider(index * 10_000_000, f"{index * 10} seconds")
+            for index in range(6)
+        ] + [_NarrationStartSlider(31_968, "0 seconds")]
+
+    def count(self):
+        return len(self.sliders)
+
+    def nth(self, index):
+        return self.sliders[index]
+
+
+class FakeAccessibleZeroNarrationPage:
+    """Canva rounds its audio-track position to the accessible zero-second state."""
+
+    def locator(self, selector):
+        assert selector == canva.CanvaAssemblyClient._VIDEO_START_EDGE
+        return _NarrationStartSliders()
+
+
 class _ScopedAudioCard:
     def __init__(self, page):
         self.page = page
@@ -989,6 +1024,13 @@ def test_canva_assembly_uploads_orders_and_exports_adaptive_six_clip_job(tmp_pat
         ("export_mp4_1080p",),
         ("download", "final.mp4"),
     ]
+
+
+def test_canva_accepts_accessible_zero_seconds_for_narration_position():
+    """Catches rejecting Canva's pixel-offset raw value when ARIA proves time zero."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    client._position_narration_at_zero(FakeAccessibleZeroNarrationPage())
 
 
 def test_canva_job_session_allows_bounded_time_for_new_design_editor_navigation(
