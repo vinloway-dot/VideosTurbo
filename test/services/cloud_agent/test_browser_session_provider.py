@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from app.models.cloud_agent import ServiceSessionStatus
+from app.services.cloud_agent.providers._browser_session import BrowserSessionProvider
 from app.services.cloud_agent.providers import canva, google_flow
 
 
@@ -62,6 +63,17 @@ class FakeContext:
         self.pages = [page]
 
 
+class BlankInitialPageContext(FakeContext):
+    def __init__(self, blank_page, usable_page):
+        super().__init__(blank_page)
+        self.usable_page = usable_page
+        self.new_page_calls = 0
+
+    def new_page(self):
+        self.new_page_calls += 1
+        return self.usable_page
+
+
 class FakeBrowserManager:
     def __init__(self, page, tmp_path):
         self.page = page
@@ -91,6 +103,20 @@ def _flow_ready_html():
 
 def _canva_ready_html():
     return '<main>Canva Editor</main><button aria-label="Share">Share</button>'
+
+
+def test_provider_page_opens_a_fresh_page_when_context_only_has_about_blank():
+    blank_page = FakePage(url="about:blank", html="")
+    usable_page = FakePage(
+        url="https://www.canva.com/design/demo/edit",
+        html=_canva_ready_html(),
+    )
+    context = BlankInitialPageContext(blank_page, usable_page)
+
+    page = BrowserSessionProvider._page(context)
+
+    assert page is usable_page
+    assert context.new_page_calls == 1
 
 
 def test_google_flow_provider_opens_real_target_and_captures_job_evidence(tmp_path):

@@ -112,8 +112,10 @@ class BrowserSessionProvider:
     @staticmethod
     def _page(context: Any) -> Any:
         pages = list(getattr(context, "pages", []) or [])
-        if pages:
-            return pages[0]
+        for page in pages:
+            page_url = getattr(page, "url", None)
+            if page_url is None or str(page_url).strip() not in {"", "about:blank"}:
+                return page
         return context.new_page()
 
     def _capture(self, page: Any, job_id: str, *, label: str) -> str:

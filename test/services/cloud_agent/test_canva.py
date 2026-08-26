@@ -762,6 +762,12 @@ def test_canva_job_session_persists_resolved_editor_url_from_create_design_url()
         assert session.editor_url == "https://www.canva.com/design/DEMO/edit"
 
 
+def test_canva_job_session_accepts_editor_url_with_canva_share_key():
+    editor_url = "https://www.canva.com/design/DAHTXajc_u8/yctmTZbIUM0PKcUzWpXVZw/edit"
+
+    assert canva.CanvaAssemblyClient._editor_url(SimpleNamespace(url=editor_url)) == editor_url
+
+
 def test_canva_job_session_reuses_persisted_editor_url_without_create_design_url():
     page = FakeCanvaEditorPage()
     client, _ = _assembly_client(page)

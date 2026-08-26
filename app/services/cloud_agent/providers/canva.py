@@ -190,7 +190,7 @@ class CanvaAssemblyClient:
         if (
             parsed.scheme != "https"
             or not parsed.netloc.endswith("canva.com")
-            or re.fullmatch(r"/design/[^/]+/edit", parsed.path) is None
+            or re.fullmatch(r"/design/[^/]+(?:/[^/]+)?/edit", parsed.path) is None
         ):
             raise CanvaUIVerificationError("Canva editor URL cannot be verified")
         return editor_url

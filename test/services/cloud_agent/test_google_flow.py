@@ -730,6 +730,10 @@ class FakeCdpContext:
 class FakeContext:
     def __init__(self, page):
         self.pages = [page]
+        self.page = page
+
+    def new_page(self):
+        return self.page
 
 
 class FakeBrowserManager:
