@@ -88,6 +88,7 @@ class CanvaAssemblyClient:
     _VIDEO_START_EDGE = '[role="slider"][aria-label="Trimming, start edge"]'
     _VIDEO_END_EDGE = '[role="slider"][aria-label="Trimming, end edge"]'
     _WORKSPACE_TAB_HYDRATION_SECONDS = 30.0
+    _AUDIO_PANEL_HYDRATION_SECONDS = 5.0
     _MEDIA_MENU_HYDRATION_SECONDS = 5.0
     _EDITOR_NAVIGATION_TIMEOUT_SECONDS = 180.0
 
@@ -253,7 +254,7 @@ class CanvaAssemblyClient:
             page.clean_uploaded_audio(audio_name)
             return
 
-        panel = self._open_uploaded_audio(page)
+        panel = self._open_hydrated_uploaded_audio(page, audio_name)
         if panel is None:
             return
         while True:
@@ -309,6 +310,29 @@ class CanvaAssemblyClient:
         if not panel_id:
             raise CanvaUIVerificationError("Canva uploaded Audio panel cannot be found")
         return page.locator(f'[role="tabpanel"][id="{panel_id}"]')
+
+    def _open_hydrated_uploaded_audio(self, page: Any, audio_name: str) -> Any | None:
+        """Avoid accepting Canva's transient empty Audio panel as a cleanup success."""
+        panel = self._open_uploaded_audio(page)
+        if panel is None:
+            return None
+        cards = panel.get_by_role("button", name=f"Apply audio: {audio_name}", exact=True)
+        if cards.count() != 0:
+            return panel
+
+        deadline = time.monotonic() + self._AUDIO_PANEL_HYDRATION_SECONDS
+        while time.monotonic() < deadline:
+            time.sleep(self.poll_seconds)
+            hydrated_panel = self._open_uploaded_audio(page)
+            if hydrated_panel is None:
+                continue
+            hydrated_cards = hydrated_panel.get_by_role(
+                "button", name=f"Apply audio: {audio_name}", exact=True
+            )
+            if hydrated_cards.count() != 0:
+                return hydrated_panel
+            panel = hydrated_panel
+        return panel
 
     @staticmethod
     def _activate_uploads(page: Any) -> None:

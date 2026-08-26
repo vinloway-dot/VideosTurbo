@@ -1187,6 +1187,33 @@ def test_canva_audio_cleanup_refreshes_once_before_rejecting_a_stale_nonempty_pa
     assert page.reload_count == 1
 
 
+def test_canva_audio_cleanup_waits_for_cards_after_an_initial_hydration_zero(
+    monkeypatch,
+):
+    """Catches treating Canva's initial empty Audio panel as a verified cleanup."""
+    page = FakeRefreshableAudioCleanupPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 0.0
+    initial_empty = _CountedAudioPanel(0)
+    hydrated_card = _CountedAudioPanel(1)
+    empty = _CountedAudioPanel(0)
+    opened_panels = iter((initial_empty, hydrated_card, empty, empty))
+    deleted = []
+    monkeypatch.setattr(client, "_open_uploaded_audio", lambda _page: next(opened_panels))
+    monkeypatch.setattr(canva.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(canva.time, "sleep", lambda _seconds: None)
+
+    def delete_one(_page, cards, _name):
+        deleted.append(cards.count())
+        cards.count_value = 0
+
+    monkeypatch.setattr(client, "_delete_uploaded_audio_card", delete_one)
+
+    client._clean_uploaded_audio(page, "voice.mp3")
+
+    assert deleted == [1]
+
+
 def test_canva_audio_delete_uses_generic_card_overlay_and_aria_delete(monkeypatch):
     """Catches Canva Audio exposing generic details plus aria-labelled Delete."""
     page = FakeGenericAudioDeletePage()

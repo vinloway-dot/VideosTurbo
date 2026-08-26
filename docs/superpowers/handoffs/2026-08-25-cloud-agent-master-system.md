@@ -57,7 +57,9 @@ only when its current hit-tested box overlaps that card; wait for exactly one
 visible `button[aria-label="Delete"]`; click it once; then reopen `Audio` and
 require the exact managed-card count to decrease by one. After the last deletion,
 reload once and wait for Audio hydration; zero is accepted only when it remains
-zero after hydration. This is distinct from Video's `Move to Trash` action.
+zero after hydration. An initial zero must wait through the bounded five-second
+Audio-card hydration window before it is treated as empty. This is distinct from
+Video's `Move to Trash` action.
 
 ## Development and stopping rule
 

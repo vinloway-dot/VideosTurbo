@@ -25,7 +25,8 @@ uses a generic `Show details` button that must be associated with the hovered
 command is `button[aria-label="Delete"]`, not a role/name `Delete` selector and
 not Video's `Move to Trash`. Wait for that command to be visible, click it once,
 re-open the live Audio panel, and require the managed-card count to decrease by
-one. After cleanup, reload once and require the hydrated count remains zero.
+one. After cleanup, reload once and require the hydrated count remains zero; an
+initial zero must first survive the bounded Audio-card hydration window.
 
 ---
 

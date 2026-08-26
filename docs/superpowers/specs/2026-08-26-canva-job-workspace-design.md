@@ -71,6 +71,8 @@ Within the active job design and same persistent context:
    the card-scoped generic `Show details` overlay and the popup action
    `button[aria-label="Delete"]`. Wait for the popup action, verify each live
    panel count decreases by one, then reload once and require hydrated zero.
+   An initial zero must remain zero through the bounded Audio-card hydration
+   window before it is considered an empty workspace.
 3. Count exact `Apply audio: voice.mp3` controls only within that panel.
 4. Persist the sanitized count on the job before selecting the card.
 5. Continue only for count `1`; click that panel-scoped card and verify the
