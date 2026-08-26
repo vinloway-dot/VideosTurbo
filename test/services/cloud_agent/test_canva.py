@@ -160,6 +160,62 @@ class FakeManagedMediaCleanupPage(FakePreparedCanvaEditorPage):
         self.actions.append(("clean_uploaded_audio", name))
 
 
+class _TimelineStarts:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return self.page.timeline_count
+
+
+class _ScopedAudioCard:
+    def __init__(self, page):
+        self.page = page
+        self.clicked = False
+
+    def count(self):
+        return 1
+
+    def click(self):
+        self.clicked = True
+        self.page.timeline_count += 1
+
+
+class _AmbiguousGlobalAudioCard:
+    def count(self):
+        return 2
+
+
+class _ScopedAudioPanel:
+    def __init__(self, page):
+        self.card = _ScopedAudioCard(page)
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) == ("button", "Apply audio: voice.mp3", True)
+        return self.card
+
+
+class FakeScopedAudioAddPage:
+    """Models hidden duplicate narration controls outside the live Audio panel."""
+
+    def __init__(self):
+        self.timeline_count = 6
+        self.global_audio = _AmbiguousGlobalAudioCard()
+
+    def locator(self, selector):
+        assert selector == canva.CanvaAssemblyClient._VIDEO_START_EDGE
+        return _TimelineStarts(self)
+
+    def get_by_role(self, role, *, name, exact):
+        if (role, name, exact) in {
+            ("tab", "Elements", True),
+            ("tab", "Uploads", True),
+        }:
+            return _ClickOnly()
+        assert (role, name, exact) == ("button", "Apply audio: voice.mp3", True)
+        return self.global_audio
+
+
 class FakeNoVideosTabPage:
     no_uploaded_videos_tab = True
 
@@ -847,6 +903,21 @@ def test_canva_add_uploaded_clips_fails_closed_when_one_click_does_not_add_exact
         client._add_uploaded_clips(page, [path.name for path in clips])
 
     assert page.actions == [("add_uploaded_clip", "clip_01.mp4", 0, 0)]
+
+
+def test_canva_adds_narration_from_the_live_uploads_audio_panel_not_global_duplicates(
+    monkeypatch,
+):
+    """Catches hidden account-wide voice cards making the narration selector ambiguous."""
+    page = FakeScopedAudioAddPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    panel = _ScopedAudioPanel(page)
+    monkeypatch.setattr(client, "_open_uploaded_audio", lambda _page: panel)
+
+    client._add_uploaded_audio(page, "voice.mp3")
+
+    assert panel.card.clicked is True
+    assert page.timeline_count == 7
 
 
 def test_canva_assembly_skips_playback_changes_when_speed_is_one(tmp_path):

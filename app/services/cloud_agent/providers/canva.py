@@ -651,8 +651,10 @@ class CanvaAssemblyClient:
             return
         before = page.locator(self._VIDEO_START_EDGE).count()
         page.get_by_role("tab", name="Elements", exact=True).click()
-        page.get_by_role("tab", name="Uploads", exact=True).click()
-        audio = page.get_by_role("button", name=f"Apply audio: {audio_name}", exact=True)
+        panel = self._open_uploaded_audio(page)
+        if panel is None:
+            raise CanvaUIVerificationError("Canva uploaded Audio panel cannot be found")
+        audio = panel.get_by_role("button", name=f"Apply audio: {audio_name}", exact=True)
         if audio.count() != 1:
             raise CanvaUIVerificationError("Canva narration upload card is ambiguous")
         audio.click()
