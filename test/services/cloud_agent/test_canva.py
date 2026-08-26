@@ -374,6 +374,15 @@ class FakeDetachedVideoDeletePage:
         self.mouse = _DeleteMouse(self)
 
 
+class FakeRefreshableAudioCleanupPage:
+    def __init__(self):
+        self.reload_count = 0
+
+    def reload(self, *, wait_until):
+        assert wait_until == "domcontentloaded"
+        self.reload_count += 1
+
+
 class FakeCanvaContext:
     def __init__(self, page):
         self.pages = [page]
@@ -1062,6 +1071,28 @@ def test_canva_cleanup_accepts_missing_videos_tab_only_after_retrying_post_delet
     )
 
     client._clean_uploaded_videos(object())
+
+
+def test_canva_audio_cleanup_refreshes_once_before_rejecting_a_stale_nonempty_panel(
+    monkeypatch,
+):
+    """Catches Canva retaining deleted audio cards in a stale panel until an explicit refresh."""
+    page = FakeRefreshableAudioCleanupPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    initial = _CountedAudioPanel(1)
+    empty = _CountedAudioPanel(0)
+    stale = _CountedAudioPanel(1)
+    opened_panels = iter((initial, empty, stale, empty))
+    monkeypatch.setattr(client, "_open_uploaded_audio", lambda _page: next(opened_panels))
+    monkeypatch.setattr(
+        client,
+        "_delete_uploaded_audio_card",
+        lambda _page, cards, _name: setattr(cards, "count_value", 0),
+    )
+
+    client._clean_uploaded_audio(page, "voice.mp3")
+
+    assert page.reload_count == 1
 
 
 def test_canva_open_uploaded_videos_uses_visible_tab_when_hidden_stale_tab_remains():

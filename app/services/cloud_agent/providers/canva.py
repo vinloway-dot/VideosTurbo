@@ -266,6 +266,12 @@ class CanvaAssemblyClient:
                 return
 
         panel = self._open_uploaded_audio(page)
+        if panel is None:
+            return
+        if panel.get_by_role("button", name=f"Apply audio: {audio_name}", exact=True).count() == 0:
+            return
+        page.reload(wait_until="domcontentloaded")
+        panel = self._open_uploaded_audio(page)
         if (
             panel is not None
             and panel.get_by_role("button", name=f"Apply audio: {audio_name}", exact=True).count() != 0
