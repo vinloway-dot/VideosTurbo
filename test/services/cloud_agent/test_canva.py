@@ -612,7 +612,11 @@ def test_canva_assembly_uploads_orders_and_exports_adaptive_six_clip_job(tmp_pat
     assert output.read_bytes() == b"final-mp4"
     assert sessions.calls == [("page", "canva", page, "job-canva-123")]
     assert page.actions == [
-        ("goto", "https://www.canva.com/design/demo/edit", {"wait_until": "domcontentloaded"}),
+        (
+            "goto",
+            "https://www.canva.com/design/demo/edit",
+            {"wait_until": "domcontentloaded", "timeout": 180_000},
+        ),
         ("upload", ("clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4", "voice.mp3")),
         ("order", ("clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4")),
         ("select_clip", 1),
@@ -650,6 +654,23 @@ def test_canva_assembly_uploads_orders_and_exports_adaptive_six_clip_job(tmp_pat
     ]
 
 
+def test_canva_job_session_allows_bounded_time_for_new_design_editor_navigation(
+    tmp_path,
+):
+    """Catches the browser's 30-second default aborting a new Canva design before it hydrates."""
+    page = FakeCanvaEditorPage()
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+
+    client.assemble_and_export(_assembly_job(), clips, audio, output)
+
+    assert page.actions[0] == (
+        "goto",
+        "https://www.canva.com/design/demo/edit",
+        {"wait_until": "domcontentloaded", "timeout": 180_000},
+    )
+
+
 def test_canva_assembly_prepares_clean_workspace_before_upload_and_adds_clips_in_order(
     tmp_path,
 ):
@@ -662,7 +683,11 @@ def test_canva_assembly_prepares_clean_workspace_before_upload_and_adds_clips_in
 
     actions = page.actions
     assert actions[:9] == [
-        ("goto", "https://www.canva.com/design/demo/edit", {"wait_until": "domcontentloaded"}),
+        (
+            "goto",
+            "https://www.canva.com/design/demo/edit",
+            {"wait_until": "domcontentloaded", "timeout": 180_000},
+        ),
         (
             "clean_uploaded_videos",
             (

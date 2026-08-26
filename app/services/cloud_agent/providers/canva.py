@@ -84,6 +84,7 @@ class CanvaAssemblyClient:
     _VIDEO_END_EDGE = '[role="slider"][aria-label="Trimming, end edge"]'
     _WORKSPACE_TAB_HYDRATION_SECONDS = 10.0
     _MEDIA_MENU_HYDRATION_SECONDS = 5.0
+    _EDITOR_NAVIGATION_TIMEOUT_SECONDS = 180.0
 
     def __init__(
         self,
@@ -166,7 +167,11 @@ class CanvaAssemblyClient:
         """Own exactly one Canva browser context for assembly and post-final cleanup."""
         with self.browser.open("canva", headed=True) as context:
             page = BrowserSessionProvider._page(context)
-            page.goto(self.service_url, wait_until="domcontentloaded")
+            page.goto(
+                self.service_url,
+                wait_until="domcontentloaded",
+                timeout=int(self._EDITOR_NAVIGATION_TIMEOUT_SECONDS * 1000),
+            )
             self.sessions.ensure_open_page_ready("canva", page, job_id)
             yield _CanvaJobSession(self, page)
 
