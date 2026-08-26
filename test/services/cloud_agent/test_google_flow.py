@@ -2467,6 +2467,24 @@ def test_google_flow_completed_video_detection_preserves_trusted_text_progress()
     client._wait_for_generation(page, expected_count=6)
 
 
+def test_google_flow_completed_detection_accepts_named_six_card_set_without_ax(
+    monkeypatch,
+):
+    page = FakePage(
+        progress_html=["<div>Generation complete</div>"],
+        clip_names=[f"clip {number}" for number in range(1, 7)],
+    )
+    client, _ = _client(page, timeout_seconds=1.0)
+    monkeypatch.setattr(
+        client,
+        "_completed_video_card_fingerprints",
+        lambda _page, *, expected_count: None,
+    )
+    _timeout_clock(monkeypatch)
+
+    client._wait_for_generation(page, expected_count=6)
+
+
 def test_google_flow_completed_video_cards_complete_after_three_stable_polls(
     monkeypatch,
 ):
