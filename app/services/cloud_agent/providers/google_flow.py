@@ -55,6 +55,15 @@ _CARD_OVERFLOW_NAME_RE = re.compile(
     r"^more_vert\s+(?:more|เพิ่มเติม)$",
     re.IGNORECASE,
 )
+_COMMAND_COMPOSER_SELECTOR = '[data-slate-editor="true"][role="textbox"]:visible'
+_COMMAND_SUBMIT_NAME_RE = re.compile(
+    r"^(?:generate|arrow_forward\s+(?:generate|create|สร้าง))$",
+    re.IGNORECASE,
+)
+_AGENT_RESPONSE_FEEDBACK_NAME_RE = re.compile(
+    r"^thumb_up\s+(?:good response|คำตอบดี)$",
+    re.IGNORECASE,
+)
 _EMPTY_MEDIA_NAME_RE = re.compile(
     r"(?:start creating or add media|เริ่มสร้างหรือวางสื่อ)",
     re.IGNORECASE,
@@ -282,11 +291,12 @@ class FlowWorkspaceRun:
         expected_count: int,
     ) -> tuple[Path, ...]:
         if not self._semantic_names_are_complete(expected_count):
+            response_count = self.client._agent_response_count(self.page)
             self.client._submit_agent_prompt(
                 self.page,
                 RENAME_CLIPS_INSTRUCTION,
             )
-            self._wait_for_semantic_rename(expected_count)
+            self._wait_for_semantic_rename(expected_count, response_count)
         self._verify_semantic_names(expected_count)
 
         bulk_download = self.page.get_by_role(
@@ -320,17 +330,24 @@ class FlowWorkspaceRun:
             for number in range(1, expected_count + 1)
         )
 
-    def _wait_for_semantic_rename(self, expected_count: int) -> None:
-        for _ in range(2):
-            self.page.reload(wait_until="domcontentloaded")
-            self.client._hydrate_project_workspace(
-                self.page,
-                flow_generation_unresolved=True,
-            )
-            for _ in range(self.client.settled_poll_count):
-                if self._semantic_names_are_complete(expected_count):
-                    return
-                time.sleep(self.client.poll_seconds)
+    def _wait_for_semantic_rename(
+        self,
+        expected_count: int,
+        response_count: int,
+    ) -> None:
+        self.client._wait_for_agent_response(self.page, response_count)
+        self.page.reload(wait_until="domcontentloaded")
+        self.client._hydrate_project_workspace(
+            self.page,
+            flow_generation_unresolved=True,
+        )
+        deadline = time.monotonic() + self.client.editor_ready_timeout_seconds
+        while True:
+            if self._semantic_names_are_complete(expected_count):
+                return
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(self.client.poll_seconds)
         raise FlowWorkspaceVerificationError(
             "Google Flow semantic clip names could not be verified"
         )
@@ -551,10 +568,7 @@ class GoogleFlowClient:
                 )
             generate = container.get_by_role(
                 "button",
-                name=re.compile(
-                    r"^(?:generate|arrow_forward\s+(?:generate|สร้าง))$",
-                    re.IGNORECASE,
-                ),
+                name=_COMMAND_SUBMIT_NAME_RE,
             )
             if not (generate.count() == 1 and generate.is_visible()):
                 raise FlowWorkspaceVerificationError(
@@ -571,10 +585,54 @@ class GoogleFlowClient:
                 "Google Flow Agent state could not be verified"
             ) from exc
 
+    @staticmethod
+    def _fallback_command_composer(page: Any) -> AgentComposer:
+        """Find the post-generation command composer when the Agent toggle is absent."""
+        try:
+            prompt = page.locator(_COMMAND_COMPOSER_SELECTOR)
+            if not (prompt.count() == 1 and prompt.is_visible()):
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow fallback command prompt could not be verified"
+                )
+            container = prompt.locator("xpath=ancestor::div[.//button][1]")
+            if not (container.count() == 1 and container.is_visible()):
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow fallback command container could not be verified"
+                )
+            generate = container.get_by_role(
+                "button",
+                name=_COMMAND_SUBMIT_NAME_RE,
+            )
+            if not (generate.count() == 1 and generate.is_visible()):
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow fallback command submit control could not be verified"
+                )
+            return AgentComposer(
+                agent=prompt,
+                container=container,
+                prompt=prompt,
+                generate=generate,
+            )
+        except PlaywrightError as exc:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow fallback command composer could not be verified"
+            ) from exc
+
+    @classmethod
+    def _active_or_fallback_command_composer(cls, page: Any) -> AgentComposer:
+        try:
+            cls._agent_control(page)
+        except FlowWorkspaceVerificationError:
+            return cls._fallback_command_composer(page)
+        return cls._active_agent_composer(page)
+
     def _ensure_agent_active(self, page: Any) -> AgentComposer:
         """Return a verified Agent composer without toggling an active Agent off."""
         try:
             agent = self._agent_control(page)
+        except FlowWorkspaceVerificationError:
+            return self._fallback_command_composer(page)
+        try:
             state = agent.get_attribute("aria-pressed")
         except PlaywrightError as exc:
             raise FlowWorkspaceVerificationError(
@@ -614,7 +672,10 @@ class GoogleFlowClient:
                 return False
             if _FATAL_APPLICATION_ERROR_RE.search(page.content()):
                 return False
-            self._agent_control(page)
+            try:
+                self._agent_control(page)
+            except FlowWorkspaceVerificationError:
+                self._fallback_command_composer(page)
             return (
                 self._media_inventory_is_observable(page)
                 and page.locator('[aria-busy="true"]:visible').count() == 0
@@ -695,7 +756,7 @@ class GoogleFlowClient:
         composer = self._ensure_agent_active(page)
         composer.prompt.fill(prompt_text)
 
-        verified = self._active_agent_composer(page)
+        verified = self._active_or_fallback_command_composer(page)
         if self._prompt_value(verified.prompt) != prompt_text:
             raise FlowWorkspaceVerificationError(
                 "Google Flow active Agent prompt value could not be verified"
@@ -703,7 +764,7 @@ class GoogleFlowClient:
         return verified
 
     def _submit_prepared_agent_prompt(self, page: Any, prompt_text: str) -> Any:
-        verified = self._active_agent_composer(page)
+        verified = self._active_or_fallback_command_composer(page)
         if self._prompt_value(verified.prompt) != prompt_text:
             raise FlowWorkspaceVerificationError(
                 "Google Flow active Agent prompt value could not be verified"
@@ -854,6 +915,33 @@ class GoogleFlowClient:
             )
         except PlaywrightError:
             return 0
+
+    @staticmethod
+    def _agent_response_count(page: Any) -> int:
+        try:
+            feedback = page.get_by_role(
+                "button",
+                name=_AGENT_RESPONSE_FEEDBACK_NAME_RE,
+            )
+            return sum(
+                feedback.nth(index).is_visible()
+                for index in range(feedback.count())
+            )
+        except PlaywrightError as exc:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow Agent response could not be observed"
+            ) from exc
+
+    def _wait_for_agent_response(self, page: Any, response_count: int) -> None:
+        deadline = time.monotonic() + self.editor_ready_timeout_seconds
+        while True:
+            if self._agent_response_count(page) > response_count:
+                return
+            if time.monotonic() >= deadline:
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow Agent rename completion could not be verified"
+                )
+            time.sleep(self.poll_seconds)
 
     @staticmethod
     def _progress_for_expected_count(html: str, expected_count: int) -> int | None:

@@ -216,6 +216,7 @@ class FakeLocator:
             self.page.generate_clicked = True
             if self.page.last_filled == google_flow.RENAME_CLIPS_INSTRUCTION:
                 self.page.pending_clip_names = list(self.page.renamed_clip_names)
+                self.page.agent_response_count += 1
             elif self.page.generation_completion_names is not None:
                 self.page.clip_names = list(self.page.generation_completion_names)
             return
@@ -250,6 +251,11 @@ class FakeLocator:
     def count(self):
         if self.kind == "downloads":
             return self.page.download_count
+        if self.kind == "agent_response_feedback":
+            self.page.agent_response_reads += 1
+            if self.index is None:
+                return self.page.agent_response_count
+            return int(self.index < self.page.agent_response_count)
         if self.kind == "launch":
             return int(self.page.landing)
         if self.kind == "back_to_project":
@@ -313,11 +319,20 @@ class FakeLocator:
                 self.page.last_empty_state = self.page.empty_state_available
             return int(not self.page.clip_names and self.page.last_empty_state)
         if self.kind in {
+            "fallback_prompt",
+            "fallback_container",
+            "fallback_generate",
+        }:
+            return int(self.page.fallback_composer_available)
+        if self.kind in {
             "prompt",
             "default_prompt",
             "multiple_prompt",
             "composer",
             "generate",
+            "fallback_prompt",
+            "fallback_container",
+            "fallback_generate",
             "bulk_download",
         }:
             if self.kind == "multiple_prompt":
@@ -397,7 +412,12 @@ class FakeLocator:
         return None
 
     def input_value(self):
-        assert self.kind in {"prompt", "default_prompt", "multiple_prompt"}
+        assert self.kind in {
+            "prompt",
+            "default_prompt",
+            "multiple_prompt",
+            "fallback_prompt",
+        }
         return self.page.last_filled
 
     def locator(self, selector):
@@ -412,6 +432,8 @@ class FakeLocator:
                 else "prompt"
             )
             return FakeLocator(self.page, prompt_kind)
+        if self.kind == "fallback_prompt" and str(selector).startswith("xpath="):
+            return FakeLocator(self.page, "fallback_container")
         if self.kind == "media_list" and "role=\"button\"" in str(selector):
             return FakeLocator(self.page, "inventory_cards")
         if self.kind == "media_card" and str(selector) == "video":
@@ -423,6 +445,10 @@ class FakeLocator:
         pattern = getattr(name, "pattern", str(name)).lower()
         if self.kind == "composer" and role == "button" and "generate" in pattern:
             return FakeLocator(self.page, "generate")
+        if self.kind == "fallback_container" and role == "button" and (
+            "generate" in pattern or "สร้าง" in pattern
+        ):
+            return FakeLocator(self.page, "fallback_generate")
         if self.kind == "media_card" and role == "button" and "more" in pattern:
             return FakeLocator(self.page, "card_menu", index=self.index)
         if self.kind == "dialog" and role == "button" and (
@@ -440,6 +466,8 @@ class FakeLocator:
             return FakeLocator(self.page, "media_card", index=index)
         if self.kind == "generated_images":
             return FakeLocator(self.page, "generated_image", index=index)
+        if self.kind == "agent_response_feedback":
+            return FakeLocator(self.page, "agent_response_feedback", index=index)
         raise AssertionError(f"nth is unavailable for {self.kind}")
 
 
@@ -486,10 +514,12 @@ class FakePage:
         generate_available=True,
         generated_image_alts=None,
         completed_video_polls=None,
+        agent_response_count=1,
         checkbox_count=None,
         card_delete_available=True,
         card_delete_removes=True,
         card_click_opens_editor=False,
+        fallback_composer_available=False,
     ):
         self.url = "about:blank"
         self.project_progress_html = list(progress_html)
@@ -560,12 +590,15 @@ class FakePage:
         self.generated_image_alts = list(generated_image_alts or [])
         self.has_completed_video_polls = completed_video_polls is not None
         self.completed_video_polls = list(completed_video_polls or [[]])
+        self.agent_response_count = agent_response_count
+        self.agent_response_reads = 0
         self.active_completed_video_poll = list(self.completed_video_polls[0])
         self.context = FakeCdpContext(self)
         self.checkbox_count = checkbox_count
         self.card_delete_available = card_delete_available
         self.card_delete_removes = card_delete_removes
         self.card_click_opens_editor = card_click_opens_editor
+        self.fallback_composer_available = fallback_composer_available
         self.in_clip_editor = False
         self.hovered_card_index = None
         self.card_menu_open = False
@@ -636,6 +669,8 @@ class FakePage:
             return FakeLocator(self, "media_cards")
         if selector == '[data-testid="virtuoso-item-list"]:visible':
             return FakeLocator(self, "media_list")
+        if selector == '[data-slate-editor="true"][role="textbox"]:visible':
+            return FakeLocator(self, "fallback_prompt")
         if selector == '[aria-busy="true"]:visible':
             return FakeLocator(self, "busy")
         if selector == "img[alt]":
@@ -651,6 +686,10 @@ class FakePage:
             return FakeLocator(self, "launch")
         if role == "button" and "download product clips" in pattern:
             return FakeLocator(self, "bulk_download")
+        if role == "button" and (
+            "thumb_up" in pattern or "good response" in pattern or "คำตอบดี" in pattern
+        ):
+            return FakeLocator(self, "agent_response_feedback")
         if role == "button" and (
             "back to project" in pattern or "กลับไปที่โปรเจ็กต์" in pattern
         ):
@@ -975,7 +1014,10 @@ def test_google_flow_editor_readiness_retries_destroyed_navigation_context():
             )
         ],
     )
-    client, _ = _client(page, editor_ready_timeout_seconds=1.0)
+    # The reconciliation inventory itself needs several bounded observations;
+    # leave enough simulated time for that, then let the rename postcondition
+    # time out without a real sleep.
+    client, _ = _client(page, editor_ready_timeout_seconds=5.0)
 
     with client.acquire_workspace(_job()) as workspace:
         assert workspace.page is page
@@ -1005,7 +1047,7 @@ def test_google_flow_fatal_application_error_is_not_actionable():
             "(reading 'service')</main>"
         ]
     )
-    client, _ = _client(page)
+    client, _ = _client(page, editor_ready_timeout_seconds=1.0)
 
     assert client._is_editor_actionable(page) is False
 
@@ -1712,7 +1754,7 @@ def test_flow_workspace_rename_completes_from_semantic_names_when_send_stays_dis
         agent_enabled_states=[False],
         send_enabled_after_click=False,
     )
-    client, _ = _client(page, timeout_seconds=1.0)
+    client, _ = _client(page, timeout_seconds=1.0, editor_ready_timeout_seconds=5.0)
     paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
     monkeypatch.setattr(
         google_flow,
@@ -1733,6 +1775,37 @@ def test_flow_workspace_rename_completes_from_semantic_names_when_send_stays_dis
     ) == 1
     assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
     assert ("click", "bulk_download") in page.actions
+
+
+def test_flow_workspace_waits_for_agent_response_before_single_rename_refresh(
+    monkeypatch, tmp_path
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"draft-{number}" for number in range(1, 7)],
+        renamed_clip_names=[f"clip {number}" for number in range(1, 7)],
+        inventory_sequence=[6, 6, 6],
+        agent_enabled_states=[False],
+        send_enabled_after_click=False,
+    )
+    client, _ = _client(page, timeout_seconds=1.0, editor_ready_timeout_seconds=5.0)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        _timeout_clock(monkeypatch)
+        result = workspace.reconcile_and_download(
+            _job(flow_generation_unresolved=True),
+            paths,
+        )
+
+    assert result == paths.flow_files
+    assert page.agent_response_reads >= 2
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
 
 
 def test_flow_workspace_rename_ignores_stale_submit_locator_after_click(
@@ -1781,7 +1854,10 @@ def test_flow_workspace_rename_stale_submit_locator_fails_closed_without_names(
         inventory_sequence=[6, 6, 6],
         send_stale_after_click=True,
     )
-    client, _ = _client(page)
+    # The reconciliation inventory itself needs several bounded observations;
+    # leave enough simulated time for that, then let the rename postcondition
+    # time out without a real sleep.
+    client, _ = _client(page, editor_ready_timeout_seconds=5.0)
     paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
     monkeypatch.setattr(
         google_flow,
@@ -1790,6 +1866,7 @@ def test_flow_workspace_rename_stale_submit_locator_fails_closed_without_names(
     )
 
     with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        _timeout_clock(monkeypatch)
         with pytest.raises(FlowWorkspaceVerificationError, match="semantic clip names"):
             workspace.reconcile_and_download(
                 _job(flow_generation_unresolved=True),
@@ -1807,7 +1884,7 @@ def test_flow_workspace_rename_stale_submit_locator_fails_closed_without_names(
     assert ("click", "delete_selected") not in page.actions
 
 
-def test_flow_workspace_rename_submits_once_across_two_postcondition_reloads(
+def test_flow_workspace_rename_fails_closed_when_names_are_incomplete_after_single_refresh(
     monkeypatch, tmp_path
 ):
     complete_names = [f"clip {number}" for number in range(1, 7)]
@@ -1830,16 +1907,16 @@ def test_flow_workspace_rename_submits_once_across_two_postcondition_reloads(
 
     with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
         _timeout_clock(monkeypatch)
-        result = workspace.reconcile_and_download(
-            _job(flow_generation_unresolved=True),
-            paths,
-        )
+        with pytest.raises(FlowWorkspaceVerificationError, match="semantic clip names"):
+            workspace.reconcile_and_download(
+                _job(flow_generation_unresolved=True),
+                paths,
+            )
 
-    assert result == paths.flow_files
     assert page.actions.count(
         ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
     ) == 1
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}] * 2
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
 
 
 @pytest.mark.parametrize(
@@ -2079,7 +2156,7 @@ def test_flow_workspace_rejects_duplicate_semantic_names_before_bulk_download(
         generation_completion_names=[f"draft-{number}" for number in range(1, 7)],
         renamed_clip_names=["clip 1", "clip 1", "clip 2", "clip 3", "clip 4", "clip 5"],
     )
-    client, _ = _client(page)
+    client, _ = _client(page, editor_ready_timeout_seconds=5.0)
     paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
     monkeypatch.setattr(
         google_flow,
@@ -2089,6 +2166,7 @@ def test_flow_workspace_rejects_duplicate_semantic_names_before_bulk_download(
     )
 
     with client.acquire_workspace(_job()) as workspace:
+        _timeout_clock(monkeypatch)
         with pytest.raises(FlowWorkspaceVerificationError, match="semantic"):
             workspace.generate_and_download(_job(), paths)
 
@@ -2155,6 +2233,40 @@ def test_ensure_agent_active_does_not_toggle_an_already_active_agent_twice():
     assert second.prompt.kind == "prompt"
     assert page.agent_click_count == 0
     assert page.agent_pressed is True
+
+
+def test_ensure_agent_active_uses_visible_fallback_composer_without_agent_button():
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        agent_available=False,
+        agent_text_available=False,
+        fallback_composer_available=True,
+    )
+    client, _ = _client(page)
+
+    composer = client._ensure_agent_active(page)
+
+    assert composer.prompt.kind == "fallback_prompt"
+    assert page.agent_click_count == 0
+
+
+def test_google_flow_submits_rename_from_fallback_composer_without_agent_button():
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        agent_available=False,
+        agent_text_available=False,
+        fallback_composer_available=True,
+    )
+    client, _ = _client(page)
+
+    client._submit_agent_prompt(page, google_flow.RENAME_CLIPS_INSTRUCTION)
+
+    assert (
+        "fill",
+        "fallback_prompt",
+        google_flow.RENAME_CLIPS_INSTRUCTION,
+    ) in page.actions
+    assert ("click", "fallback_generate") in page.actions
 
 
 def test_ensure_agent_active_fails_closed_for_unknown_toggle_state():
