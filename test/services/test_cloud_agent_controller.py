@@ -184,6 +184,41 @@ def test_draft_generates_a_complete_start_payload_without_starting_production_wo
     assert calls["plan"]["target_words"] == 130
 
 
+def test_draft_rejects_a_sanitized_llm_error_without_generating_a_clip_plan(
+    monkeypatch, tmp_path
+):
+    client, _store = _client(tmp_path)
+    cloud_agent = _cloud_agent_controller()
+
+    monkeypatch.setattr(
+        cloud_agent,
+        "generate_script",
+        lambda **_kwargs: "Error: aihubmix: api_key is not set",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "generate_six_clip_plan",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a failed script generation must not create a clip plan"
+        ),
+        raising=False,
+    )
+
+    response = client.post(
+        "/api/v1/cloud-agent/draft",
+        json={
+            "subject": "Why Saturn Has a Hexagon",
+            "language": "English",
+            "target_words": 130,
+            "script": "",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["message"] == "aihubmix: api_key is not set"
+
+
 def test_job_list_and_detail_expose_server_derived_timing_fields(tmp_path):
     client, store = _client(tmp_path)
     created = _created_job(store)

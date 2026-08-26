@@ -147,6 +147,12 @@ def create_cloud_agent_draft(request: Request, body: CloudJobDraftRequest):
                 f"Write approximately {body.target_words} words for this narration."
             ),
         ).strip()
+    if script.startswith("Error:"):
+        raise HttpException(
+            task_id="cloud-agent-draft",
+            status_code=422,
+            message=script.removeprefix("Error:").strip(),
+        )
     if not script:
         raise HttpException(
             task_id="cloud-agent-draft",
