@@ -38,6 +38,8 @@ _COMPATIBLE_COLUMNS = {
     "target_final_duration_seconds": "REAL NOT NULL DEFAULT 60",
     "flow_generation_unresolved": "INTEGER NOT NULL DEFAULT 0",
     "flow_cleanup_unresolved": "INTEGER NOT NULL DEFAULT 0",
+    "canva_design_url": "TEXT NOT NULL DEFAULT ''",
+    "canva_audio_card_count": "INTEGER NOT NULL DEFAULT -1",
 }
 
 _MUTABLE_COLUMNS = {
@@ -54,6 +56,8 @@ _MUTABLE_COLUMNS = {
     "target_final_duration_seconds",
     "flow_generation_unresolved",
     "flow_cleanup_unresolved",
+    "canva_design_url",
+    "canva_audio_card_count",
     "final_video",
     "error_code",
     "error_message",
@@ -121,6 +125,8 @@ class CloudJobStore:
                     target_final_duration_seconds REAL NOT NULL DEFAULT 60,
                     flow_generation_unresolved INTEGER NOT NULL DEFAULT 0,
                     flow_cleanup_unresolved INTEGER NOT NULL DEFAULT 0,
+                    canva_design_url TEXT NOT NULL DEFAULT '',
+                    canva_audio_card_count INTEGER NOT NULL DEFAULT -1,
                     final_video TEXT NOT NULL,
                     error_code TEXT NOT NULL,
                     error_message TEXT NOT NULL,
@@ -179,6 +185,8 @@ class CloudJobStore:
             target_final_duration_seconds=row["target_final_duration_seconds"],
             flow_generation_unresolved=bool(row["flow_generation_unresolved"]),
             flow_cleanup_unresolved=bool(row["flow_cleanup_unresolved"]),
+            canva_design_url=row["canva_design_url"],
+            canva_audio_card_count=row["canva_audio_card_count"],
             final_video=row["final_video"],
             error_code=row["error_code"],
             error_message=row["error_message"],
@@ -224,12 +232,13 @@ class CloudJobStore:
                     flow_status, canva_status, voice_file, audio_duration_seconds,
                     canva_playback_speed, target_final_duration_seconds,
                     flow_generation_unresolved, flow_cleanup_unresolved,
+                    canva_design_url, canva_audio_card_count,
                     final_video, error_code,
                     error_message, worker_id, lease_until, created_at, started_at,
                     completed_at, updated_at
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -256,6 +265,8 @@ class CloudJobStore:
                     record.target_final_duration_seconds,
                     record.flow_generation_unresolved,
                     record.flow_cleanup_unresolved,
+                    record.canva_design_url,
+                    record.canva_audio_card_count,
                     record.final_video,
                     record.error_code,
                     record.error_message,

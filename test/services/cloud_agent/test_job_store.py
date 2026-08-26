@@ -132,6 +132,24 @@ def test_create_job_persists_defaults_and_six_clip_plan_across_reopen(tmp_path):
     assert loaded.clip_plan.model_dump() == created.clip_plan.model_dump()
 
 
+def test_cloud_job_store_round_trips_canva_workspace_fields(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    created = store.create_job(_request())
+
+    updated = store.patch_job(
+        created.id,
+        canva_design_url="https://www.canva.com/design/DEMO/edit",
+        canva_audio_card_count=1,
+    )
+
+    assert updated.canva_design_url == "https://www.canva.com/design/DEMO/edit"
+    assert updated.canva_audio_card_count == 1
+    reopened = CloudJobStore(str(tmp_path / "agent.sqlite3")).get_job(created.id)
+    assert reopened is not None
+    assert reopened.canva_design_url == "https://www.canva.com/design/DEMO/edit"
+    assert reopened.canva_audio_card_count == 1
+
+
 def test_pre_v22_database_is_migrated_without_losing_job(tmp_path):
     db_path = tmp_path / "legacy-agent.sqlite3"
     _create_pre_v22_database(db_path)

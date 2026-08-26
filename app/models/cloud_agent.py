@@ -99,6 +99,8 @@ class CloudJobRecord(CloudJobCreate):
     target_final_duration_seconds: float = Field(default=60.0, gt=0)
     flow_generation_unresolved: bool = False
     flow_cleanup_unresolved: bool = False
+    canva_design_url: str = ""
+    canva_audio_card_count: int = -1
     final_video: str
     error_code: str
     error_message: str
