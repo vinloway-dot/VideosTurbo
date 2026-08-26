@@ -383,6 +383,98 @@ class FakeRefreshableAudioCleanupPage:
         self.reload_count += 1
 
 
+class _AudioDeleteCards:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return 0 if self.page.deleted else 1
+
+    def nth(self, index):
+        assert index == 0
+        return self
+
+    def bounding_box(self):
+        return {"x": 20.0, "y": 20.0, "width": 100.0, "height": 40.0}
+
+
+class _AudioDeleteControl:
+    def __init__(self, page, *, name):
+        self.page = page
+        self.name = name
+
+    def count(self):
+        return 1
+
+    def nth(self, index):
+        assert index == 0
+        return self
+
+    def bounding_box(self):
+        return {"x": 80.0, "y": 24.0, "width": 20.0, "height": 20.0}
+
+    def wait_for(self, *, state, timeout):
+        assert state == "visible"
+        assert timeout > 0
+        self.page.waited_for_delete = True
+
+
+class _EmptyLocator:
+    def count(self):
+        return 0
+
+
+class _AudioDeleteMouse:
+    def __init__(self, page):
+        self.page = page
+        self.click_count = 0
+
+    def move(self, _x, _y):
+        return None
+
+    def click(self, _x, _y):
+        self.click_count += 1
+        if self.click_count == 2:
+            self.page.deleted = True
+
+
+class FakeGenericAudioDeletePage:
+    """Models Canva's generic card overlay and aria-labelled Audio Delete command."""
+
+    def __init__(self):
+        self.deleted = False
+        self.waited_for_delete = False
+        self.cards = _AudioDeleteCards(self)
+        self.generic_details = _AudioDeleteControl(self, name="Show details")
+        self.delete = _AudioDeleteControl(self, name="Delete")
+        self.mouse = _AudioDeleteMouse(self)
+
+    def get_by_role(self, role, *, name, exact):
+        assert role == "button"
+        assert exact is True
+        if name == "Show details for “voice.mp3”":
+            return _EmptyLocator()
+        if name == "Show details":
+            return self.generic_details
+        raise AssertionError(f"unexpected role query: {name}")
+
+    def locator(self, selector):
+        assert selector == 'button[aria-label="Delete"]'
+        return self.delete
+
+    def evaluate(self, _expression, _point):
+        return True
+
+
+class _AudioDeletePanel:
+    def __init__(self, cards):
+        self.cards = cards
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) == ("button", "Apply audio: voice.mp3", True)
+        return self.cards
+
+
 class FakeCanvaContext:
     def __init__(self, page):
         self.pages = [page]
@@ -1093,6 +1185,20 @@ def test_canva_audio_cleanup_refreshes_once_before_rejecting_a_stale_nonempty_pa
     client._clean_uploaded_audio(page, "voice.mp3")
 
     assert page.reload_count == 1
+
+
+def test_canva_audio_delete_uses_generic_card_overlay_and_aria_delete(monkeypatch):
+    """Catches Canva Audio exposing generic details plus aria-labelled Delete."""
+    page = FakeGenericAudioDeletePage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 0.0
+    panel = _AudioDeletePanel(page.cards)
+    monkeypatch.setattr(client, "_open_uploaded_audio", lambda _page: panel)
+
+    client._delete_uploaded_audio_card(page, page.cards, "voice.mp3")
+
+    assert page.deleted is True
+    assert page.waited_for_delete is True
 
 
 def test_canva_open_uploaded_videos_uses_visible_tab_when_hidden_stale_tab_remains():

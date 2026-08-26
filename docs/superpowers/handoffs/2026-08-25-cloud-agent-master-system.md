@@ -46,7 +46,18 @@ open design → pre-clean Uploads/Videos → timeline zero
 → server validation → FINAL_VALIDATED → post-clean Videos → COMPLETED
 ```
 
-Cleanup is card-scoped and fail-closed: fresh hover, fresh overlapping `Show details for “<filename>”` control, fresh hit-tested geometry, verify `Details`/`Download`/`Move`/`Move to Trash`, click Trash immediately, then re-query. Never use fixed coordinates or delete Images/Audio/another Canva project. Scope must not silently broaden beyond the dedicated VideosTurbo workspace.
+Video cleanup is card-scoped and fail-closed: fresh hover, fresh overlapping `Show details for “<filename>”` control, fresh hit-tested geometry, verify `Details`/`Download`/`Move`/`Move to Trash`, click Trash immediately, then re-query. Never use fixed coordinates or delete Images/another Canva project. Scope must not silently broaden beyond the dedicated VideosTurbo workspace.
+
+### Validated Audio cleanup contract (2026-08-26)
+
+Before uploading canonical narration, delete only stale cards named
+`Apply audio: voice.mp3` from the live `Uploads -> Audio` panel. For each fresh,
+visible card: hover its current card box; select the generic `Show details` button
+only when its current hit-tested box overlaps that card; wait for exactly one
+visible `button[aria-label="Delete"]`; click it once; then reopen `Audio` and
+require the exact managed-card count to decrease by one. After the last deletion,
+reload once and wait for Audio hydration; zero is accepted only when it remains
+zero after hydration. This is distinct from Video's `Move to Trash` action.
 
 ## Development and stopping rule
 

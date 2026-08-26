@@ -13,7 +13,10 @@
 ## Global Constraints
 
 - Use the configured `cloud_agent_canva_template_url`; never navigate to another Canva project.
-- Cleanup applies only to `Uploads → Videos`; never delete Images or Audio.
+- Cleanup applies only to managed VideosTurbo media: `Uploads → Videos` uses
+  `Move to Trash`; `Uploads → Audio` deletes only stale canonical `voice.mp3`
+  cards using the validated Audio contract below. Never delete Images or
+  unrelated Audio.
 - The production Canva workspace is dedicated to VideosTurbo. If a live inspection proves unrelated user videos are present, fail closed before broad deletion.
 - Never use fixed coordinates, `force=True`, cached locators, or cached geometry.
 - The only permitted geometric clicks are fresh, card-scoped hit-tested coordinates for Canva's transient details overlay and its immediately opened `Move to Trash` menu item.
@@ -22,6 +25,16 @@
 - Do not synthesize TTS, submit Google Flow Generate, resize/transcode source Flow clips, start Task 15, or consume Paid Attempt #2.
 - Preserve the existing final MP4/checkpoint if post-clean fails. No new schema flag is introduced unless a failing recovery test proves it necessary.
 - All production behavior begins with a focused RED test whose failure is caused by the missing behavior, then the smallest GREEN implementation.
+
+### Validated Audio deletion selector (2026-08-26)
+
+For each exact stale `voice.mp3` card, hover the current card box and select the
+generic `Show details` control only when its fresh hit-tested box overlaps the
+same card. Wait for the popup's unique `button[aria-label="Delete"]`, click it
+once, reopen the Audio panel, and require the exact card count to decrease by
+one. After the final delete, reload once and require the hydrated count is zero.
+Do not use `Move to Trash` for Audio, and never use fixed coordinates or an
+unscoped global Delete selector.
 
 ---
 

@@ -354,13 +354,22 @@ class CanvaAssemblyClient:
         time.sleep(self.poll_seconds)
         overlay = self._card_details_overlay(page, audio_name, card_box)
         if overlay is None:
+            overlay = self._generic_card_details_overlay(page, card_box)
+        if overlay is None:
             raise CanvaUIVerificationError("Canva audio-card details overlay cannot be verified")
         _, overlay_box = overlay
         page.mouse.click(
             overlay_box["x"] + overlay_box["width"] / 2,
             overlay_box["y"] + overlay_box["height"] / 2,
         )
-        delete = page.get_by_role("button", name="Delete", exact=True)
+        delete = page.locator('button[aria-label="Delete"]')
+        try:
+            delete.wait_for(
+                state="visible",
+                timeout=int(self._MEDIA_MENU_HYDRATION_SECONDS * 1_000),
+            )
+        except PlaywrightTimeoutError as exc:
+            raise CanvaUIVerificationError("Canva audio Delete action cannot be verified") from exc
         delete_box = self._first_visible_box(delete)[1]
         if delete.count() != 1 or delete_box is None or not self._is_hit_testable(page, delete_box):
             raise CanvaUIVerificationError("Canva audio Delete action cannot be verified")
@@ -408,6 +417,20 @@ class CanvaAssemblyClient:
 
     def _card_details_overlay(self, page: Any, name: str, card_box: dict[str, float]) -> tuple[Any, dict[str, float]] | None:
         overlays = page.get_by_role("button", name=f'Show details for “{name}”', exact=True)
+        for index in range(overlays.count()):
+            candidate = overlays.nth(index)
+            box = candidate.bounding_box()
+            if box is None or not self._boxes_overlap(card_box, box):
+                continue
+            if self._is_hit_testable(page, box):
+                return candidate, box
+        return None
+
+    def _generic_card_details_overlay(
+        self, page: Any, card_box: dict[str, float]
+    ) -> tuple[Any, dict[str, float]] | None:
+        """Find Canva Audio's unnamed details control only when it overlaps its card."""
+        overlays = page.get_by_role("button", name="Show details", exact=True)
         for index in range(overlays.count()):
             candidate = overlays.nth(index)
             box = candidate.bounding_box()

@@ -17,6 +17,16 @@
 - No unrelated Canva media deletion, coordinates, secrets, or browser-profile data.
 - Every live failure retains `FLOW_READY` and source artifacts.
 
+## Superseding validated Audio deletion selector (2026-08-26)
+
+The managed narration cleanup contract is now proven in the live Canva UI. Audio
+uses a generic `Show details` button that must be associated with the hovered
+`voice.mp3` card through fresh overlapping, hit-tested geometry. Its popup Delete
+command is `button[aria-label="Delete"]`, not a role/name `Delete` selector and
+not Video's `Move to Trash`. Wait for that command to be visible, click it once,
+re-open the live Audio panel, and require the managed-card count to decrease by
+one. After cleanup, reload once and require the hydrated count remains zero.
+
 ---
 
 ### Task 1: Durable CloudJob workspace fields
