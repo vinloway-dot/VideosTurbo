@@ -324,6 +324,53 @@ class _CleanupPanel:
         return self.cards
 
 
+class _StaleDeleteCard:
+    def count(self):
+        return 1
+
+    def nth(self, index):
+        assert index == 0
+        return self
+
+    def bounding_box(self):
+        return {"x": 1.0, "y": 1.0, "width": 10.0, "height": 10.0}
+
+    def get_attribute(self, name):
+        assert name == "aria-label"
+        return "clip_01.mp4"
+
+
+class _FreshDeletePanel:
+    def __init__(self, page):
+        self.page = page
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) == ("button", "clip_01.mp4", True)
+        return _CleanupCards(0 if self.page.deleted else 1)
+
+
+class _DeleteMouse:
+    def __init__(self, page):
+        self.page = page
+        self.click_count = 0
+
+    def move(self, _x, _y):
+        return None
+
+    def click(self, _x, _y):
+        self.click_count += 1
+        if self.click_count == 2:
+            self.page.deleted = True
+
+
+class FakeDetachedVideoDeletePage:
+    """Canva discards the original card locator immediately after Move to Trash."""
+
+    def __init__(self):
+        self.deleted = False
+        self.mouse = _DeleteMouse(self)
+
+
 class FakeCanvaContext:
     def __init__(self, page):
         self.pages = [page]
@@ -1022,6 +1069,32 @@ def test_canva_waits_for_card_menu_hydration_before_verifying_move_to_trash():
 
     assert trash is not None
     assert trash_box == {"x": 1.0, "y": 1.0, "width": 10.0, "height": 10.0}
+
+
+def test_canva_video_delete_requeries_live_card_count_after_canva_detaches_old_panel(
+    monkeypatch,
+):
+    """Catches waiting on a stale card locator after Canva has already trashed the video."""
+    page = FakeDetachedVideoDeletePage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.0
+    client.poll_seconds = 0.0
+    cards = _StaleDeleteCard()
+    monkeypatch.setattr(
+        client,
+        "_card_details_overlay",
+        lambda _page, _name, _box: (object(), {"x": 1.0, "y": 1.0, "width": 10.0, "height": 10.0}),
+    )
+    monkeypatch.setattr(
+        client,
+        "_verified_trash_menu_item",
+        lambda _page: (object(), {"x": 1.0, "y": 1.0, "width": 10.0, "height": 10.0}),
+    )
+    monkeypatch.setattr(client, "_open_uploaded_videos", lambda _page: _FreshDeletePanel(page))
+
+    client._delete_uploaded_video_card(page, cards)
+
+    assert page.deleted is True
 
 
 def test_canva_add_uploaded_clips_fails_closed_when_one_click_does_not_add_exactly_one_video(

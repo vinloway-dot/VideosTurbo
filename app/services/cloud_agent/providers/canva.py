@@ -327,11 +327,13 @@ class CanvaAssemblyClient:
             trash_box["x"] + trash_box["width"] / 2,
             trash_box["y"] + trash_box["height"] / 2,
         )
-        deadline = time.monotonic() + self.export_timeout_seconds
-        while cards.count() >= before:
-            if time.monotonic() >= deadline:
-                raise CanvaUIVerificationError("Canva video deletion postcondition cannot be verified")
-            time.sleep(self.poll_seconds)
+        self._wait_for_fresh_card_count_decrease(
+            page,
+            before,
+            self._open_uploaded_videos,
+            lambda panel: panel.get_by_role("button", name=name, exact=True),
+            "Canva video deletion postcondition cannot be verified",
+        )
 
     def _delete_uploaded_audio_card(self, page: Any, cards: Any, audio_name: str) -> None:
         card, card_box = self._first_visible_box(cards)
@@ -356,10 +358,32 @@ class CanvaAssemblyClient:
             delete_box["x"] + delete_box["width"] / 2,
             delete_box["y"] + delete_box["height"] / 2,
         )
+        self._wait_for_fresh_card_count_decrease(
+            page,
+            before,
+            self._open_uploaded_audio,
+            lambda panel: panel.get_by_role(
+                "button", name=f"Apply audio: {audio_name}", exact=True
+            ),
+            "Canva audio deletion postcondition cannot be verified",
+        )
+
+    def _wait_for_fresh_card_count_decrease(
+        self,
+        page: Any,
+        before: int,
+        open_panel: Any,
+        cards_for_panel: Any,
+        error_message: str,
+    ) -> None:
         deadline = time.monotonic() + self.export_timeout_seconds
-        while cards.count() >= before:
+        while True:
+            panel = open_panel(page)
+            card_count = 0 if panel is None else cards_for_panel(panel).count()
+            if card_count < before:
+                return
             if time.monotonic() >= deadline:
-                raise CanvaUIVerificationError("Canva audio deletion postcondition cannot be verified")
+                raise CanvaUIVerificationError(error_message)
             time.sleep(self.poll_seconds)
 
     @staticmethod
