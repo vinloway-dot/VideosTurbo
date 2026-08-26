@@ -323,9 +323,7 @@ class FlowWorkspaceRun:
         )
 
     def _semantic_names_are_complete(self, expected_count: int) -> bool:
-        if not self.client._media_inventory_is_observable(self.page):
-            return False
-        if self.client._media_card_count(self.page) != expected_count:
+        if self.page.get_by_role("checkbox").count() != expected_count:
             return False
         return all(
             self.page.get_by_text(f"clip {number}", exact=True).count() == 1
@@ -355,11 +353,7 @@ class FlowWorkspaceRun:
         )
 
     def _verify_semantic_names(self, expected_count: int) -> None:
-        if not self.client._media_inventory_is_observable(self.page):
-            raise FlowWorkspaceVerificationError(
-                "Google Flow semantic media inventory could not be verified"
-            )
-        if self.client._media_card_count(self.page) != expected_count:
+        if self.page.get_by_role("checkbox").count() != expected_count:
             raise FlowWorkspaceVerificationError(
                 "Google Flow semantic clip count could not be verified"
             )
@@ -794,8 +788,6 @@ class GoogleFlowClient:
             progress = self._progress_for_expected_count(page.content(), expected_count)
             if progress is not None and progress >= expected_count:
                 return
-            if self._named_completed_card_set(page, expected_count=expected_count):
-                return
             fingerprints = self._completed_video_card_fingerprints(
                 page,
                 expected_count=expected_count,
@@ -814,25 +806,6 @@ class GoogleFlowClient:
                     f"Google Flow generation timed out before {expected_count}/{expected_count}"
                 )
             time.sleep(self.poll_seconds)
-
-    @classmethod
-    def _named_completed_card_set(cls, page: Any, *, expected_count: int) -> bool:
-        """Accept a completed renamed card grid when Flow omits AX video metadata."""
-        try:
-            if not cls._media_inventory_is_observable(page):
-                return False
-            if cls._media_card_count(page) != expected_count:
-                return False
-            if page.locator('[aria-busy="true"]:visible').count():
-                return False
-            if page.get_by_role("progressbar").count():
-                return False
-            return all(
-                page.get_by_text(f"clip {number}", exact=True).count() == 1
-                for number in range(1, expected_count + 1)
-            )
-        except PlaywrightError:
-            return False
 
     @classmethod
     def _completed_video_card_fingerprints(
