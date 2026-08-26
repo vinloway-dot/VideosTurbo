@@ -5538,72 +5538,9 @@ def _render_generation_controls(
 
 
 def _render_application():
-    """按固定顺序渲染顶部栏、弹窗、生成表单和任务结果。"""
+    """Render the retained Cloud Agent entry point."""
     _render_top_bar()
     cloud_agent.render_cloud_agent_panel()
-
-    if st.session_state.get("settings_dialog_open", False):
-        _render_settings_dialog()
-
-    restore_applied = _apply_pending_task_restore()
-    restore_candidate_id = st.session_state.get("task_restore_candidate_id")
-    if restore_candidate_id:
-        _render_task_restore_dialog(restore_candidate_id)
-    restore_succeeded = st.session_state.pop("task_restore_succeeded", False)
-    if restore_applied or restore_succeeded:
-        st.success(tr("Task Configuration Loaded"))
-
-    with st.container(key="main_settings_grid"):
-        panel = st.columns(4)
-    left_panel = panel[0]
-    middle_panel = panel[1]
-    audio_panel = panel[2]
-    right_panel = panel[3]
-
-    params = VideoParams(video_subject="")
-    params.match_materials_to_script = bool(
-        st.session_state.get("match_materials_to_script", False)
-    )
-    _render_script_settings(left_panel, params)
-
-    uploaded_files = _render_six_clip_video_settings(middle_panel, params)
-    uploaded_audio_file, uploaded_bgm_file, voice_mode = _render_audio_settings(
-        audio_panel, params
-    )
-
-    _render_subtitle_settings(right_panel, params)
-
-    def refresh_six_clip_plan():
-        current_script = str(params.video_script or "").strip()
-        if not current_script:
-            raise ValueError("Generate or enter the Video Script first.")
-        return _run_llm_read_operation(
-            "generate_six_clip_plan",
-            lambda app_config_snapshot: six_clip_plan.generate_six_clip_plan(
-                current_script,
-                language=params.video_language,
-                target_words=params.target_words,
-                app_config=app_config_snapshot,
-            ),
-        )
-
-    params.six_clip_plan = six_clip_timeline.render_six_clip_sections(
-        params.target_words, refresh_plan=refresh_six_clip_plan
-    )
-    params.six_clip_mode = True
-
-    generation_submitted = _render_generation_controls(
-        params,
-        uploaded_files,
-        uploaded_audio_file,
-        uploaded_bgm_file,
-        voice_mode,
-    )
-
-    # 生成分支在启动后台线程前已经请求过保存。普通控件交互继续请求非阻塞保存；
-    # 如果后台任务正在使用配置，配置层会在任务结束时自动应用并落盘最新值。
-    if not generation_submitted:
-        _save_runtime_config()
 
 
 _render_application()
