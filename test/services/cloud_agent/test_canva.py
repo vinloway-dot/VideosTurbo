@@ -493,6 +493,8 @@ class FakeHydratingUploadInventoryPage:
             return self.video_panel
         if selector.endswith('test-tabpanel-audio"]'):
             return self.audio_panel
+        if selector.endswith('-tabpanel-photos"]'):
+            return _InventoryCount(0)
         if selector.endswith('-tabpanel-videos"]'):
             return self.video_tab
         if selector.endswith('-tabpanel-audio"]'):
@@ -525,6 +527,18 @@ class FakeZeroVideoUploadInventoryPage(FakeHydratingUploadInventoryPage):
     def locator(self, selector):
         selector = selector.removesuffix(":visible")
         if selector.endswith('-tabpanel-videos"]'):
+            return _NoVideoUploadTab()
+        return super().locator(selector)
+
+
+class FakeNoMediaCategoryUploadInventoryPage(FakeZeroVideoUploadInventoryPage):
+    """Models a fresh Canva Uploads panel that shows only Images and Folders."""
+
+    def locator(self, selector):
+        selector = selector.removesuffix(":visible")
+        if selector.endswith('-tabpanel-photos"]'):
+            return _InventoryCount(1)
+        if selector.endswith('-tabpanel-audio"]'):
             return _NoVideoUploadTab()
         return super().locator(selector)
 
@@ -1140,6 +1154,14 @@ def test_canva_upload_inventory_accepts_missing_videos_tab_after_pre_clean():
     client, _ = _assembly_client(FakeCanvaEditorPage())
 
     assert client._upload_inventory(page, "voice.mp3") == (0, 1)
+
+
+def test_canva_upload_inventory_defers_baseline_when_fresh_uploads_has_no_media_categories():
+    """Catches waiting for a non-existent Audio tab before the first video/audio upload."""
+    page = FakeNoMediaCategoryUploadInventoryPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    assert client._upload_inventory(page, "voice.mp3") is None
 
 
 def test_canva_upload_inventory_waits_for_audio_tab_before_selecting_it():
