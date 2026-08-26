@@ -1468,6 +1468,29 @@ def test_flow_workspace_preclean_refreshes_even_when_already_empty():
     assert not any(action[0] == "click" for action in page.actions)
 
 
+def test_flow_workspace_preclean_rehydrates_after_the_post_delete_reload(
+    monkeypatch,
+):
+    page = FakePage(progress_html=["<div>Ready</div>"], clip_names=[])
+    client, _ = _client(page)
+    hydrate_calls = []
+    original_hydrate = client._hydrate_project_workspace
+
+    def hydrate_after_reload(current_page, *, flow_generation_unresolved):
+        hydrate_calls.append((current_page, flow_generation_unresolved))
+        return original_hydrate(
+            current_page,
+            flow_generation_unresolved=flow_generation_unresolved,
+        )
+
+    monkeypatch.setattr(client, "_hydrate_project_workspace", hydrate_after_reload)
+
+    with client.acquire_workspace(_job()) as workspace:
+        workspace.preclean_and_verify_empty()
+
+    assert hydrate_calls == [(page, False), (page, False)]
+
+
 def test_flow_workspace_preclean_confirms_observable_delete_dialog():
     page = FakePage(
         progress_html=["<div>Ready</div>"],

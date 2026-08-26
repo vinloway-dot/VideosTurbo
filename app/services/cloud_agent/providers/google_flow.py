@@ -131,6 +131,15 @@ class FlowWorkspaceRun:
             self._delete_one_current_media_card()
 
         self.page.reload(wait_until="domcontentloaded")
+        try:
+            self.client._hydrate_project_workspace(
+                self.page,
+                flow_generation_unresolved=False,
+            )
+        except FlowWorkspaceVerificationError as exc:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow empty product workspace could not be verified"
+            ) from exc
         self.client._wait_for_stable_inventory(self.page, expected_count=0)
 
     def prepare_for_generation(self) -> None:
