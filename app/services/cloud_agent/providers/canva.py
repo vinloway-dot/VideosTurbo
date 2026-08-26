@@ -212,6 +212,7 @@ class CanvaAssemblyClient:
             session.clean_workspace(job_id)
 
     def _clean_open_page(self, page: Any) -> None:
+        self._clear_video_timeline(page)
         self._clean_uploaded_videos(
             page,
             tuple(f"clip_{index:02d}.mp4" for index in range(1, 7)),

@@ -1191,6 +1191,32 @@ def test_canva_assembly_cleans_only_current_job_video_and_audio_names_before_upl
     ]
 
 
+def test_canva_post_final_cleanup_clears_timeline_before_deleting_managed_uploads():
+    """Catches leaving the previous job's video and narration on the reusable design."""
+    page = FakeManagedMediaCleanupPage()
+    page.timeline_video_count = 7
+    client, _ = _assembly_client(page)
+
+    client._clean_open_page(page)
+
+    assert page.actions == [
+        ("clear_video_timeline",),
+        (
+            "clean_uploaded_videos",
+            (
+                "clip_01.mp4",
+                "clip_02.mp4",
+                "clip_03.mp4",
+                "clip_04.mp4",
+                "clip_05.mp4",
+                "clip_06.mp4",
+            ),
+        ),
+        ("clean_uploaded_audio", "voice.mp3"),
+    ]
+    assert page.timeline_video_count == 0
+
+
 def test_canva_clean_uploaded_videos_accepts_missing_videos_tab_as_verified_zero_state():
     """Catches treating Canva's absent Videos tab as an error after a successful cleanup."""
     client, _ = _assembly_client(FakeCanvaEditorPage())
