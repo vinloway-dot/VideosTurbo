@@ -323,7 +323,9 @@ class FlowWorkspaceRun:
         )
 
     def _semantic_names_are_complete(self, expected_count: int) -> bool:
-        if self.page.get_by_role("checkbox").count() != expected_count:
+        if not self.client._media_inventory_is_observable(self.page):
+            return False
+        if self.client._media_card_count(self.page) != expected_count:
             return False
         return all(
             self.page.get_by_text(f"clip {number}", exact=True).count() == 1
@@ -353,7 +355,11 @@ class FlowWorkspaceRun:
         )
 
     def _verify_semantic_names(self, expected_count: int) -> None:
-        if self.page.get_by_role("checkbox").count() != expected_count:
+        if not self.client._media_inventory_is_observable(self.page):
+            raise FlowWorkspaceVerificationError(
+                "Google Flow semantic media inventory could not be verified"
+            )
+        if self.client._media_card_count(self.page) != expected_count:
             raise FlowWorkspaceVerificationError(
                 "Google Flow semantic clip count could not be verified"
             )

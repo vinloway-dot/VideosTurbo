@@ -1743,6 +1743,19 @@ def test_flow_workspace_reconciliation_skips_rename_when_semantic_names_exist(
     assert ("click", "bulk_download") in page.actions
 
 
+def test_flow_workspace_accepts_semantic_card_names_without_checkboxes():
+    """The current Flow card grid exposes names but no selectable checkboxes."""
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"clip {number}" for number in range(1, 7)],
+        checkbox_count=0,
+    )
+    client, _ = _client(page)
+    workspace = google_flow.FlowWorkspaceRun(client, page)
+
+    assert workspace._semantic_names_are_complete(6) is True
+
+
 def test_flow_workspace_rename_completes_from_semantic_names_when_send_stays_disabled(
     monkeypatch, tmp_path
 ):
