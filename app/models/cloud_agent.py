@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -143,3 +144,25 @@ class CloudAgentHealth(BaseModel):
     storage_writable: bool
     free_space_ok: bool
     free_space_bytes: int = Field(ge=0)
+
+
+class TTSVoiceOption(BaseModel):
+    id: str
+    label: str
+
+
+class TTSSettingField(BaseModel):
+    name: str
+    label: str
+    kind: Literal["text", "password", "select", "voice_list"]
+    value: str | list[str] | None = None
+    configured: bool = False
+    choices: list[str] = Field(default_factory=list)
+
+
+class TTSProviderMetadata(BaseModel):
+    id: str
+    label: str
+    voices: list[TTSVoiceOption]
+    settings: list[TTSSettingField]
+    requires_explicit_voice_refresh: bool = False
