@@ -35,6 +35,18 @@ def _cloud_agent_controller():
     return importlib.import_module("app.controllers.v1.cloud_agent")
 
 
+def registered_cloud_agent_routes() -> set[str]:
+    app_router = importlib.import_module("app.router")
+    registered = set()
+    for route in app_router.root_api_router.routes:
+        path = str(route.path)
+        if not path.startswith("/api/v1/cloud-agent"):
+            continue
+        for method in getattr(route, "methods", set()):
+            registered.add(f"{method} {path}")
+    return registered
+
+
 def research_payload() -> dict:
     return {
         "subject": "Research-backed draft",
@@ -254,6 +266,13 @@ def test_research_draft_route_is_on_existing_cloud_agent_router(tmp_path, monkey
 
     assert response.status_code == 200
     assert response.json()["data"]["research_draft_id"] == "draft-1"
+
+
+def test_research_route_inventory_uses_only_cloud_agent_prefix():
+    routes = registered_cloud_agent_routes()
+
+    assert "POST /api/v1/cloud-agent/research/drafts" in routes
+    assert not any("web_search" in route or ":online" in route for route in routes)
 
 
 def test_research_failure_is_typed_safe_and_creates_no_job(tmp_path, monkeypatch):
