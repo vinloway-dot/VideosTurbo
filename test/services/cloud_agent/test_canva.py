@@ -269,6 +269,82 @@ class FakeAccessibleZeroNarrationPage:
         return _NarrationStartSliders()
 
 
+class _AudioPositionSlider:
+    def __init__(self, page, *, audio_start=False):
+        self.page = page
+        self.audio_start = audio_start
+
+    def count(self):
+        return 1
+
+    def get_attribute(self, name):
+        if self.audio_start:
+            if name == "aria-valuetext":
+                return self.page.audio_position_text
+            if name == "aria-valuenow":
+                return str(self.page.audio_position_raw)
+        if name == "aria-valuetext":
+            return self.page.audio_position_text
+        if name == "aria-valuenow":
+            return str(self.page.audio_position_raw)
+        return None
+
+    def bounding_box(self):
+        return self.page.audio_box if not self.audio_start else self.page.zero_box
+
+
+class _AudioTimelineStarts:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return 7
+
+    def nth(self, index):
+        if index == 0:
+            return _AudioPositionSlider(self.page, audio_start=True)
+        if index == 6:
+            return _AudioPositionSlider(self.page, audio_start=True)
+        return _NarrationStartSlider(index * 10_000_000, f"{index * 10} seconds")
+
+
+class _AudioPositionMouse:
+    def __init__(self, page):
+        self.page = page
+        self.is_down = False
+        self.moves = []
+
+    def move(self, x, y, *, steps=None):
+        self.moves.append((x, y, steps))
+
+    def down(self):
+        self.is_down = True
+
+    def up(self):
+        assert self.is_down is True
+        self.page.audio_position_text = "0 seconds"
+        self.page.audio_position_raw = 0
+
+
+class FakeCurrentCanvaAudioTimelinePage:
+    """Current Canva exposes a separate draggable audio-position control."""
+
+    def __init__(self):
+        self.audio_position_text = "9.1 seconds"
+        self.audio_position_raw = 9_102_000
+        self.audio_box = {"x": 300.0, "y": 20.0, "width": 20.0, "height": 28.0}
+        self.zero_box = {"x": 100.0, "y": 20.0, "width": 20.0, "height": 64.0}
+        self.mouse = _AudioPositionMouse(self)
+
+    def locator(self, selector):
+        assert selector == canva.CanvaAssemblyClient._VIDEO_START_EDGE
+        return _AudioTimelineStarts(self)
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) == ("slider", "Trimming position", True)
+        return _AudioPositionSlider(self)
+
+
 class _EventuallyEnabledDownloadButton:
     def __init__(self):
         self.states = [False, True]
@@ -1163,6 +1239,17 @@ def test_canva_accepts_accessible_zero_seconds_for_narration_position():
     client, _ = _assembly_client(FakeCanvaEditorPage())
 
     client._position_narration_at_zero(FakeAccessibleZeroNarrationPage())
+
+
+def test_canva_moves_current_audio_track_to_timeline_zero_before_verifying():
+    """Catches Canva adding narration at its current playhead instead of time zero."""
+    page = FakeCurrentCanvaAudioTimelinePage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    client._position_narration_at_zero(page)
+
+    assert page.audio_position_text == "0 seconds"
+    assert page.mouse.moves
 
 
 def test_canva_waits_for_final_download_to_become_enabled_after_captions():

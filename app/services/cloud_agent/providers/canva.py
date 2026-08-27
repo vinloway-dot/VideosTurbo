@@ -850,6 +850,44 @@ class CanvaAssemblyClient:
         starts = page.locator(self._VIDEO_START_EDGE)
         if starts.count() < 7:
             raise CanvaUIVerificationError("Canva narration cannot be verified at timeline time 0")
+
+        # Current Canva adds narration at the playhead.  Its audio track has a
+        # dedicated accessible position handle, unlike the six visual scenes.
+        if hasattr(page, "get_by_role"):
+            narration_position = page.get_by_role(
+                "slider", name="Trimming position", exact=True
+            )
+            if narration_position.count() == 1:
+                accessible_position = str(
+                    narration_position.get_attribute("aria-valuetext") or ""
+                ).strip().lower()
+                if accessible_position not in {"0 second", "0 seconds"}:
+                    source_box = narration_position.bounding_box()
+                    zero_box = starts.nth(0).bounding_box()
+                    if source_box is None or zero_box is None:
+                        raise CanvaUIVerificationError(
+                            "Canva narration position controls cannot be verified"
+                        )
+                    source_x = source_box["x"] + source_box["width"] / 2
+                    source_y = source_box["y"] + source_box["height"] / 2
+                    zero_x = zero_box["x"] + zero_box["width"] / 2
+                    page.mouse.move(source_x, source_y)
+                    page.mouse.down()
+                    page.mouse.move(zero_x, source_y, steps=12)
+                    page.mouse.up()
+
+                accessible_position = str(
+                    narration_position.get_attribute("aria-valuetext") or ""
+                ).strip().lower()
+                narration_start = page.locator(self._VIDEO_START_EDGE).nth(6)
+                if accessible_position in {"0 second", "0 seconds"} and str(
+                    narration_start.get_attribute("aria-valuetext") or ""
+                ).strip().lower() in {"0 second", "0 seconds"}:
+                    return
+                raise CanvaUIVerificationError(
+                    "Canva narration cannot be verified at timeline time 0"
+                )
+
         narration_start = starts.nth(6)
         accessible_position = str(
             narration_start.get_attribute("aria-valuetext") or ""
