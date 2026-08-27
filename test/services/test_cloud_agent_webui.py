@@ -1,3 +1,4 @@
+import ast
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -40,6 +41,28 @@ def test_cloud_agent_ui_is_a_thin_fastapi_client_with_required_controls_and_stat
     assert "/api/v1/cloud-agent/" in source
     assert "sqlite3" not in source.lower()
     assert "PersistentBrowserManager" not in source
+
+
+def test_cloud_agent_video_subject_uses_compact_multiline_text_area():
+    tree = ast.parse(UI_SOURCE.read_text(encoding="utf-8"))
+    subject_assignment = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "subject"
+            for target in node.targets
+        )
+    )
+    call = subject_assignment.value
+
+    assert isinstance(call, ast.Call)
+    assert isinstance(call.func, ast.Attribute)
+    assert call.func.attr == "text_area"
+    assert {keyword.arg: ast.literal_eval(keyword.value) for keyword in call.keywords} == {
+        "key": "cloud_agent_subject",
+        "height": 68,
+    }
 
 
 def test_cloud_agent_loads_tts_provider_metadata_through_fastapi(monkeypatch):

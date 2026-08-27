@@ -268,7 +268,11 @@ def render_cloud_agent_panel():
         "cloud_agent_custom_system_prompt", defaults["custom_system_prompt"]
     )
     st.subheader("Cloud Agent")
-    subject = st.text_input("Video Subject", key="cloud_agent_subject")
+    subject = st.text_area(
+        "Video Subject",
+        key="cloud_agent_subject",
+        height=68,
+    )
     words = st.number_input("Target Words", min_value=1, value=130, key="cloud_agent_words")
     language_labels = {
         language_code: label for label, language_code in SCRIPT_LANGUAGE_OPTIONS
