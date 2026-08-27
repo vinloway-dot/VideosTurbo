@@ -117,3 +117,14 @@ div.st-key-cloud_agent_script_card [data-testid="stTextArea"] textarea {
 div.st-key-cloud_agent_script_card [data-testid="stExpander"] {
     margin-top: 0.75rem;
 }
+
+div.st-key-cloud_agent_generation_setup_card {
+    margin: 1rem 0 1.25rem;
+    border-color: var(--vt-border);
+    border-radius: var(--vt-radius);
+    box-shadow: var(--vt-shadow);
+}
+
+div.st-key-cloud_agent_generation_setup_card [data-testid="stExpander"] {
+    margin-top: 0.75rem;
+}

@@ -500,6 +500,14 @@ class _BriefSelection:
     research_model: str = ""
 
 
+@dataclass(frozen=True)
+class _GenerationSelection:
+    provider: str
+    voice: str
+    speed: float
+    prepared_voice: dict | None
+
+
 def _render_script_mode_control(options, default):
     return st.segmented_control(
         "Script creation mode",
@@ -613,54 +621,6 @@ def _render_video_brief(
                 format_func=lambda value: research_provider_labels[value],
                 key="cloud_agent_research_provider",
             )
-            selected_provider_metadata = next(
-                (item for item in research_provider_catalog if item["id"] == research_provider),
-                {"api_key_configured": False},
-            )
-            openrouter_metadata = _research_provider_metadata(research_provider_catalog, "openrouter")
-            aihubmix_metadata = _research_provider_metadata(research_provider_catalog, "aihubmix")
-            for provider_id, metadata in (("openrouter", openrouter_metadata), ("aihubmix", aihubmix_metadata)):
-                model_key = f"cloud_agent_research_{provider_id}_model"
-                if ui_state.get(model_key) not in metadata["models"]:
-                    ui_state[model_key] = metadata["default_model"]
-            with st.expander("Research Settings", expanded=False):
-                openrouter_model = st.selectbox("OpenRouter Model", options=openrouter_metadata["models"], key="cloud_agent_research_openrouter_model")
-                openrouter_custom_model_id = str(ui_state.get("cloud_agent_research_openrouter_custom_model_id", "") or "")
-                if openrouter_model == "custom":
-                    openrouter_custom_model_id = st.text_input("OpenRouter Custom Model ID", key="cloud_agent_research_openrouter_custom_model_id")
-                aihubmix_model = st.selectbox("AIHubMix Model", options=aihubmix_metadata["models"], key="cloud_agent_research_aihubmix_model")
-                aihubmix_custom_model_id = str(ui_state.get("cloud_agent_research_aihubmix_custom_model_id", "") or "")
-                if aihubmix_model == "custom":
-                    aihubmix_custom_model_id = st.text_input("AIHubMix Custom Model ID", key="cloud_agent_research_aihubmix_custom_model_id")
-                research_custom_system_prompt = st.text_area("Research Custom System Prompt", key="cloud_agent_research_custom_system_prompt", max_chars=8000, help="Leave blank to use the research system default prompt.")
-                if st.button("Save Research Settings", key="cloud_agent_save_research_settings"):
-                    try:
-                        verified, message = _save_and_verify_research_settings({
-                            "enabled": True, "provider": research_provider,
-                            "openrouter_model": openrouter_model,
-                            "openrouter_custom_model_id": openrouter_custom_model_id,
-                            "aihubmix_model": aihubmix_model,
-                            "aihubmix_custom_model_id": aihubmix_custom_model_id,
-                            "custom_system_prompt": research_custom_system_prompt,
-                        })
-                        if verified:
-                            ui_state["cloud_agent_research_settings_feedback"] = message
-                            st.rerun()
-                        else:
-                            st.error(message)
-                    except requests.RequestException as exc:
-                        st.error(_api_error_message(exc))
-                if feedback := ui_state.get("cloud_agent_research_settings_feedback"):
-                    st.success(feedback)
-            with st.expander("Research Provider Key", expanded=False):
-                st.caption(f"{research_provider_labels.get(research_provider, research_provider)} API key: {'configured' if selected_provider_metadata.get('api_key_configured') else 'not configured'}")
-                research_api_key_state_key = f"cloud_agent_research_api_key_{research_provider}"
-                st.text_input("Research API Key", type="password", key=research_api_key_state_key)
-                remove_research_key = bool(hasattr(st, "checkbox") and st.checkbox("Remove stored research API key", key=f"cloud_agent_research_remove_key_{research_provider}"))
-                st.button("Save Research API Key", key="cloud_agent_save_research_api_key", on_click=_submit_research_api_key, args=(research_provider,), kwargs={"remove": remove_research_key})
-                if feedback := ui_state.get("cloud_agent_research_key_feedback"):
-                    feedback_kind, feedback_message = feedback
-                    (st.success if feedback_kind == "success" else st.error)(feedback_message)
             with st.container(key="cloud_agent_research_source_area"):
                 st.caption("Up to 3 sources · Direct webpages and PDFs")
                 research_allow_citations = bool(st.checkbox("อนุญาตให้ใส่อ้างอิงในสคริปต์", value=False, key="cloud_agent_research_allow_citations"))
@@ -687,7 +647,7 @@ def _render_video_brief(
                                     model_choice=_research_model_choice(research_provider, ui_state),
                                     custom_model_id=_research_custom_model_id(research_provider, ui_state),
                                     source_urls=_research_source_urls(source_url_values),
-                                    custom_system_prompt=research_custom_system_prompt,
+                                    custom_system_prompt=str(ui_state.get("cloud_agent_research_custom_system_prompt", "") or ""),
                                     allow_citations=research_allow_citations,
                                 ))
                         st.rerun()
@@ -766,6 +726,406 @@ def _render_script_editor(*, brief, ui_state):
         return script, master_prompt
 
 
+def _advanced_settings_container():
+    return st.expander("Advanced settings", expanded=False)
+
+
+def _render_advanced_settings(
+    *,
+    ui_state,
+    defaults,
+    research_settings,
+    research_provider_catalog,
+    provider,
+    provider_metadata,
+):
+    if ui_state.get("cloud_agent_script_mode") == "Research Script":
+        research_provider = str(ui_state.get("cloud_agent_research_provider", "") or "")
+        research_provider_labels = {
+            item["id"]: item["label"] for item in research_provider_catalog
+        }
+        selected_provider_metadata = next(
+            (
+                item
+                for item in research_provider_catalog
+                if item["id"] == research_provider
+            ),
+            {"api_key_configured": False},
+        )
+        openrouter_metadata = _research_provider_metadata(
+            research_provider_catalog, "openrouter"
+        )
+        aihubmix_metadata = _research_provider_metadata(
+            research_provider_catalog, "aihubmix"
+        )
+        for provider_id, metadata in (
+            ("openrouter", openrouter_metadata),
+            ("aihubmix", aihubmix_metadata),
+        ):
+            model_key = f"cloud_agent_research_{provider_id}_model"
+            if ui_state.get(model_key) not in metadata["models"]:
+                ui_state[model_key] = metadata["default_model"]
+
+        st.caption("Research Settings")
+        openrouter_model = st.selectbox(
+            "OpenRouter Model",
+            options=openrouter_metadata["models"],
+            key="cloud_agent_research_openrouter_model",
+        )
+        openrouter_custom_model_id = str(
+            ui_state.get("cloud_agent_research_openrouter_custom_model_id", "") or ""
+        )
+        if openrouter_model == "custom":
+            openrouter_custom_model_id = st.text_input(
+                "OpenRouter Custom Model ID",
+                key="cloud_agent_research_openrouter_custom_model_id",
+            )
+        aihubmix_model = st.selectbox(
+            "AIHubMix Model",
+            options=aihubmix_metadata["models"],
+            key="cloud_agent_research_aihubmix_model",
+        )
+        aihubmix_custom_model_id = str(
+            ui_state.get("cloud_agent_research_aihubmix_custom_model_id", "") or ""
+        )
+        if aihubmix_model == "custom":
+            aihubmix_custom_model_id = st.text_input(
+                "AIHubMix Custom Model ID",
+                key="cloud_agent_research_aihubmix_custom_model_id",
+            )
+        research_custom_system_prompt = st.text_area(
+            "Research Custom System Prompt",
+            key="cloud_agent_research_custom_system_prompt",
+            max_chars=8000,
+            help="Leave blank to use the research system default prompt.",
+        )
+        if st.button(
+            "Save Research Settings", key="cloud_agent_save_research_settings"
+        ):
+            try:
+                verified, message = _save_and_verify_research_settings(
+                    {
+                        "enabled": True,
+                        "provider": research_provider,
+                        "openrouter_model": openrouter_model,
+                        "openrouter_custom_model_id": openrouter_custom_model_id,
+                        "aihubmix_model": aihubmix_model,
+                        "aihubmix_custom_model_id": aihubmix_custom_model_id,
+                        "custom_system_prompt": research_custom_system_prompt,
+                    }
+                )
+                if verified:
+                    ui_state["cloud_agent_research_settings_feedback"] = message
+                    st.rerun()
+                else:
+                    st.error(message)
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
+        if feedback := ui_state.get("cloud_agent_research_settings_feedback"):
+            st.success(feedback)
+
+        st.caption("Research Provider Key")
+        st.caption(
+            f"{research_provider_labels.get(research_provider, research_provider)} API key: "
+            f"{'configured' if selected_provider_metadata.get('api_key_configured') else 'not configured'}"
+        )
+        research_api_key_state_key = f"cloud_agent_research_api_key_{research_provider}"
+        st.text_input(
+            "Research API Key", type="password", key=research_api_key_state_key
+        )
+        remove_research_key = bool(
+            hasattr(st, "checkbox")
+            and st.checkbox(
+                "Remove stored research API key",
+                key=f"cloud_agent_research_remove_key_{research_provider}",
+            )
+        )
+        st.button(
+            "Save Research API Key",
+            key="cloud_agent_save_research_api_key",
+            on_click=_submit_research_api_key,
+            args=(research_provider,),
+            kwargs={"remove": remove_research_key},
+        )
+        if feedback := ui_state.get("cloud_agent_research_key_feedback"):
+            feedback_kind, feedback_message = feedback
+            (st.success if feedback_kind == "success" else st.error)(feedback_message)
+
+    if feedback := ui_state.get("cloud_agent_tts_settings_feedback"):
+        st.success(feedback)
+    st.caption("TTS Provider Settings")
+    settings = {}
+    secret_fields = set()
+    clear_secret_fields = []
+    for field in provider_metadata.get("settings", []):
+        name = field["name"]
+        if field["kind"] == "password":
+            secret_fields.add(name)
+            st.caption(
+                f"{field['label']}: "
+                f"{'configured' if field.get('configured') else 'not configured'}"
+            )
+            settings[name] = st.text_input(
+                field["label"],
+                type="password",
+                key=f"cloud_tts_{provider}_{name}",
+                on_change=_clear_tts_settings_feedback,
+            )
+            if hasattr(st, "checkbox") and st.checkbox(
+                f"Remove stored key: {field['label']}",
+                key=f"cloud_tts_remove_{provider}_{name}",
+                on_change=_clear_tts_settings_feedback,
+            ):
+                clear_secret_fields.append(name)
+        elif field["kind"] == "select":
+            settings[name] = st.selectbox(
+                field["label"],
+                field.get("choices", []),
+                key=f"cloud_tts_{provider}_{name}",
+                on_change=_clear_tts_settings_feedback,
+            )
+        elif field["kind"] == "voice_list":
+            settings[name] = st.text_input(
+                field["label"],
+                value=", ".join(field.get("value") or []),
+                key=f"cloud_tts_{provider}_{name}",
+                on_change=_clear_tts_settings_feedback,
+            )
+        else:
+            settings[name] = st.text_input(
+                field["label"],
+                value=str(field.get("value") or ""),
+                key=f"cloud_tts_{provider}_{name}",
+                on_change=_clear_tts_settings_feedback,
+            )
+    if st.button("Save TTS Settings", key="cloud_agent_save_tts_settings"):
+        try:
+            _api(
+                "PUT",
+                f"tts/providers/{provider}/settings",
+                json=_tts_settings_payload(
+                    settings=settings,
+                    secret_fields=secret_fields,
+                    clear_secret_fields=clear_secret_fields,
+                ),
+            )
+            verified, message = _verify_tts_settings_save(
+                settings=settings,
+                secret_fields=secret_fields,
+                clear_secret_fields=clear_secret_fields,
+                metadata=_api("GET", f"tts/providers/{provider}"),
+            )
+            if verified:
+                ui_state["cloud_agent_tts_settings_feedback"] = message
+                st.rerun()
+            else:
+                st.error(message)
+        except requests.RequestException as exc:
+            st.error(_api_error_message(exc))
+    tts_session_state = getattr(st, "session_state", {})
+    if provider_metadata.get("requires_explicit_voice_refresh") and st.button(
+        "Load Voices", key="cloud_agent_load_tts_voices"
+    ):
+        try:
+            tts_session_state["cloud_agent_tts_voices"] = _api(
+                "POST", f"tts/providers/{provider}/voices/refresh"
+            )["voices"]
+            st.rerun()
+        except requests.RequestException as exc:
+            st.error(_api_error_message(exc))
+
+    if feedback := ui_state.get("cloud_agent_defaults_feedback"):
+        st.success(feedback)
+    st.caption("Cloud Agent Defaults")
+    speed = float(ui_state.get("cloud_agent_speed", 1.0))
+    voice = str(ui_state.get("cloud_agent_voice", "") or "")
+    if st.button(
+        "Save TTS Provider & Voice Default",
+        key="cloud_agent_save_voice_default",
+    ):
+        try:
+            verified, message = _save_and_verify_cloud_agent_defaults(
+                _cloud_agent_defaults_payload(
+                    tts_provider=provider,
+                    voice_id=voice,
+                    voice_speed=speed,
+                    custom_system_prompt=defaults["custom_system_prompt"],
+                )
+            )
+            if verified:
+                ui_state["cloud_agent_defaults_feedback"] = message
+                st.rerun()
+            else:
+                st.error(message)
+        except requests.RequestException as exc:
+            st.error(_api_error_message(exc))
+    st.caption("Save the selected voice and Custom System Prompt for future jobs.")
+    if st.button("Save All Defaults", key="cloud_agent_save_defaults"):
+        try:
+            verified, message = _save_and_verify_cloud_agent_defaults(
+                _cloud_agent_defaults_payload(
+                    tts_provider=provider,
+                    voice_id=voice,
+                    voice_speed=speed,
+                    custom_system_prompt=str(
+                        ui_state.get("cloud_agent_custom_system_prompt", "") or ""
+                    ),
+                )
+            )
+            if verified:
+                ui_state["cloud_agent_defaults_feedback"] = message
+                st.rerun()
+            else:
+                st.error(message)
+        except requests.RequestException as exc:
+            st.error(_api_error_message(exc))
+    if st.button("Reset Defaults", key="cloud_agent_reset_defaults"):
+        try:
+            _api("POST", "defaults/reset")
+            for key in (
+                "cloud_agent_provider",
+                "cloud_agent_voice",
+                "cloud_agent_speed",
+                "cloud_agent_custom_system_prompt",
+            ):
+                ui_state.pop(key, None)
+            st.rerun()
+        except requests.RequestException as exc:
+            st.error(_api_error_message(exc))
+
+
+def _render_generation_setup(
+    *,
+    ui_state,
+    defaults,
+    research_settings,
+    research_provider_catalog,
+    script,
+    script_mode,
+    research_provider,
+    research_model,
+):
+    provider_catalog = _fallback_tts_catalog()
+    if hasattr(st, "runtime"):
+        try:
+            provider_catalog = _load_tts_provider_catalog()
+        except requests.RequestException as exc:
+            st.error(_api_error_message(exc))
+    provider_labels = {item["id"]: item["label"] for item in provider_catalog}
+    if ui_state.get("cloud_agent_provider") not in provider_labels:
+        ui_state["cloud_agent_provider"] = next(iter(provider_labels), "")
+
+    with st.container(key="cloud_agent_generation_setup_card", border=True):
+        st.subheader("Generation setup")
+        if script_mode == "Research Script":
+            st.caption(f"Research provider · {research_provider}")
+            st.caption(f"Model · {research_model}")
+        provider = st.selectbox(
+            "TTS Provider",
+            list(provider_labels),
+            format_func=lambda value: provider_labels[value],
+            key="cloud_agent_provider",
+            on_change=_clear_provider_feedback,
+        )
+        provider_metadata = {"voices": [], "settings": []}
+        if hasattr(st, "runtime"):
+            try:
+                provider_metadata = _api("GET", f"tts/providers/{provider}")
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
+        tts_session_state = getattr(st, "session_state", {})
+        voice_options = tts_session_state.get(
+            "cloud_agent_tts_voices", provider_metadata.get("voices", [])
+        )
+        saved_voice = str(ui_state.get("cloud_agent_voice", "") or "")
+        if saved_voice and all(item["id"] != saved_voice for item in voice_options):
+            voice_options = [*voice_options, {"id": saved_voice, "label": saved_voice}]
+        voice_labels = {
+            item["id"]: item.get("label", item["id"]) for item in voice_options
+        }
+        voice = st.selectbox(
+            "Voice",
+            list(voice_labels) or [""],
+            format_func=lambda value: voice_labels.get(
+                value, "Select a configured voice"
+            ),
+            key="cloud_agent_voice",
+            on_change=lambda: ui_state.pop("cloud_agent_defaults_feedback", None),
+        )
+        speed = st.number_input(
+            "Speed",
+            min_value=0.1,
+            value=1.0,
+            key="cloud_agent_speed",
+            on_change=lambda: ui_state.pop("cloud_agent_defaults_feedback", None),
+        )
+        with _advanced_settings_container():
+            _render_advanced_settings(
+                ui_state=ui_state,
+                defaults=defaults,
+                research_settings=research_settings,
+                research_provider_catalog=research_provider_catalog,
+                provider=provider,
+                provider_metadata=provider_metadata,
+            )
+        prepared_voice = tts_session_state.get("cloud_agent_prepared_voice")
+        voice_creation_status = st.empty()
+        if st.button(
+            "Create voice",
+            key="cloud_agent_create_voice",
+            icon=":material/audio_file:",
+            width="stretch",
+        ):
+            if not script.strip():
+                st.error("Script Editor is required before creating narration.")
+            elif not voice.strip():
+                st.error("Voice is required before creating narration.")
+            else:
+                try:
+                    with voice_creation_status.container():
+                        with st.spinner("กำลังสร้างเสียง..."):
+                            prepared_voice = _prepare_draft_voice(
+                                script=script,
+                                tts_provider=provider,
+                                voice_id=voice,
+                                voice_speed=speed,
+                            )
+                    tts_session_state["cloud_agent_prepared_voice"] = {
+                        **prepared_voice,
+                        "script": script,
+                        "tts_provider": provider,
+                        "voice_id": voice,
+                        "voice_speed": speed,
+                    }
+                    st.rerun()
+                except requests.RequestException as exc:
+                    st.error(_api_error_message(exc))
+        if prepared_voice and all(
+            prepared_voice.get(field) == value
+            for field, value in (
+                ("script", script),
+                ("tts_provider", provider),
+                ("voice_id", voice),
+                ("voice_speed", speed),
+            )
+        ):
+            st.caption("Prepared narration is ready and will be reused when this job starts.")
+            try:
+                st.markdown("**Audio preview**")
+                st.audio(
+                    _prepared_voice_audio(prepared_voice["fingerprint"]),
+                    format="audio/mpeg",
+                )
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
+        return _GenerationSelection(
+            provider=provider,
+            voice=voice,
+            speed=float(speed),
+            prepared_voice=prepared_voice,
+        )
+
+
 def render_cloud_agent_panel():
     ui_state = getattr(st, "session_state", {})
     defaults = {
@@ -812,220 +1172,21 @@ def render_cloud_agent_panel():
     subject = brief.subject
     words = brief.words
     language = brief.language
-    custom_system_prompt = brief.custom_system_prompt
     script, master_prompt = _render_script_editor(brief=brief, ui_state=ui_state)
-    provider_catalog = _fallback_tts_catalog()
-    if hasattr(st, "runtime"):
-        try:
-            provider_catalog = _load_tts_provider_catalog()
-        except requests.RequestException as exc:
-            st.error(_api_error_message(exc))
-    provider_labels = {item["id"]: item["label"] for item in provider_catalog}
-    if ui_state.get("cloud_agent_provider") not in provider_labels:
-        ui_state["cloud_agent_provider"] = next(iter(provider_labels), "")
-    provider = st.selectbox(
-        "TTS Provider", list(provider_labels),
-        format_func=lambda value: provider_labels[value],
-        key="cloud_agent_provider",
-        on_change=_clear_provider_feedback,
+    generation = _render_generation_setup(
+        ui_state=ui_state,
+        defaults=defaults,
+        research_settings=research_settings,
+        research_provider_catalog=research_provider_catalog,
+        script=script,
+        script_mode=brief.script_mode,
+        research_provider=brief.research_provider,
+        research_model=brief.research_model,
     )
-    provider_metadata = {"voices": [], "settings": []}
-    if hasattr(st, "runtime"):
-        try:
-            provider_metadata = _api("GET", f"tts/providers/{provider}")
-        except requests.RequestException as exc:
-            st.error(_api_error_message(exc))
-    tts_session_state = getattr(st, "session_state", {})
-    voice_options = tts_session_state.get(
-        "cloud_agent_tts_voices", provider_metadata.get("voices", [])
-    )
-    saved_voice = str(ui_state.get("cloud_agent_voice", "") or "")
-    if saved_voice and all(item["id"] != saved_voice for item in voice_options):
-        voice_options = [*voice_options, {"id": saved_voice, "label": saved_voice}]
-    voice_labels = {item["id"]: item.get("label", item["id"]) for item in voice_options}
-    voice = st.selectbox(
-        "Voice", list(voice_labels) or [""],
-        format_func=lambda value: voice_labels.get(value, "Select a configured voice"),
-        key="cloud_agent_voice",
-        on_change=lambda: ui_state.pop("cloud_agent_defaults_feedback", None),
-    )
-    if feedback := ui_state.get("cloud_agent_tts_settings_feedback"):
-        st.success(feedback)
-    with st.expander("TTS Provider Settings", expanded=False):
-        settings = {}
-        secret_fields = set()
-        clear_secret_fields = []
-        for field in provider_metadata.get("settings", []):
-            name = field["name"]
-            if field["kind"] == "password":
-                secret_fields.add(name)
-                st.caption(f"{field['label']}: {'configured' if field.get('configured') else 'not configured'}")
-                settings[name] = st.text_input(
-                    field["label"],
-                    type="password",
-                    key=f"cloud_tts_{provider}_{name}",
-                    on_change=_clear_tts_settings_feedback,
-                )
-                if hasattr(st, "checkbox") and st.checkbox(
-                    f"Remove stored key: {field['label']}",
-                    key=f"cloud_tts_remove_{provider}_{name}",
-                    on_change=_clear_tts_settings_feedback,
-                ):
-                    clear_secret_fields.append(name)
-            elif field["kind"] == "select":
-                settings[name] = st.selectbox(
-                    field["label"],
-                    field.get("choices", []),
-                    key=f"cloud_tts_{provider}_{name}",
-                    on_change=_clear_tts_settings_feedback,
-                )
-            elif field["kind"] == "voice_list":
-                settings[name] = st.text_input(
-                    field["label"],
-                    value=", ".join(field.get("value") or []),
-                    key=f"cloud_tts_{provider}_{name}",
-                    on_change=_clear_tts_settings_feedback,
-                )
-            else:
-                settings[name] = st.text_input(
-                    field["label"],
-                    value=str(field.get("value") or ""),
-                    key=f"cloud_tts_{provider}_{name}",
-                    on_change=_clear_tts_settings_feedback,
-                )
-        if st.button("Save TTS Settings", key="cloud_agent_save_tts_settings"):
-            try:
-                _api(
-                    "PUT",
-                    f"tts/providers/{provider}/settings",
-                    json=_tts_settings_payload(
-                        settings=settings,
-                        secret_fields=secret_fields,
-                        clear_secret_fields=clear_secret_fields,
-                    ),
-                )
-                verified, message = _verify_tts_settings_save(
-                    settings=settings,
-                    secret_fields=secret_fields,
-                    clear_secret_fields=clear_secret_fields,
-                    metadata=_api("GET", f"tts/providers/{provider}"),
-                )
-                if verified:
-                    ui_state["cloud_agent_tts_settings_feedback"] = message
-                    st.rerun()
-                else:
-                    st.error(message)
-            except requests.RequestException as exc:
-                st.error(_api_error_message(exc))
-        if provider_metadata.get("requires_explicit_voice_refresh") and st.button("Load Voices", key="cloud_agent_load_tts_voices"):
-            try:
-                tts_session_state["cloud_agent_tts_voices"] = _api("POST", f"tts/providers/{provider}/voices/refresh")["voices"]
-                st.rerun()
-            except requests.RequestException as exc:
-                st.error(_api_error_message(exc))
-    speed = st.number_input(
-        "Speed",
-        min_value=0.1,
-        value=1.0,
-        key="cloud_agent_speed",
-        on_change=lambda: ui_state.pop("cloud_agent_defaults_feedback", None),
-    )
-    if feedback := ui_state.get("cloud_agent_defaults_feedback"):
-        st.success(feedback)
-    if st.button(
-        "Save TTS Provider & Voice Default",
-        key="cloud_agent_save_voice_default",
-    ):
-        try:
-            verified, message = _save_and_verify_cloud_agent_defaults(
-                _cloud_agent_defaults_payload(
-                    tts_provider=provider,
-                    voice_id=voice,
-                    voice_speed=speed,
-                    custom_system_prompt=defaults["custom_system_prompt"],
-                )
-            )
-            if verified:
-                ui_state["cloud_agent_defaults_feedback"] = message
-                st.rerun()
-            else:
-                st.error(message)
-        except requests.RequestException as exc:
-            st.error(_api_error_message(exc))
-    with st.expander("Cloud Agent Defaults", expanded=False):
-        st.caption("Save the selected voice and Custom System Prompt for future jobs.")
-        if st.button("Save All Defaults", key="cloud_agent_save_defaults"):
-            try:
-                verified, message = _save_and_verify_cloud_agent_defaults(
-                    _cloud_agent_defaults_payload(
-                        tts_provider=provider,
-                        voice_id=voice,
-                        voice_speed=speed,
-                        custom_system_prompt=custom_system_prompt,
-                    )
-                )
-                if verified:
-                    ui_state["cloud_agent_defaults_feedback"] = message
-                    st.rerun()
-                else:
-                    st.error(message)
-            except requests.RequestException as exc:
-                st.error(_api_error_message(exc))
-        if st.button("Reset Defaults", key="cloud_agent_reset_defaults"):
-            try:
-                _api("POST", "defaults/reset")
-                for key in (
-                    "cloud_agent_provider",
-                    "cloud_agent_voice",
-                    "cloud_agent_speed",
-                    "cloud_agent_custom_system_prompt",
-                ):
-                    ui_state.pop(key, None)
-                st.rerun()
-            except requests.RequestException as exc:
-                st.error(_api_error_message(exc))
-    prepared_voice = tts_session_state.get("cloud_agent_prepared_voice")
-    voice_creation_status = st.empty()
-    if st.button("Create Voice", key="cloud_agent_create_voice"):
-        if not script.strip():
-            st.error("Script Editor is required before creating narration.")
-        elif not voice.strip():
-            st.error("Voice is required before creating narration.")
-        else:
-            try:
-                with voice_creation_status.container():
-                    with st.spinner("กำลังสร้างเสียง..."):
-                        prepared_voice = _prepare_draft_voice(
-                            script=script,
-                            tts_provider=provider,
-                            voice_id=voice,
-                            voice_speed=speed,
-                        )
-                tts_session_state["cloud_agent_prepared_voice"] = {
-                    **prepared_voice,
-                    "script": script,
-                    "tts_provider": provider,
-                    "voice_id": voice,
-                    "voice_speed": speed,
-                }
-                st.rerun()
-            except requests.RequestException as exc:
-                st.error(_api_error_message(exc))
-    if prepared_voice and all(
-        prepared_voice.get(field) == value
-        for field, value in (
-            ("script", script),
-            ("tts_provider", provider),
-            ("voice_id", voice),
-            ("voice_speed", speed),
-        )
-    ):
-        st.caption("Prepared narration is ready and will be reused when this job starts.")
-        if hasattr(st, "audio"):
-            try:
-                st.audio(_prepared_voice_audio(prepared_voice["fingerprint"]), format="audio/mpeg")
-            except requests.RequestException as exc:
-                st.error(_api_error_message(exc))
+    provider = generation.provider
+    voice = generation.voice
+    speed = generation.speed
+    prepared_voice = generation.prepared_voice
     controls = st.columns(4)
     for service, column in (("google-flow", controls[0]), ("canva", controls[1])):
         if column.button("Google Flow" if service == "google-flow" else "Canva", key=f"{service}-check"):

@@ -45,6 +45,25 @@ def test_script_mode_uses_approved_segmented_control_and_retained_key(monkeypatc
     ]
 
 
+class ExpanderStreamlit:
+    def __init__(self):
+        self.calls = []
+
+    def expander(self, label, **kwargs):
+        self.calls.append((label, kwargs))
+        return nullcontext()
+
+
+def test_advanced_settings_are_collapsed_behind_one_disclosure(monkeypatch):
+    fake = ExpanderStreamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake)
+
+    with cloud_agent._advanced_settings_container():
+        pass
+
+    assert fake.calls == [("Advanced settings", {"expanded": False})]
+
+
 def test_cloud_agent_ui_is_a_thin_fastapi_client_with_required_controls_and_status():
     source = UI_SOURCE.read_text(encoding="utf-8")
 
@@ -109,7 +128,7 @@ def test_create_voice_shows_an_animated_creating_status_above_the_button():
     assert "voice_creation_status = st.empty()" in source
     assert 'with st.spinner("กำลังสร้างเสียง...")' in source
     assert source.index("voice_creation_status = st.empty()") < source.index(
-        'st.button("Create Voice"'
+        '"Create voice"'
     )
 
 
