@@ -21,6 +21,8 @@ from app.services.cloud_agent.defaults import CloudAgentDefaultsService
 from app.services.cloud_agent.retry import PreFlowRetryService
 from app.services.cloud_agent.worker import CloudAgentWorker
 from app.services.cloud_agent.workflow import CloudAgentWorkflow
+from app.services.cloud_agent.research.settings import ResearchSettingsService
+from app.services.cloud_agent.research.store import ResearchDraftStore
 
 
 def build_workflow() -> CloudAgentWorkflow:
@@ -115,6 +117,14 @@ def build_cloud_agent_defaults_service() -> CloudAgentDefaultsService:
     return CloudAgentDefaultsService(
         {item.id for item in build_cloud_tts_settings_service().list_providers()}
     )
+
+
+def build_research_settings_service() -> ResearchSettingsService:
+    return ResearchSettingsService()
+
+
+def build_research_draft_store() -> ResearchDraftStore:
+    return ResearchDraftStore(str(config.app["cloud_agent_db_path"]))
 
 
 def build_worker() -> CloudAgentWorker:
