@@ -481,6 +481,45 @@ def _start_job(
     )
 
 
+def _store_job_snapshot(job):
+    safe_fields = (
+        "id",
+        "status",
+        "checkpoint",
+        "current_step",
+        "progress",
+        "error_code",
+        "error_message",
+        "created_at",
+        "updated_at",
+    )
+    snapshot = {name: job.get(name) for name in safe_fields if name in job}
+    st.session_state["cloud_agent_job_id"] = str(snapshot.get("id") or "")
+    st.session_state["cloud_agent_job_snapshot"] = snapshot
+
+
+def _start_and_store_job(inputs):
+    job = _start_job(**inputs)
+    _store_job_snapshot(job)
+    return job
+
+
+def _prepared_voice_matches(prepared_voice, *, script, provider, voice, speed):
+    return bool(
+        prepared_voice
+        and str(prepared_voice.get("fingerprint") or "").strip()
+        and all(
+            prepared_voice.get(field) == value
+            for field, value in (
+                ("script", script),
+                ("tts_provider", provider),
+                ("voice_id", voice),
+                ("voice_speed", speed),
+            )
+        )
+    )
+
+
 def _store_draft(draft):
     _clear_research_state()
     st.session_state["cloud_agent_script"] = draft["script"]
@@ -1100,14 +1139,12 @@ def _render_generation_setup(
                     st.rerun()
                 except requests.RequestException as exc:
                     st.error(_api_error_message(exc))
-        if prepared_voice and all(
-            prepared_voice.get(field) == value
-            for field, value in (
-                ("script", script),
-                ("tts_provider", provider),
-                ("voice_id", voice),
-                ("voice_speed", speed),
-            )
+        if _prepared_voice_matches(
+            prepared_voice,
+            script=script,
+            provider=provider,
+            voice=voice,
+            speed=speed,
         ):
             st.caption("Prepared narration is ready and will be reused when this job starts.")
             try:
@@ -1124,6 +1161,63 @@ def _render_generation_setup(
             speed=float(speed),
             prepared_voice=prepared_voice,
         )
+
+
+def _render_start_action(*, brief, script, master_prompt, generation, ui_state):
+    if st.button(
+        "Continue to production",
+        key="cloud_agent_start",
+        type="primary",
+        icon=":material/arrow_forward:",
+        icon_position="right",
+        width="stretch",
+    ):
+        clip_plan = ui_state.get("cloud_agent_clip_plan")
+        draft_script = str(ui_state.get("cloud_agent_draft_script", ""))
+        research_draft_id = str(
+            ui_state.get("cloud_agent_research_draft_id", "") or ""
+        )
+        provider = generation.provider
+        voice = generation.voice
+        speed = generation.speed
+        prepared_voice = generation.prepared_voice
+        if not clip_plan or draft_script != script.strip():
+            st.error("Generate or refresh the draft before starting the job.")
+        elif not voice.strip():
+            st.error("Voice is required before starting the job.")
+        else:
+            try:
+                job = _start_and_store_job(
+                    {
+                        "subject": brief.subject,
+                        "target_words": brief.words,
+                        "language": brief.language,
+                        "script": script,
+                        "master_prompt": master_prompt,
+                        "clip_plan": clip_plan,
+                        "tts_provider": provider,
+                        "voice_id": voice,
+                        "voice_speed": speed,
+                        "research_draft_id": research_draft_id,
+                        "prepared_voice_fingerprint": (
+                            str(prepared_voice.get("fingerprint") or "")
+                            if _prepared_voice_matches(
+                                prepared_voice,
+                                script=script,
+                                provider=provider,
+                                voice=voice,
+                                speed=speed,
+                            )
+                            else ""
+                        ),
+                    }
+                )
+                if message := _job_error_message(job):
+                    st.error(message)
+                return job
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
+    return None
 
 
 def render_cloud_agent_panel():
@@ -1162,119 +1256,113 @@ def render_cloud_agent_panel():
         "cloud_agent_custom_system_prompt", defaults["custom_system_prompt"]
     )
     ui_state.setdefault("cloud_agent_script_mode", "Standard Script")
-    st.subheader("Cloud Agent")
-    brief = _render_video_brief(
-        ui_state=ui_state,
-        defaults=defaults,
-        research_settings=research_settings,
-        research_provider_catalog=research_provider_catalog,
+    prepared_voice = ui_state.get("cloud_agent_prepared_voice")
+    script_ready = bool(str(ui_state.get("cloud_agent_draft_script") or "").strip())
+    prepared_voice_ready = _prepared_voice_matches(
+        prepared_voice,
+        script=str(ui_state.get("cloud_agent_script") or ""),
+        provider=str(ui_state.get("cloud_agent_provider") or ""),
+        voice=str(ui_state.get("cloud_agent_voice") or ""),
+        speed=float(ui_state.get("cloud_agent_speed") or 1.0),
     )
-    subject = brief.subject
-    words = brief.words
-    language = brief.language
-    script, master_prompt = _render_script_editor(brief=brief, ui_state=ui_state)
-    generation = _render_generation_setup(
-        ui_state=ui_state,
-        defaults=defaults,
-        research_settings=research_settings,
-        research_provider_catalog=research_provider_catalog,
-        script=script,
-        script_mode=brief.script_mode,
-        research_provider=brief.research_provider,
-        research_model=brief.research_model,
+    job_snapshot = dict(ui_state.get("cloud_agent_job_snapshot") or {})
+
+    cloud_agent_ui.render_workflow_rail(
+        cloud_agent_ui.derive_workflow_step(
+            script_ready,
+            prepared_voice_ready,
+            job_snapshot,
+        )
     )
-    provider = generation.provider
-    voice = generation.voice
-    speed = generation.speed
-    prepared_voice = generation.prepared_voice
-    controls = st.columns(4)
-    for service, column in (("google-flow", controls[0]), ("canva", controls[1])):
-        if column.button("Google Flow" if service == "google-flow" else "Canva", key=f"{service}-check"):
-            try:
-                st.json(
+    workspace = st.columns([1.85, 1], gap="large", vertical_alignment="top")
+    with workspace[0]:
+        brief = _render_video_brief(
+            ui_state=ui_state,
+            defaults=defaults,
+            research_settings=research_settings,
+            research_provider_catalog=research_provider_catalog,
+        )
+        script, master_prompt = _render_script_editor(brief=brief, ui_state=ui_state)
+    with workspace[1]:
+        generation = _render_generation_setup(
+            ui_state=ui_state,
+            defaults=defaults,
+            research_settings=research_settings,
+            research_provider_catalog=research_provider_catalog,
+            script=script,
+            script_mode=brief.script_mode,
+            research_provider=brief.research_provider,
+            research_model=brief.research_model,
+        )
+        _render_start_action(
+            brief=brief,
+            script=script,
+            master_prompt=master_prompt,
+            generation=generation,
+            ui_state=ui_state,
+        )
+
+    job_snapshot = dict(ui_state.get("cloud_agent_job_snapshot") or {})
+    cloud_agent_ui.render_production_status(
+        cloud_agent_ui.build_production_stages(
+            script_ready=script_ready,
+            prepared_voice_ready=prepared_voice_ready,
+            job=job_snapshot,
+        ),
+        job_snapshot,
+    )
+    with st.expander("Job controls", expanded=False):
+        readiness_controls = st.columns(2)
+        for service, column in (
+            ("google-flow", readiness_controls[0]),
+            ("canva", readiness_controls[1]),
+        ):
+            label = "Google Flow" if service == "google-flow" else "Canva"
+            if column.button(label, key=f"{service}-check"):
+                try:
                     _api(
                         "POST",
                         f"sessions/{service}/check",
                         timeout=SESSION_CHECK_TIMEOUT_SECONDS,
                     )
-                )
+                    st.caption(f"{label} readiness check completed.")
+                except requests.RequestException as exc:
+                    st.error(_api_error_message(exc))
+            if column.button("Open Browser", key=f"{service}-open"):
+                try:
+                    column.link_button("Open Browser", _open_browser_url(service))
+                except requests.RequestException as exc:
+                    st.error(_api_error_message(exc))
+
+        job_id = st.text_input("Job ID", key="cloud_agent_job_id")
+        action_controls = st.columns(4)
+        for action, column in zip(
+            ("Pause", "Resume", "Retry", "Cancel"), action_controls
+        ):
+            if column.button(action, key=f"cloud_agent_{action.lower()}") and job_id:
+                try:
+                    job = _api("POST", f"jobs/{job_id}/{action.lower()}")
+                    _store_job_snapshot(job)
+                    if action == "Retry":
+                        st.caption(
+                            "Flow failed before generation. Existing narration will be reused."
+                        )
+                    if message := _job_error_message(job):
+                        st.error(message)
+                except requests.RequestException as exc:
+                    st.error(_api_error_message(exc))
+        if st.button("Load job", key="cloud_agent_load_job") and job_id.strip():
+            try:
+                job = _api("GET", f"jobs/{job_id.strip()}")
+                _store_job_snapshot(job)
+                if message := _job_error_message(job):
+                    st.error(message)
             except requests.RequestException as exc:
                 st.error(_api_error_message(exc))
-        if column.button("Open Browser", key=f"{service}-open"):
-            st.link_button("Open Browser", _open_browser_url(service))
-    if controls[2].button("Start", key="cloud_agent_start"):
-        clip_plan = st.session_state.get("cloud_agent_clip_plan")
-        draft_script = str(st.session_state.get("cloud_agent_draft_script", ""))
-        research_draft_id = str(
-            st.session_state.get("cloud_agent_research_draft_id", "") or ""
+        st.caption("job status/history")
+        st.caption("final video")
+        st.caption("measured narration duration")
+        st.caption("Canva playback factor")
+        st.caption(
+            "Narration Too Long: shorten script; reduce Target Words; increase Voice Rate"
         )
-        if not clip_plan or draft_script != script.strip():
-            st.error("Generate or refresh the draft before starting the job.")
-        elif not voice.strip():
-            st.error("Voice is required before starting the job.")
-        else:
-            try:
-                st.json(
-                    _start_job(
-                        subject=subject,
-                        target_words=words,
-                        language=language,
-                        script=script,
-                        master_prompt=master_prompt,
-                        clip_plan=clip_plan,
-                        tts_provider=provider,
-                        voice_id=voice,
-                        voice_speed=speed,
-                        research_draft_id=research_draft_id,
-                        prepared_voice_fingerprint=(
-                            prepared_voice["fingerprint"]
-                            if prepared_voice
-                            and all(
-                                prepared_voice.get(field) == value
-                                for field, value in (
-                                    ("script", script),
-                                    ("tts_provider", provider),
-                                    ("voice_id", voice),
-                                    ("voice_speed", speed),
-                                )
-                            )
-                            else ""
-                        ),
-                    )
-                )
-            except requests.RequestException as exc:
-                st.error(_api_error_message(exc))
-    job_id = st.text_input("Job ID", key="cloud_agent_job_id")
-    for action in ("Pause", "Resume", "Retry", "Cancel"):
-        if controls[3].button(action, key=f"cloud_agent_{action.lower()}") and job_id:
-            try:
-                st.json(_api("POST", f"jobs/{job_id}/{action.lower()}"))
-                if action == "Retry":
-                    st.caption("Flow failed before generation. Existing narration will be reused.")
-            except requests.RequestException as exc:
-                st.error(_api_error_message(exc))
-    if job_id.strip():
-        try:
-            job = _api("GET", f"jobs/{job_id.strip()}")
-            st.json(
-                {
-                    key: job.get(key)
-                    for key in (
-                        "status",
-                        "checkpoint",
-                        "current_step",
-                        "progress",
-                        "error_code",
-                        "error_message",
-                    )
-                }
-            )
-            if message := _job_error_message(job):
-                st.error(message)
-        except requests.RequestException as exc:
-            st.error(_api_error_message(exc))
-    st.caption("job status/history")
-    st.caption("final video")
-    st.caption("measured narration duration")
-    st.caption("Canva playback factor")
-    st.caption("Narration Too Long: shorten script; reduce Target Words; increase Voice Rate")

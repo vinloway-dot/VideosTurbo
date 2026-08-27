@@ -80,7 +80,7 @@ def test_cloud_agent_ui_is_a_thin_fastapi_client_with_required_controls_and_stat
         "Google Flow",
         "Canva",
         "Open Browser",
-        "Start",
+        "Continue to production",
         "Pause",
         "Resume",
         "Retry",
@@ -267,6 +267,12 @@ def test_cloud_agent_language_selector_formats_the_auto_empty_value(monkeypatch)
         def __init__(self, parent):
             self.parent = parent
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
         def subheader(self, *_args, **_kwargs):
             return None
 
@@ -346,6 +352,12 @@ def test_cloud_agent_language_selector_formats_the_auto_empty_value(monkeypatch)
 
 def test_cloud_agent_custom_system_prompt_is_hidden_by_default(monkeypatch):
     class Column:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
         def subheader(self, *_args, **_kwargs):
             return None
 
@@ -474,10 +486,101 @@ def test_cloud_agent_ui_formats_persisted_job_failure_for_the_operator():
     ) == "CANVA_UI_VERIFICATION_FAILED: Canva Uploads control cannot be verified"
 
 
+def test_successful_start_stores_job_for_production_status(monkeypatch):
+    session_state = {}
+    monkeypatch.setattr(cloud_agent.st, "session_state", session_state)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_start_job",
+        lambda **kwargs: {
+            "id": "job-123",
+            "status": "QUEUED",
+            "checkpoint": "NONE",
+            "current_step": "queued",
+            "progress": 0,
+        },
+    )
+
+    cloud_agent._start_and_store_job(
+        {
+            "subject": "Rice",
+            "target_words": 130,
+            "language": "en-US",
+            "script": "Ready narration",
+            "master_prompt": "Ready master prompt",
+            "clip_plan": {"target_words": 130, "segments": [{"index": 1}] * 6},
+            "tts_provider": "elevenlabs",
+            "voice_id": "voice-1",
+            "voice_speed": 1.0,
+            "research_draft_id": "",
+            "prepared_voice_fingerprint": "",
+        }
+    )
+
+    assert session_state["cloud_agent_job_id"] == "job-123"
+    assert session_state["cloud_agent_job_snapshot"]["status"] == "QUEUED"
+
+
+def test_job_snapshot_allow_lists_the_production_status_fields(monkeypatch):
+    session_state = {}
+    monkeypatch.setattr(cloud_agent.st, "session_state", session_state)
+
+    cloud_agent._store_job_snapshot(
+        {
+            "id": "job-123",
+            "status": "QUEUED",
+            "checkpoint": "NONE",
+            "current_step": "queued",
+            "progress": 0,
+            "api_key": "must-not-persist",
+            "provider_response": {"secret": "must-not-persist"},
+        }
+    )
+
+    assert session_state["cloud_agent_job_snapshot"] == {
+        "id": "job-123",
+        "status": "QUEUED",
+        "checkpoint": "NONE",
+        "current_step": "queued",
+        "progress": 0,
+    }
+
+
+def test_prepared_voice_matches_only_its_current_generation_inputs():
+    prepared_voice = {
+        "fingerprint": "voice-fingerprint",
+        "script": "Ready narration",
+        "tts_provider": "elevenlabs",
+        "voice_id": "voice-1",
+        "voice_speed": 1.0,
+    }
+
+    assert cloud_agent._prepared_voice_matches(
+        prepared_voice,
+        script="Ready narration",
+        provider="elevenlabs",
+        voice="voice-1",
+        speed=1.0,
+    )
+    assert not cloud_agent._prepared_voice_matches(
+        prepared_voice,
+        script="Edited narration",
+        provider="elevenlabs",
+        voice="voice-1",
+        speed=1.0,
+    )
+
+
 def test_canva_check_timeout_is_shown_as_a_safe_webui_error(monkeypatch):
     class Column:
         def __init__(self, pressed_key=""):
             self.pressed_key = pressed_key
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
 
         def subheader(self, *_args, **_kwargs):
             return None
@@ -948,6 +1051,12 @@ def test_research_failure_never_stores_draft(monkeypatch):
             }
 
     class Column:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
         def subheader(self, *_args, **_kwargs):
             return None
 
@@ -1097,6 +1206,12 @@ def test_start_button_forwards_stored_research_draft_id(monkeypatch):
         def __init__(self, pressed_key=""):
             self.pressed_key = pressed_key
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
         def subheader(self, *_args, **_kwargs):
             return None
 
@@ -1142,11 +1257,11 @@ def test_start_button_forwards_stored_research_draft_id(monkeypatch):
         def expander(self, *_args, **_kwargs):
             return nullcontext()
 
-        def button(self, *_args, **_kwargs):
-            return False
+        def button(self, _label, *, key, **_kwargs):
+            return key == "cloud_agent_start"
 
         def columns(self, _count, **_kwargs):
-            return [Column(), Column(), Column("cloud_agent_start"), Column()]
+            return [Column(), Column(), Column(), Column()]
 
         def container(self, **_kwargs):
             return nullcontext()
@@ -1186,6 +1301,12 @@ def test_start_button_forwards_stored_research_draft_id(monkeypatch):
 
 def test_standard_mode_hides_research_only_controls(monkeypatch):
     class Column:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
         def subheader(self, *_args, **_kwargs):
             return None
 

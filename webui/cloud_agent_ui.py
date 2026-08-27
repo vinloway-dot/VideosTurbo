@@ -72,6 +72,14 @@ _CHECKPOINT_RANK = {
     "COMPLETED": 5,
 }
 
+_PRODUCTION_STAGE_LABELS = {
+    "script": "Script",
+    "voice": "Voice",
+    "flow": "Flow",
+    "canva": "Canva",
+    "export": "Export",
+}
+
 _CSS_PATH = Path(__file__).with_name("cloud_agent.css")
 
 
@@ -149,13 +157,6 @@ def build_production_stages(
         "export": checkpoint_rank >= 5,
     }
     order = ("script", "voice", "flow", "canva", "export")
-    labels = {
-        "script": "Script",
-        "voice": "Voice",
-        "flow": "Flow",
-        "canva": "Canva",
-        "export": "Export",
-    }
     active = next((key for key in order if not complete[key]), "export")
     if snapshot.get("status") == "FAILED":
         current = str(snapshot.get("current_step") or "")
@@ -169,7 +170,7 @@ def build_production_stages(
     return tuple(
         StageView(
             key=key,
-            label=labels[key],
+            label=_PRODUCTION_STAGE_LABELS[key],
             state=(
                 "complete" if complete[key]
                 else "error" if key == active and snapshot.get("status") == "FAILED"
@@ -178,4 +179,26 @@ def build_production_stages(
             ),
         )
         for key in order
+    )
+
+
+def render_production_status(stages: tuple[StageView, ...], job: dict | None) -> None:
+    snapshot = dict(job or {})
+    job_id = escape(str(snapshot.get("id") or "Not started"))
+    status = escape(str(snapshot.get("status") or "Not started"))
+    items = []
+    for stage in stages:
+        label = _PRODUCTION_STAGE_LABELS.get(stage.key)
+        if label is None:
+            continue
+        state = stage.state if stage.state in {"complete", "active", "pending", "error"} else "pending"
+        items.append(
+            f'<li class="vt-production-status__stage vt-production-status__stage--{state}">'
+            f'<span aria-hidden="true"></span><strong>{label}</strong></li>'
+        )
+    st.html(
+        '<section class="vt-production-status" aria-label="Production status">'
+        '<div class="vt-production-status__header"><strong>Production status</strong>'
+        f'<span>Job {job_id} · {status}</span></div>'
+        f'<ol class="vt-production-status__stages">{"".join(items)}</ol></section>'
     )

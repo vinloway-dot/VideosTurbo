@@ -89,6 +89,31 @@ def test_failed_job_marks_only_the_current_presentation_stage_as_error():
     ]
 
 
+def test_production_status_renders_five_fixed_safe_stages(monkeypatch):
+    class StatusStreamlit:
+        def __init__(self):
+            self.html_bodies = []
+
+        def html(self, body):
+            self.html_bodies.append(str(body))
+
+    fake = StatusStreamlit()
+    monkeypatch.setattr(cloud_agent_ui, "st", fake)
+    stages = cloud_agent_ui.build_production_stages(
+        script_ready=True,
+        prepared_voice_ready=True,
+        job={"status": "QUEUED", "checkpoint": "NONE", "current_step": "queued"},
+    )
+
+    cloud_agent_ui.render_production_status(
+        stages, {"id": "job-123", "status": "QUEUED"}
+    )
+
+    body = " ".join(fake.html_bodies)
+    assert all(label in body for label in ("Script", "Voice", "Flow", "Canva", "Export"))
+    assert "job-123" in body
+
+
 def test_research_summary_never_contains_raw_source_body_or_secret_fields():
     summary = cloud_agent_ui.research_summary(
         research_draft_id="draft-1",
