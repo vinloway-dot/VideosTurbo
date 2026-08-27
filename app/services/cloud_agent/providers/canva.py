@@ -973,6 +973,20 @@ class CanvaAssemblyClient:
             return
         self._select_video_clip(page, 1)
         page.get_by_role("button", name="Captions", exact=True).click()
+        caption_audio_scope = page.get_by_role(
+            "combobox",
+            name=re.compile(r"^\d+ selected \(\d+ of \d+ suitable\)$"),
+            exact=False,
+        )
+        if caption_audio_scope.count() != 1:
+            raise CanvaUIVerificationError("Canva caption audio scope cannot be verified")
+        caption_audio_scope.click()
+        all_audio = page.get_by_role("option", name="All audio", exact=True)
+        all_audio.wait_for(
+            state="visible",
+            timeout=int(self.export_timeout_seconds * 1_000),
+        )
+        all_audio.click()
         page.get_by_role("button", name="Generate captions", exact=True).click()
         classic = page.get_by_role("button", name="Classic", exact=True)
         classic.wait_for(

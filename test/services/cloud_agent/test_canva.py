@@ -137,6 +137,9 @@ class _CaptionControl:
     def click(self):
         self.page.actions.append(("caption_control", self.name))
 
+    def count(self):
+        return 1
+
     def wait_for(self, **_kwargs):
         return None
 
@@ -151,9 +154,13 @@ class FakeCaptionStylePage:
         self.actions.append(("select_clip", index))
 
     def get_by_role(self, role, *, name, exact):
-        assert role == "button"
+        if role == "combobox":
+            assert exact is False
+            assert getattr(name, "pattern", "") == r"^\d+ selected \(\d+ of \d+ suitable\)$"
+            return _CaptionControl(self, "caption_audio_scope")
+        assert role in {"button", "option"}
         assert exact is True
-        assert name in {"Captions", "Generate captions", "Classic"}
+        assert name in {"Captions", "Generate captions", "Classic", "All audio"}
         return _CaptionControl(self, name)
 
     def get_by_text(self, name, *, exact):
@@ -1323,6 +1330,8 @@ def test_canva_auto_captions_selects_classic_style_after_generation():
     assert page.actions == [
         ("select_clip", 1),
         ("caption_control", "Captions"),
+        ("caption_control", "caption_audio_scope"),
+        ("caption_control", "All audio"),
         ("caption_control", "Generate captions"),
         ("caption_control", "Classic"),
     ]
