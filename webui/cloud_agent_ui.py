@@ -57,7 +57,7 @@ def render_sidebar() -> None:
 
 
 def render_page_header(*, saved: bool) -> None:
-    st.html('<div class="vt-breadcrumb">Workspace / Cloud Agent</div>')
+    st.html('<div class="vt-breadcrumb">Workspace&nbsp;&nbsp;/&nbsp;&nbsp;Cloud Agent</div>')
     st.title("Create a video")
     st.caption("Research, write, narrate, and produce — all in one flow.")
     if saved:

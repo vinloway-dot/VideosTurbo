@@ -1,3 +1,4 @@
+from html import unescape
 from pathlib import Path
 
 from webui import cloud_agent_ui
@@ -28,7 +29,10 @@ def test_page_header_uses_approved_primary_copy(monkeypatch):
 
     assert fake.titles == ["Create a video"]
     assert "Research, write, narrate, and produce — all in one flow." in fake.captions
-    assert any("Workspace / Cloud Agent" in body for body in fake.html_bodies)
+    assert any(
+        "Workspace / Cloud Agent" in " ".join(unescape(body).split())
+        for body in fake.html_bodies
+    )
     assert any("Saved" in body for body in fake.html_bodies)
 
 
