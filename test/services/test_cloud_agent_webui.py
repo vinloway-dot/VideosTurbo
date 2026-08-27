@@ -444,3 +444,10 @@ def test_cloud_agent_defaults_payload_keeps_voice_and_custom_system_prompt_toget
         "voice_speed": 1.1,
         "custom_system_prompt": "Write in a calm documentary tone.",
     }
+
+
+def test_cloud_agent_ui_exposes_visible_individual_save_controls_for_voice_and_prompt():
+    source = UI_SOURCE.read_text(encoding="utf-8")
+
+    assert "Save Voice Default" in source
+    assert "Save Custom System Prompt" in source

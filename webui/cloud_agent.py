@@ -223,6 +223,22 @@ def render_cloud_agent_panel():
             max_chars=8000,
             help="Leave blank to use the system default script prompt.",
         )
+        if st.button(
+            "Save Custom System Prompt",
+            key="cloud_agent_save_custom_system_prompt",
+        ):
+            try:
+                _save_cloud_agent_defaults(
+                    _cloud_agent_defaults_payload(
+                        tts_provider=defaults["tts_provider"],
+                        voice_id=defaults["voice_id"],
+                        voice_speed=defaults["voice_speed"],
+                        custom_system_prompt=custom_system_prompt,
+                    )
+                )
+                st.rerun()
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
     if st.button("Generate Script", key="cloud_agent_generate_script"):
         if not subject.strip():
             st.error("Video Subject is required.")
@@ -326,9 +342,22 @@ def render_cloud_agent_panel():
             except requests.RequestException as exc:
                 st.error(_api_error_message(exc))
     speed = st.number_input("Speed", min_value=0.1, value=1.0, key="cloud_agent_speed")
+    if st.button("Save Voice Default", key="cloud_agent_save_voice_default"):
+        try:
+            _save_cloud_agent_defaults(
+                _cloud_agent_defaults_payload(
+                    tts_provider=provider,
+                    voice_id=voice,
+                    voice_speed=speed,
+                    custom_system_prompt=defaults["custom_system_prompt"],
+                )
+            )
+            st.rerun()
+        except requests.RequestException as exc:
+            st.error(_api_error_message(exc))
     with st.expander("Cloud Agent Defaults", expanded=False):
         st.caption("Save the selected voice and Custom System Prompt for future jobs.")
-        if st.button("Save Defaults", key="cloud_agent_save_defaults"):
+        if st.button("Save All Defaults", key="cloud_agent_save_defaults"):
             try:
                 _save_cloud_agent_defaults(
                     _cloud_agent_defaults_payload(
