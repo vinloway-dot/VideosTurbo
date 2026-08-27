@@ -521,6 +521,7 @@ def render_cloud_agent_panel():
             except requests.RequestException as exc:
                 st.error(_api_error_message(exc))
     prepared_voice = tts_session_state.get("cloud_agent_prepared_voice")
+    voice_creation_status = st.empty()
     if st.button("Create Voice", key="cloud_agent_create_voice"):
         if not script.strip():
             st.error("Script Editor is required before creating narration.")
@@ -528,12 +529,14 @@ def render_cloud_agent_panel():
             st.error("Voice is required before creating narration.")
         else:
             try:
-                prepared_voice = _prepare_draft_voice(
-                    script=script,
-                    tts_provider=provider,
-                    voice_id=voice,
-                    voice_speed=speed,
-                )
+                with voice_creation_status.container():
+                    with st.spinner("กำลังสร้างเสียง..."):
+                        prepared_voice = _prepare_draft_voice(
+                            script=script,
+                            tts_provider=provider,
+                            voice_id=voice,
+                            voice_speed=speed,
+                        )
                 tts_session_state["cloud_agent_prepared_voice"] = {
                     **prepared_voice,
                     "script": script,

@@ -65,6 +65,16 @@ def test_cloud_agent_video_subject_uses_compact_multiline_text_area():
     }
 
 
+def test_create_voice_shows_an_animated_creating_status_above_the_button():
+    source = UI_SOURCE.read_text(encoding="utf-8")
+
+    assert "voice_creation_status = st.empty()" in source
+    assert 'with st.spinner("กำลังสร้างเสียง...")' in source
+    assert source.index("voice_creation_status = st.empty()") < source.index(
+        'st.button("Create Voice"'
+    )
+
+
 def test_cloud_agent_loads_tts_provider_metadata_through_fastapi(monkeypatch):
     calls = []
 
@@ -236,6 +246,9 @@ def test_cloud_agent_language_selector_formats_the_auto_empty_value(monkeypatch)
         def text_area(self, *_args, **_kwargs):
             return ""
 
+        def empty(self):
+            return nullcontext()
+
         def caption(self, *_args, **_kwargs):
             return None
 
@@ -283,6 +296,9 @@ def test_cloud_agent_custom_system_prompt_is_hidden_by_default(monkeypatch):
 
         def text_area(self, *_args, **_kwargs):
             return ""
+
+        def empty(self):
+            return nullcontext()
 
         def button(self, *_args, **_kwargs):
             return False
@@ -396,6 +412,9 @@ def test_canva_check_timeout_is_shown_as_a_safe_webui_error(monkeypatch):
 
         def text_area(self, *_args, **_kwargs):
             return ""
+
+        def empty(self):
+            return nullcontext()
 
         def button(self, *_args, **_kwargs):
             return False
