@@ -101,6 +101,28 @@ def _prepare_draft(*, subject, language, target_words, script, custom_system_pro
     )
 
 
+def _prepare_draft_voice(*, script, tts_provider, voice_id, voice_speed):
+    return _api(
+        "POST",
+        "draft/voice",
+        json={
+            "script": script,
+            "tts_provider": tts_provider,
+            "voice_id": voice_id,
+            "voice_speed": voice_speed,
+        },
+        timeout=DRAFT_TIMEOUT_SECONDS,
+    )
+
+
+def _prepared_voice_audio(fingerprint):
+    response = requests.get(
+        API_PREFIX + f"draft/voices/{fingerprint}/audio", timeout=DRAFT_TIMEOUT_SECONDS
+    )
+    response.raise_for_status()
+    return response.content
+
+
 def _open_browser_url(service):
     service_id = {"google-flow": "google_flow", "canva": "canva"}[service]
     return _api("GET", f"sessions/{service_id}/open-browser")["url"]
@@ -117,6 +139,7 @@ def _start_job(
     tts_provider,
     voice_id,
     voice_speed,
+    prepared_voice_fingerprint="",
 ):
     return _api(
         "POST",
@@ -131,6 +154,7 @@ def _start_job(
             "tts_provider": tts_provider,
             "voice_id": voice_id,
             "voice_speed": voice_speed,
+            "prepared_voice_fingerprint": prepared_voice_fingerprint,
         },
     )
 
@@ -260,6 +284,45 @@ def render_cloud_agent_panel():
             except requests.RequestException as exc:
                 st.error(_api_error_message(exc))
     speed = st.number_input("Speed", min_value=0.1, value=1.0, key="cloud_agent_speed")
+    prepared_voice = tts_session_state.get("cloud_agent_prepared_voice")
+    if st.button("Create Voice", key="cloud_agent_create_voice"):
+        if not script.strip():
+            st.error("Script Editor is required before creating narration.")
+        elif not voice.strip():
+            st.error("Voice is required before creating narration.")
+        else:
+            try:
+                prepared_voice = _prepare_draft_voice(
+                    script=script,
+                    tts_provider=provider,
+                    voice_id=voice,
+                    voice_speed=speed,
+                )
+                tts_session_state["cloud_agent_prepared_voice"] = {
+                    **prepared_voice,
+                    "script": script,
+                    "tts_provider": provider,
+                    "voice_id": voice,
+                    "voice_speed": speed,
+                }
+                st.rerun()
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
+    if prepared_voice and all(
+        prepared_voice.get(field) == value
+        for field, value in (
+            ("script", script),
+            ("tts_provider", provider),
+            ("voice_id", voice),
+            ("voice_speed", speed),
+        )
+    ):
+        st.caption("Prepared narration is ready and will be reused when this job starts.")
+        if hasattr(st, "audio"):
+            try:
+                st.audio(_prepared_voice_audio(prepared_voice["fingerprint"]), format="audio/mpeg")
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
     controls = st.columns(4)
     for service, column in (("google-flow", controls[0]), ("canva", controls[1])):
         if column.button("Google Flow" if service == "google-flow" else "Canva", key=f"{service}-check"):
@@ -295,6 +358,20 @@ def render_cloud_agent_panel():
                         tts_provider=provider,
                         voice_id=voice,
                         voice_speed=speed,
+                        prepared_voice_fingerprint=(
+                            prepared_voice["fingerprint"]
+                            if prepared_voice
+                            and all(
+                                prepared_voice.get(field) == value
+                                for field, value in (
+                                    ("script", script),
+                                    ("tts_provider", provider),
+                                    ("voice_id", voice),
+                                    ("voice_speed", speed),
+                                )
+                            )
+                            else ""
+                        ),
                     )
                 )
             except requests.RequestException as exc:

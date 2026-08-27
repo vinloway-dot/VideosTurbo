@@ -8,6 +8,7 @@ from app.config import config
 from app.controllers.v1.base import new_router
 from app.models.cloud_agent import (
     CloudControlRequest,
+    CloudDraftVoiceRequest,
     CloudJobDraftRequest,
     CloudJobCheckpoint,
     CloudJobCreate,
@@ -18,13 +19,15 @@ from app.services.llm import generate_script
 from app.services.six_clip_plan import build_master_prompt, generate_six_clip_plan
 from app.models.exception import HttpException
 from app.services.cloud_agent.job_store import CloudJobStore
-from app.services.cloud_agent.errors import HumanRequiredError
+from app.services.cloud_agent.errors import HumanRequiredError, MediaValidationError
 from app.services.cloud_agent.errors import PreFlowRetryEligibilityError
 from app.services.cloud_agent.factory import (
     build_pre_flow_retry_service,
     build_session_manager,
     build_cloud_tts_settings_service,
+    build_draft_voice_service,
 )
+from app.services.cloud_agent.draft_voice import DraftVoiceError, DraftVoiceService
 from app.services.cloud_agent.retry import PreFlowRetryService
 from app.services.cloud_agent.preflight import _probe_storage_writable
 from app.services.cloud_agent.session import SessionManager
@@ -85,6 +88,10 @@ def get_pre_flow_retry_service() -> PreFlowRetryService:
 
 def get_cloud_tts_settings_service() -> CloudTTSSettingsService:
     return build_cloud_tts_settings_service()
+
+
+def get_draft_voice_service() -> DraftVoiceService:
+    return build_draft_voice_service()
 
 
 def _job_data(job) -> dict:
@@ -245,14 +252,66 @@ def create_cloud_agent_draft(request: Request, body: CloudJobDraftRequest):
     )
 
 
+@router.post("/cloud-agent/draft/voice")
+def create_cloud_agent_draft_voice(
+    body: CloudDraftVoiceRequest,
+    request: Request,
+    voices: DraftVoiceService = Depends(get_draft_voice_service),
+):
+    del request
+    try:
+        artifact = voices.prepare(body)
+    except DraftVoiceError as exc:
+        raise HttpException(task_id="cloud-agent-draft-voice", status_code=422, message=str(exc)) from exc
+    return utils.get_response(200, artifact.model_dump(mode="json"))
+
+
+@router.get("/cloud-agent/draft/voices/{fingerprint}/audio")
+def get_cloud_agent_draft_voice_audio(
+    fingerprint: str,
+    request: Request,
+    voices: DraftVoiceService = Depends(get_draft_voice_service),
+):
+    del request
+    try:
+        path = voices.get(fingerprint)
+    except DraftVoiceError as exc:
+        raise HttpException(task_id="cloud-agent-draft-voice", status_code=404, message=str(exc)) from exc
+    return FileResponse(path=str(path), media_type="audio/mpeg", filename="voice.mp3")
+
+
 @router.post("/cloud-agent/jobs")
 def create_cloud_agent_job(
     request: Request,
     body: CloudJobCreate,
     store: CloudJobStore = Depends(get_cloud_job_store),
+    storage: CloudJobStorage = Depends(get_cloud_job_storage),
+    voices: DraftVoiceService = Depends(get_draft_voice_service),
 ):
     del request
-    job = store.create_job(body)
+    prepared_voice = str(body.prepared_voice_fingerprint or "").strip()
+    if prepared_voice:
+        try:
+            voices.get(prepared_voice)
+        except DraftVoiceError as exc:
+            raise HttpException(task_id="cloud-agent-job", status_code=422, message=str(exc)) from exc
+
+    job = store.create_job(body, status=CloudJobStatus.DRAFT)
+    if prepared_voice:
+        try:
+            paths = storage.prepare(job.id)
+            voices.materialize(prepared_voice, paths.voice_file)
+            job = store.patch_job(job.id, voice_file=str(paths.voice_file))
+        except (DraftVoiceError, MediaValidationError, OSError) as exc:
+            job = store.patch_job(
+                job.id,
+                status=CloudJobStatus.FAILED,
+                current_step="prepared_voice_failed",
+                error_code="PREPARED_VOICE_UNAVAILABLE",
+                error_message="prepared narration could not be materialized",
+            )
+            raise HttpException(task_id=job.id, status_code=422, message="prepared narration could not be materialized") from exc
+    job = store.patch_job(job.id, status=CloudJobStatus.QUEUED, current_step="queued")
     return utils.get_response(200, _job_data(job))
 
 

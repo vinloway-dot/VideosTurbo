@@ -198,13 +198,18 @@ class CloudJobStore:
             updated_at=row["updated_at"],
         )
 
-    def create_job(self, request: CloudJobCreate) -> CloudJobRecord:
+    def create_job(
+        self,
+        request: CloudJobCreate,
+        *,
+        status: CloudJobStatus = CloudJobStatus.QUEUED,
+    ) -> CloudJobRecord:
         now = _utc_now()
         job_id = str(uuid4())
         record = CloudJobRecord(
             **request.model_dump(),
             id=job_id,
-            status=CloudJobStatus.QUEUED,
+            status=status,
             checkpoint=CloudJobCheckpoint.NONE,
             control_request=CloudControlRequest.NONE,
             current_step="queued",

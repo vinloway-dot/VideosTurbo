@@ -283,15 +283,23 @@ class CloudAgentWorkflow:
 
             job = self._get_job(job.id)
             if job.checkpoint is CloudJobCheckpoint.PREFLIGHT_PASSED:
-                self.store.patch_job(
-                    job.id,
-                    status=CloudJobStatus.TTS_GENERATING,
-                    current_step="tts_generating",
-                    progress=15,
-                )
-                self.tts.generate(job, paths.voice_file)
-                if not paths.voice_file.is_file():
-                    raise MediaValidationError("TTS step did not produce the canonical audio artifact")
+                if paths.voice_file.is_file():
+                    self.store.patch_job(
+                        job.id,
+                        status=CloudJobStatus.TTS_GENERATING,
+                        current_step="prepared_voice_validating",
+                        progress=15,
+                    )
+                else:
+                    self.store.patch_job(
+                        job.id,
+                        status=CloudJobStatus.TTS_GENERATING,
+                        current_step="tts_generating",
+                        progress=15,
+                    )
+                    self.tts.generate(job, paths.voice_file)
+                    if not paths.voice_file.is_file():
+                        raise MediaValidationError("TTS step did not produce the canonical audio artifact")
                 probe = validate_audio(
                     paths.voice_file,
                     min_duration=self.tts_min_duration,

@@ -16,6 +16,7 @@ from app.services.cloud_agent.session import SessionManager
 from app.services.cloud_agent.storage import CloudJobStorage
 from app.services.cloud_agent.tts import ExistingVoiceTTSClient
 from app.services.cloud_agent.tts_settings import CloudTTSSettingsService
+from app.services.cloud_agent.draft_voice import DraftVoiceService
 from app.services.cloud_agent.retry import PreFlowRetryService
 from app.services.cloud_agent.worker import CloudAgentWorker
 from app.services.cloud_agent.workflow import CloudAgentWorkflow
@@ -102,6 +103,11 @@ def build_pre_flow_retry_service() -> PreFlowRetryService:
 def build_cloud_tts_settings_service() -> CloudTTSSettingsService:
     """Compose safe TTS settings from the existing process configuration."""
     return CloudTTSSettingsService()
+
+
+def build_draft_voice_service() -> DraftVoiceService:
+    storage = CloudJobStorage()
+    return DraftVoiceService(storage.root.parent / "draft-voices")
 
 
 def build_worker() -> CloudAgentWorker:

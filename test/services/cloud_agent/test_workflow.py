@@ -575,6 +575,36 @@ def test_workflow_progresses_from_queue_through_all_durable_checkpoints(monkeypa
     assert Path(result.final_video).is_file()
 
 
+def test_workflow_reuses_a_prepared_canonical_voice_without_resynthesizing(
+    monkeypatch, tmp_path
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    paths = storage.prepare(job.id)
+    paths.voice_file.write_bytes(b"prepared voice")
+    _accept_media(monkeypatch)
+    tts = RecordingTTS()
+
+    result = CloudAgentWorkflow(
+        store,
+        storage,
+        RecordingPreflight(),
+        tts,
+        RecordingFlow(),
+        RecordingCanva(),
+        tts_min_duration=1.0,
+        canva_min_playback_speed=0.85,
+        final_duration_tolerance_seconds=1.0,
+        final_min_size_bytes=1,
+        expected_width=1080,
+        expected_height=1920,
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert tts.calls == []
+    assert result.checkpoint is CloudJobCheckpoint.COMPLETED
+
+
 def test_workflow_uses_one_canva_job_session_and_defers_canva_preflight(
     monkeypatch, tmp_path
 ):

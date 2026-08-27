@@ -395,8 +395,38 @@ def test_start_job_sends_the_draft_clip_plan_required_by_the_api(monkeypatch):
         tts_provider="azure-tts-v1",
         voice_id="en-AU-NatashaNeural-Female",
         voice_speed=1.0,
+        prepared_voice_fingerprint="a" * 64,
     ) == {"id": "job-123"}
     assert recorded["method"] == "POST"
     assert recorded["path"] == "jobs"
     assert recorded["json"]["clip_plan"] == clip_plan
     assert recorded["json"]["script"] == "Ready narration"
+    assert recorded["json"]["prepared_voice_fingerprint"] == "a" * 64
+
+
+def test_prepare_draft_voice_posts_the_full_script_and_selected_voice(monkeypatch):
+    recorded = {}
+
+    def api(method, path, **kwargs):
+        recorded.update(method=method, path=path, **kwargs)
+        return {"fingerprint": "f" * 64, "reused": False}
+
+    monkeypatch.setattr(cloud_agent, "_api", api)
+
+    assert cloud_agent._prepare_draft_voice(
+        script="The entire narration.",
+        tts_provider="elevenlabs",
+        voice_id="elevenlabs:P9NVJuTccNIK9usP8iEI:001",
+        voice_speed=1.0,
+    )["fingerprint"] == "f" * 64
+    assert recorded == {
+        "method": "POST",
+        "path": "draft/voice",
+        "json": {
+            "script": "The entire narration.",
+            "tts_provider": "elevenlabs",
+            "voice_id": "elevenlabs:P9NVJuTccNIK9usP8iEI:001",
+            "voice_speed": 1.0,
+        },
+        "timeout": 120,
+    }

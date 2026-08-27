@@ -1,4 +1,5 @@
 import importlib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -7,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.config import config
 from app.models.cloud_agent import (
+    CloudDraftVoiceArtifact,
     CloudControlRequest,
     CloudJobCheckpoint,
     CloudJobCreate,
@@ -25,6 +27,8 @@ from app.services.cloud_agent.storage import CloudJobStorage
 EXPECTED_CLOUD_AGENT_PATHS = {
     ("GET", "/api/v1/cloud-agent/health"),
     ("POST", "/api/v1/cloud-agent/draft"),
+    ("POST", "/api/v1/cloud-agent/draft/voice"),
+    ("GET", "/api/v1/cloud-agent/draft/voices/{fingerprint}/audio"),
     ("POST", "/api/v1/cloud-agent/jobs"),
     ("GET", "/api/v1/cloud-agent/jobs"),
     ("GET", "/api/v1/cloud-agent/jobs/{job_id}"),
@@ -75,7 +79,32 @@ def _client(tmp_path):
     app.add_exception_handler(HttpException, asgi.exception_handler)
     app.dependency_overrides[cloud_agent.get_cloud_job_store] = lambda: store
     app.dependency_overrides[cloud_agent.get_cloud_job_storage] = lambda: storage
-    return TestClient(app, raise_server_exceptions=False), store
+
+    class FakeDraftVoices:
+        def __init__(self):
+            self.requests = []
+            self.source = tmp_path / "prepared.mp3"
+            self.source.write_bytes(b"prepared voice")
+
+        def prepare(self, request):
+            self.requests.append(request)
+            return CloudDraftVoiceArtifact(fingerprint="f" * 64, reused=False)
+
+        def get(self, fingerprint):
+            assert fingerprint == "f" * 64
+            return self.source
+
+        def materialize(self, fingerprint, destination):
+            assert fingerprint == "f" * 64
+            Path(destination).parent.mkdir(parents=True, exist_ok=True)
+            Path(destination).write_bytes(self.source.read_bytes())
+            return Path(destination)
+
+    voices = FakeDraftVoices()
+    app.dependency_overrides[cloud_agent.get_draft_voice_service] = lambda: voices
+    client = TestClient(app, raise_server_exceptions=False)
+    client.app.state.draft_voices = voices
+    return client, store
 
 
 def _created_job(store: CloudJobStore):
@@ -176,6 +205,44 @@ def test_create_job_persists_queue_without_running_tts_or_browser(monkeypatch, t
     persisted = store.get_job(data["id"])
     assert persisted is not None
     assert persisted.status is CloudJobStatus.QUEUED
+
+
+def test_create_draft_voice_synthesizes_the_entire_editor_script_without_creating_a_job(
+    monkeypatch, tmp_path
+):
+    client, store = _client(tmp_path)
+    complete_script = "One complete narration that must be synthesized as a whole."
+
+    response = client.post(
+        "/api/v1/cloud-agent/draft/voice",
+        json={
+            "script": complete_script,
+            "tts_provider": "elevenlabs",
+            "voice_id": "elevenlabs:P9NVJuTccNIK9usP8iEI:001",
+            "voice_speed": 1.0,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["fingerprint"]
+    assert data["reused"] is False
+    assert client.app.state.draft_voices.requests[0].script == complete_script
+    assert store.list_jobs() == []
+
+
+def test_create_job_materializes_a_matching_prepared_voice_before_queueing(tmp_path):
+    client, store = _client(tmp_path)
+    payload = _request_payload()
+    payload["prepared_voice_fingerprint"] = "f" * 64
+
+    response = client.post("/api/v1/cloud-agent/jobs", json=payload)
+
+    assert response.status_code == 200
+    job = store.get_job(response.json()["data"]["id"])
+    assert job is not None
+    assert job.status is CloudJobStatus.QUEUED
+    assert Path(job.voice_file).read_bytes() == b"prepared voice"
 
 
 def test_draft_generates_a_complete_start_payload_without_starting_production_work(

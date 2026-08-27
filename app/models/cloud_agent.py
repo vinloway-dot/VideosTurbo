@@ -69,6 +69,7 @@ class CloudJobCreate(BaseModel):
     tts_provider: str
     voice_id: str
     voice_speed: float = Field(default=1.0, gt=0)
+    prepared_voice_fingerprint: str = Field(default="", exclude=True, max_length=64)
 
     @field_validator("script", "master_prompt")
     @classmethod
@@ -83,6 +84,27 @@ class CloudJobCreate(BaseModel):
         if self.target_words != self.clip_plan.target_words:
             raise ValueError("target_words must match clip_plan.target_words")
         return self
+
+
+class CloudDraftVoiceRequest(BaseModel):
+    script: str
+    tts_provider: str
+    voice_id: str
+    voice_speed: float = Field(default=1.0, gt=0)
+
+    @field_validator("script", "tts_provider", "voice_id")
+    @classmethod
+    def _require_non_blank_content(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("value must not be blank")
+        return normalized
+
+
+class CloudDraftVoiceArtifact(BaseModel):
+    fingerprint: str
+    reused: bool
+    filename: str = "voice.mp3"
 
 
 class CloudJobDraftRequest(BaseModel):
