@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.config import config
 from app.models.cloud_agent import (
+    CloudAgentDefaults,
     CloudDraftVoiceArtifact,
     CloudControlRequest,
     CloudJobCheckpoint,
@@ -26,6 +27,9 @@ from app.services.cloud_agent.storage import CloudJobStorage
 
 EXPECTED_CLOUD_AGENT_PATHS = {
     ("GET", "/api/v1/cloud-agent/health"),
+    ("GET", "/api/v1/cloud-agent/defaults"),
+    ("PUT", "/api/v1/cloud-agent/defaults"),
+    ("POST", "/api/v1/cloud-agent/defaults/reset"),
     ("POST", "/api/v1/cloud-agent/draft"),
     ("POST", "/api/v1/cloud-agent/draft/voice"),
     ("GET", "/api/v1/cloud-agent/draft/voices/{fingerprint}/audio"),
@@ -102,8 +106,37 @@ def _client(tmp_path):
 
     voices = FakeDraftVoices()
     app.dependency_overrides[cloud_agent.get_draft_voice_service] = lambda: voices
+
+    class FakeDefaults:
+        def __init__(self):
+            self.value = CloudAgentDefaults(
+                tts_provider="azure-tts-v1",
+                voice_id="",
+                voice_speed=1.0,
+                custom_system_prompt="",
+            )
+
+        def get(self):
+            return self.value
+
+        def update(self, patch):
+            self.value = CloudAgentDefaults.model_validate(patch)
+            return self.value
+
+        def reset(self):
+            self.value = CloudAgentDefaults(
+                tts_provider="azure-tts-v1",
+                voice_id="",
+                voice_speed=1.0,
+                custom_system_prompt="",
+            )
+            return self.value
+
+    defaults = FakeDefaults()
+    app.dependency_overrides[cloud_agent.get_cloud_agent_defaults_service] = lambda: defaults
     client = TestClient(app, raise_server_exceptions=False)
     client.app.state.draft_voices = voices
+    client.app.state.defaults = defaults
     return client, store
 
 
@@ -243,6 +276,27 @@ def test_create_job_materializes_a_matching_prepared_voice_before_queueing(tmp_p
     assert job is not None
     assert job.status is CloudJobStatus.QUEUED
     assert Path(job.voice_file).read_bytes() == b"prepared voice"
+
+
+def test_cloud_agent_defaults_api_persists_and_resets_operator_preferences(tmp_path):
+    client, _store = _client(tmp_path)
+
+    saved = client.put(
+        "/api/v1/cloud-agent/defaults",
+        json={
+            "tts_provider": "elevenlabs",
+            "voice_id": "elevenlabs:P9NVJuTccNIK9usP8iEI:001",
+            "voice_speed": 1.1,
+            "custom_system_prompt": "Write in a calm documentary tone.",
+        },
+    )
+    reset = client.post("/api/v1/cloud-agent/defaults/reset")
+
+    assert saved.status_code == 200
+    assert saved.json()["data"]["voice_id"] == "elevenlabs:P9NVJuTccNIK9usP8iEI:001"
+    assert reset.status_code == 200
+    assert reset.json()["data"]["tts_provider"] == "azure-tts-v1"
+    assert reset.json()["data"]["custom_system_prompt"] == ""
 
 
 def test_draft_generates_a_complete_start_payload_without_starting_production_work(

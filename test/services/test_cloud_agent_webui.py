@@ -430,3 +430,17 @@ def test_prepare_draft_voice_posts_the_full_script_and_selected_voice(monkeypatc
         },
         "timeout": 120,
     }
+
+
+def test_cloud_agent_defaults_payload_keeps_voice_and_custom_system_prompt_together():
+    assert cloud_agent._cloud_agent_defaults_payload(
+        tts_provider="elevenlabs",
+        voice_id="elevenlabs:P9NVJuTccNIK9usP8iEI:001",
+        voice_speed=1.1,
+        custom_system_prompt="Write in a calm documentary tone.",
+    ) == {
+        "tts_provider": "elevenlabs",
+        "voice_id": "elevenlabs:P9NVJuTccNIK9usP8iEI:001",
+        "voice_speed": 1.1,
+        "custom_system_prompt": "Write in a calm documentary tone.",
+    }

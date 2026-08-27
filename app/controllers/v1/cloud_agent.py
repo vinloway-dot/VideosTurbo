@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 from app.config import config
 from app.controllers.v1.base import new_router
 from app.models.cloud_agent import (
+    CloudAgentDefaultsPatch,
     CloudControlRequest,
     CloudDraftVoiceRequest,
     CloudJobDraftRequest,
@@ -26,8 +27,10 @@ from app.services.cloud_agent.factory import (
     build_session_manager,
     build_cloud_tts_settings_service,
     build_draft_voice_service,
+    build_cloud_agent_defaults_service,
 )
 from app.services.cloud_agent.draft_voice import DraftVoiceError, DraftVoiceService
+from app.services.cloud_agent.defaults import CloudAgentDefaultsError, CloudAgentDefaultsService
 from app.services.cloud_agent.retry import PreFlowRetryService
 from app.services.cloud_agent.preflight import _probe_storage_writable
 from app.services.cloud_agent.session import SessionManager
@@ -92,6 +95,10 @@ def get_cloud_tts_settings_service() -> CloudTTSSettingsService:
 
 def get_draft_voice_service() -> DraftVoiceService:
     return build_draft_voice_service()
+
+
+def get_cloud_agent_defaults_service() -> CloudAgentDefaultsService:
+    return build_cloud_agent_defaults_service()
 
 
 def _job_data(job) -> dict:
@@ -208,6 +215,40 @@ def refresh_cloud_tts_provider_voices(
     except CloudTTSSettingsError as exc:
         raise HttpException(task_id="", status_code=422, message=str(exc)) from exc
     return utils.get_response(200, data)
+
+
+@router.get("/cloud-agent/defaults")
+def get_cloud_agent_defaults(
+    request: Request,
+    service: CloudAgentDefaultsService = Depends(get_cloud_agent_defaults_service),
+):
+    del request
+    return utils.get_response(200, service.get().model_dump(mode="json"))
+
+
+@router.put("/cloud-agent/defaults")
+def update_cloud_agent_defaults(
+    body: CloudAgentDefaultsPatch,
+    request: Request,
+    service: CloudAgentDefaultsService = Depends(get_cloud_agent_defaults_service),
+):
+    del request
+    try:
+        data = service.update(body).model_dump(mode="json")
+    except CloudAgentDefaultsError as exc:
+        raise HttpException(
+            task_id="cloud-agent-defaults", status_code=422, message=str(exc)
+        ) from exc
+    return utils.get_response(200, data)
+
+
+@router.post("/cloud-agent/defaults/reset")
+def reset_cloud_agent_defaults(
+    request: Request,
+    service: CloudAgentDefaultsService = Depends(get_cloud_agent_defaults_service),
+):
+    del request
+    return utils.get_response(200, service.reset().model_dump(mode="json"))
 
 
 @router.post("/cloud-agent/draft")

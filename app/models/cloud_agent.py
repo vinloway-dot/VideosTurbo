@@ -107,6 +107,23 @@ class CloudDraftVoiceArtifact(BaseModel):
     filename: str = "voice.mp3"
 
 
+class CloudAgentDefaults(BaseModel):
+    tts_provider: str
+    voice_id: str = ""
+    voice_speed: float = Field(default=1.0, gt=0)
+    custom_system_prompt: str = Field(default="", max_length=8000)
+
+
+class CloudAgentDefaultsPatch(CloudAgentDefaults):
+    @field_validator("tts_provider")
+    @classmethod
+    def _require_provider(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("tts_provider must not be blank")
+        return normalized
+
+
 class CloudJobDraftRequest(BaseModel):
     subject: str
     script: str = ""

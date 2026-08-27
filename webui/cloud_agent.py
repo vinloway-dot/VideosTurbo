@@ -123,6 +123,25 @@ def _prepared_voice_audio(fingerprint):
     return response.content
 
 
+def _cloud_agent_defaults_payload(
+    *, tts_provider, voice_id, voice_speed, custom_system_prompt
+):
+    return {
+        "tts_provider": tts_provider,
+        "voice_id": voice_id,
+        "voice_speed": voice_speed,
+        "custom_system_prompt": custom_system_prompt,
+    }
+
+
+def _load_cloud_agent_defaults():
+    return _api("GET", "defaults")
+
+
+def _save_cloud_agent_defaults(payload):
+    return _api("PUT", "defaults", json=payload)
+
+
 def _open_browser_url(service):
     service_id = {"google-flow": "google_flow", "canva": "canva"}[service]
     return _api("GET", f"sessions/{service_id}/open-browser")["url"]
@@ -167,6 +186,24 @@ def _store_draft(draft):
 
 
 def render_cloud_agent_panel():
+    ui_state = getattr(st, "session_state", {})
+    defaults = {
+        "tts_provider": "azure-tts-v1",
+        "voice_id": "",
+        "voice_speed": 1.0,
+        "custom_system_prompt": "",
+    }
+    if hasattr(st, "runtime"):
+        try:
+            defaults.update(_load_cloud_agent_defaults())
+        except requests.RequestException as exc:
+            st.error(_api_error_message(exc))
+    ui_state.setdefault("cloud_agent_provider", defaults["tts_provider"])
+    ui_state.setdefault("cloud_agent_voice", defaults["voice_id"])
+    ui_state.setdefault("cloud_agent_speed", defaults["voice_speed"])
+    ui_state.setdefault(
+        "cloud_agent_custom_system_prompt", defaults["custom_system_prompt"]
+    )
     st.subheader("Cloud Agent")
     subject = st.text_input("Video Subject", key="cloud_agent_subject")
     words = st.number_input("Target Words", min_value=1, value=130, key="cloud_agent_words")
@@ -232,6 +269,8 @@ def render_cloud_agent_panel():
         except requests.RequestException as exc:
             st.error(_api_error_message(exc))
     provider_labels = {item["id"]: item["label"] for item in provider_catalog}
+    if ui_state.get("cloud_agent_provider") not in provider_labels:
+        ui_state["cloud_agent_provider"] = next(iter(provider_labels), "")
     provider = st.selectbox(
         "TTS Provider", list(provider_labels),
         format_func=lambda value: provider_labels[value], key="cloud_agent_provider",
@@ -246,6 +285,9 @@ def render_cloud_agent_panel():
     voice_options = tts_session_state.get(
         "cloud_agent_tts_voices", provider_metadata.get("voices", [])
     )
+    saved_voice = str(ui_state.get("cloud_agent_voice", "") or "")
+    if saved_voice and all(item["id"] != saved_voice for item in voice_options):
+        voice_options = [*voice_options, {"id": saved_voice, "label": saved_voice}]
     voice_labels = {item["id"]: item.get("label", item["id"]) for item in voice_options}
     voice = st.selectbox(
         "Voice", list(voice_labels) or [""],
@@ -284,6 +326,34 @@ def render_cloud_agent_panel():
             except requests.RequestException as exc:
                 st.error(_api_error_message(exc))
     speed = st.number_input("Speed", min_value=0.1, value=1.0, key="cloud_agent_speed")
+    with st.expander("Cloud Agent Defaults", expanded=False):
+        st.caption("Save the selected voice and Custom System Prompt for future jobs.")
+        if st.button("Save Defaults", key="cloud_agent_save_defaults"):
+            try:
+                _save_cloud_agent_defaults(
+                    _cloud_agent_defaults_payload(
+                        tts_provider=provider,
+                        voice_id=voice,
+                        voice_speed=speed,
+                        custom_system_prompt=custom_system_prompt,
+                    )
+                )
+                st.rerun()
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
+        if st.button("Reset Defaults", key="cloud_agent_reset_defaults"):
+            try:
+                _api("POST", "defaults/reset")
+                for key in (
+                    "cloud_agent_provider",
+                    "cloud_agent_voice",
+                    "cloud_agent_speed",
+                    "cloud_agent_custom_system_prompt",
+                ):
+                    ui_state.pop(key, None)
+                st.rerun()
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
     prepared_voice = tts_session_state.get("cloud_agent_prepared_voice")
     if st.button("Create Voice", key="cloud_agent_create_voice"):
         if not script.strip():

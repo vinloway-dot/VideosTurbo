@@ -46,6 +46,10 @@ CLOUD_AGENT_DEFAULTS = {
     "cloud_agent_remote_browser_url": "http://127.0.0.1:6080/vnc.html",
     "cloud_agent_flow_url": "",
     "cloud_agent_canva_template_url": "",
+    "cloud_agent_default_tts_provider": "azure-tts-v1",
+    "cloud_agent_default_voice_id": "",
+    "cloud_agent_default_voice_speed": 1.0,
+    "cloud_agent_default_custom_system_prompt": "",
 }
 
 
