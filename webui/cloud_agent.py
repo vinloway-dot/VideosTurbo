@@ -10,6 +10,24 @@ SESSION_CHECK_TIMEOUT_SECONDS = 45
 DRAFT_TIMEOUT_SECONDS = 120
 
 
+# Keep this list aligned with the retired main generation UI.  An empty value
+# preserves the existing LLM behavior: generate in the Video Subject's language.
+SCRIPT_LANGUAGE_OPTIONS = [
+    ("Auto — detect from Video Subject", ""),
+    ("zh-CN", "zh-CN"),
+    ("zh-HK", "zh-HK"),
+    ("zh-TW", "zh-TW"),
+    ("de-DE", "de-DE"),
+    ("en-US", "en-US"),
+    ("es-ES", "es-ES"),
+    ("fr-FR", "fr-FR"),
+    ("ru-RU", "ru-RU"),
+    ("vi-VN", "vi-VN"),
+    ("th-TH", "th-TH"),
+    ("tr-TR", "tr-TR"),
+]
+
+
 def _api(method, path, **kwargs):
     timeout = kwargs.pop("timeout", API_TIMEOUT_SECONDS)
     response = requests.request(method, API_PREFIX + path, timeout=timeout, **kwargs)
@@ -96,7 +114,15 @@ def render_cloud_agent_panel():
     st.subheader("Cloud Agent")
     subject = st.text_input("Video Subject", key="cloud_agent_subject")
     words = st.number_input("Target Words", min_value=1, value=130, key="cloud_agent_words")
-    language = st.text_input("Language", value="English", key="cloud_agent_language")
+    language_labels = {
+        language_code: label for label, language_code in SCRIPT_LANGUAGE_OPTIONS
+    }
+    language = st.selectbox(
+        "Language",
+        options=list(language_labels),
+        format_func=lambda value: language_labels[value],
+        key="cloud_agent_language",
+    )
     if st.button("Generate Script", key="cloud_agent_generate_script"):
         if not subject.strip():
             st.error("Video Subject is required.")

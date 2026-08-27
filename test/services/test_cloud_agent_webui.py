@@ -41,6 +41,74 @@ def test_cloud_agent_ui_is_a_thin_fastapi_client_with_required_controls_and_stat
     assert "PersistentBrowserManager" not in source
 
 
+def test_cloud_agent_language_selector_reuses_the_main_script_auto_contract():
+    assert cloud_agent.SCRIPT_LANGUAGE_OPTIONS == [
+        ("Auto — detect from Video Subject", ""),
+        ("zh-CN", "zh-CN"),
+        ("zh-HK", "zh-HK"),
+        ("zh-TW", "zh-TW"),
+        ("de-DE", "de-DE"),
+        ("en-US", "en-US"),
+        ("es-ES", "es-ES"),
+        ("fr-FR", "fr-FR"),
+        ("ru-RU", "ru-RU"),
+        ("vi-VN", "vi-VN"),
+        ("th-TH", "th-TH"),
+        ("tr-TR", "tr-TR"),
+    ]
+
+
+def test_cloud_agent_language_selector_formats_the_auto_empty_value(monkeypatch):
+    class Column:
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def link_button(self, *_args, **_kwargs):
+            return None
+
+    class Streamlit:
+        def __init__(self):
+            self.session_state = {}
+            self.formatted_language_options = []
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def text_input(self, _label, **kwargs):
+            return kwargs.get("value", "")
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, *, format_func, **_kwargs):
+            self.formatted_language_options = [format_func(option) for option in options]
+            return options[0]
+
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def columns(self, _count):
+            return [Column(), Column(), Column(), Column()]
+
+        def text_area(self, *_args, **_kwargs):
+            return ""
+
+        def caption(self, *_args, **_kwargs):
+            return None
+
+        def error(self, *_args, **_kwargs):
+            return None
+
+    fake_streamlit = Streamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+
+    cloud_agent.render_cloud_agent_panel()
+
+    assert fake_streamlit.formatted_language_options[0] == (
+        "Auto — detect from Video Subject"
+    )
+
+
 def test_main_renders_cloud_agent_without_the_retired_local_generation_flow():
     source = MAIN_SOURCE.read_text(encoding="utf-8")
     application = source.split("def _render_application():", maxsplit=1)[1]
@@ -124,6 +192,9 @@ def test_canva_check_timeout_is_shown_as_a_safe_webui_error(monkeypatch):
 
         def number_input(self, _label, **kwargs):
             return kwargs["value"]
+
+        def selectbox(self, _label, options, **_kwargs):
+            return options[0]
 
         def text_area(self, *_args, **_kwargs):
             return ""
