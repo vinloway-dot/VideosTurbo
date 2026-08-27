@@ -138,7 +138,8 @@ The script-creation area gains two explicit modes:
 
 - `Standard Script` renders and behaves as it does now.
 - `Research Script` renders Research provider, model, Custom Model ID, API-key
-  state, Research Custom System Prompt, and one-to-three URL inputs.
+  state, Research Custom System Prompt, the per-draft citation toggle, and
+  one-to-three URL inputs.
 
 The mode-specific controls appear before the shared Script Editor. Research
 mode provides:
@@ -149,6 +150,7 @@ mode provides:
 - configured/not-configured API-key state, write-only key input, separate
   confirmed key removal, and settings save;
 - editable Research Custom System Prompt and explicit save;
+- `อนุญาตให้ใส่อ้างอิงในสคริปต์` per-draft checkbox, default `false`;
 - one URL per input row, with at most three rows;
 - a Sources panel populated only after successful reads; and
 - a Generate Research Script action with a visible busy state.
@@ -197,7 +199,8 @@ router and use these contracts:
   "model_choice": "provider model id | custom",
   "custom_model_id": "string",
   "source_urls": ["https://example.com/source"],
-  "custom_system_prompt": "string"
+  "custom_system_prompt": "string",
+  "allow_citations": false
 }
 ```
 
@@ -387,7 +390,8 @@ Research uses two conceptual layers:
 
 The editable prompt is stored independently from the existing Standard Script
 Custom System Prompt. User text is never interpolated into or allowed to replace
-the non-editable instruction layer.
+the non-editable instruction layer. It cannot grant citation permission;
+`allow_citations` is the sole authority for citations in narration.
 
 ## 13. Settings and Secrets
 

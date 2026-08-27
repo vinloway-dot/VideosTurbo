@@ -217,13 +217,15 @@ class ResearchScriptServiceProtocol(Protocol):
 - [ ] **Step 1: Write failing contract/configuration tests**
 
 ~~~python
-def test_research_request_preserves_urls_for_domain_preflight():
+def test_research_request_preserves_urls_and_defaults_citations_off():
     request = ResearchDraftRequest(
         subject="topic", language="", target_words=130, provider="openrouter",
         model_choice="openai/gpt-5.6-sol-pro", custom_model_id="",
         source_urls=[], custom_system_prompt="",
     )
     assert request.source_urls == []
+    assert request.allow_citations is False
+    assert request.model_dump(mode="json")["allow_citations"] is False
 
 def test_error_exposes_code_but_not_internal_detail():
     error = ResearchError("URL_TARGET_NOT_PUBLIC", "socket connected to 127.0.0.1")
@@ -253,6 +255,7 @@ class ResearchDraftRequest(BaseModel):
     custom_model_id: str = Field(default="", max_length=256)
     source_urls: list[str] = Field(default_factory=list)
     custom_system_prompt: str = Field(default="", max_length=8000)
+    allow_citations: bool = False
 
     @model_validator(mode="after")
     def validate_urls_and_model(self):
@@ -934,9 +937,10 @@ at least one successful source must be listed in `source_ids_used`. A result tha
 uses model knowledge but no source evidence fails with `SOURCE_EVIDENCE_EMPTY`.
 Every claim marked unstable must have a verified source/quote. The spoken script
 does not include those internal references unless the per-draft citation toggle
-is enabled. Then create the existing six-clip plan/master prompt, save provenance
-last, and return common draft result. On any error, persist no successful draft
-and create no job.
+is enabled. `request.allow_citations` is the sole citation authority; never infer
+permission from `custom_system_prompt`. Then create the existing six-clip
+plan/master prompt, save provenance last, and return common draft result. On any
+error, persist no successful draft and create no job.
 
 Failure atomicity is mandatory: an exception may return only the typed code,
 Thai public message, and sanitized accounting. It may not persist a successful
@@ -1113,7 +1117,14 @@ git commit -m "feat: expose research script API"
 ~~~python
 def test_research_mode_is_fastapi_only_and_has_owned_controls():
     source = UI_SOURCE.read_text(encoding="utf-8")
-    for label in ("Standard Script", "Research Script", "Source URLs", "Generate Research Script", "Sources"):
+    for label in (
+        "Standard Script",
+        "Research Script",
+        "Source URLs",
+        "อนุญาตให้ใส่อ้างอิงในสคริปต์",
+        "Generate Research Script",
+        "Sources",
+    ):
         assert label in source
     assert "sqlite3" not in source.lower()
     assert "PersistentBrowserManager" not in source
@@ -1236,6 +1247,11 @@ else:
     _store_research_result(draft)
     _render_research_accounting(draft.get("accounting", {}))
 ~~~
+
+Render `st.checkbox("อนุญาตให้ใส่อ้างอิงในสคริปต์", value=False,
+key="cloud_agent_research_allow_citations")` only in Research mode and include
+its boolean as `allow_citations` in the Research draft request JSON. Do not add
+the field or control to Standard mode.
 
 Keep existing Standard keys/controls and behavior unchanged. Render Research
 provider/model/custom model/key/prompt/URL controls; save only through FastAPI

@@ -352,3 +352,35 @@ Resolved 130 packages in 2ms
 All architectural-correction checks remained local and non-paid. No real provider or
 browser calls were made. Protected configuration backups remained unmodified and
 unstaged.
+
+## Citation-toggle documentation consistency follow-up
+
+The approved design now lists the exact Research-only checkbox
+`อนุญาตให้ใส่อ้างอิงในสคริปต์`, its `false` default, and `allow_citations: false`
+in the draft request JSON. The implementation plan now includes
+`allow_citations: bool = False` in `ResearchDraftRequest`, asserts that default in
+the original contract test, inventories the exact WebUI control, and specifies its
+Research-scoped session key and JSON forwarding.
+
+Both documents now state directly that `allow_citations` is the sole citation
+authority and that `custom_system_prompt` cannot grant permission. No runtime code
+changed in this follow-up.
+
+### Verification evidence
+
+```text
+$ rg -n -i "unless [^.\\n]*(?:editable|custom)[^.\\n]*prompt|(?:editable|custom)[^.\\n]*prompt[^.\\n]*(?:grant|authoriz|permit|request)[^.\\n]*(?:citation|reference|url)|(?:citation|reference|url)[^.\\n]*(?:grant|authoriz|permit|request)[^.\\n]*(?:editable|custom)[^.\\n]*prompt" docs/superpowers/specs/2026-08-27-cloud-agent-research-script-tool-calling-design.md docs/superpowers/plans/2026-08-27-cloud-agent-research-script-tool-calling.md
+no matches
+
+$ uv run pytest test/services/cloud_agent/test_research_contracts.py::test_research_request_preserves_urls_and_defaults_citations_off test/services/cloud_agent/test_research_service.py::test_citation_narration_requires_toggle_even_when_prompt_requests_it test/services/cloud_agent/test_research_service.py::test_citation_toggle_allows_citations_with_blank_prompt test/services/cloud_agent/test_research_service.py::test_invariant_prompt_contains_deterministic_citation_policy test/services/cloud_agent/test_research_controller.py::test_research_draft_route_forwards_citation_toggle test/services/test_cloud_agent_webui.py::test_research_payload_forwards_citation_toggle_and_bounded_timeout test/services/test_cloud_agent_webui.py::test_research_failure_never_stores_draft -q --tb=short
+11 passed, 11 warnings in 3.73s
+
+$ uv run ruff check app webui test
+All checks passed!
+
+$ git diff --check
+clean
+```
+
+The follow-up remained local and non-paid. No provider or browser calls were made,
+and protected configuration backups remained unmodified and unstaged.
