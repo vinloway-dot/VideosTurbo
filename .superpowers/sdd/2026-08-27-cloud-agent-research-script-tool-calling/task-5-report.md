@@ -133,3 +133,49 @@ Fix verification
 44 passed in 3.11s
 All checks passed!
 ```
+
+Fix round 2
+-----------
+
+Reviewer finding addressed
+--------------------------
+- P1: A later recoverable-only tool batch no longer indexes `successful_calls[0]`. If prior successful sources already exist, the service appends the assistant tool-call message plus sanitized failed-tool results, preserves the previous evidence packet in context, keeps tool accounting intact, and lets the next provider round synthesize from the prior source evidence.
+
+Fix round 2 TDD evidence
+------------------------
+RED:
+- Command: `uv run pytest test/services/cloud_agent/test_research_service.py -q`
+- Output:
+
+```text
+................F...                                                     [100%]
+=================================== FAILURES ===================================
+_______ test_later_recoverable_failure_batch_continues_with_prior_source _______
+...
+>       packet_call_id = successful_calls[0]
+                         ^^^^^^^^^^^^^^^^^^^
+E       IndexError: list index out of range
+...
+FAILED test/services/cloud_agent/test_research_service.py::test_later_recoverable_failure_batch_continues_with_prior_source
+1 failed, 19 passed in 3.12s
+```
+
+GREEN:
+- Command: `uv run pytest test/services/cloud_agent/test_research_service.py -q`
+- Output:
+
+```text
+....................                                                     [100%]
+20 passed in 3.05s
+```
+
+Fix round 2 verification
+------------------------
+- Command: `uv run pytest test/services/cloud_agent/test_research_service.py test/services/cloud_agent/test_research_runtime.py test/services/cloud_agent/test_research_adapters.py -q && uv run ruff check app/services/cloud_agent/factory.py app/services/cloud_agent/research/service.py app/services/cloud_agent/research/adapters.py test/services/cloud_agent/test_research_service.py test/services/cloud_agent/test_research_adapters.py`
+- Output:
+
+```text
+.............................................                            [100%]
+45 passed in 3.59s
+All checks passed!
+```

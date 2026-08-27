@@ -561,6 +561,60 @@ def test_failed_tool_result_can_continue_when_another_source_succeeds(service, a
     assert len(result.sources) == 1
 
 
+def test_later_recoverable_failure_batch_continues_with_prior_source(
+    service,
+    adapter,
+    runtime,
+):
+    runtime.fail_tool("fetch_url", "https://example.com/second", code="URL_FETCH_FAILED")
+    adapter.rounds = [
+        ProviderResult(
+            tool_calls=(
+                RequestedToolCall(
+                    "call-1",
+                    "fetch_url",
+                    {"url": "https://example.com/article"},
+                ),
+            ),
+            usage={"prompt_tokens": 10, "completion_tokens": 2},
+            cost=0.001,
+        ),
+        ProviderResult(
+            tool_calls=(
+                RequestedToolCall(
+                    "call-2",
+                    "fetch_url",
+                    {"url": "https://example.com/second"},
+                ),
+            ),
+            usage={"prompt_tokens": 11, "completion_tokens": 3},
+            cost=0.002,
+        ),
+        ProviderResult(
+            final_payload=_final_payload(),
+            usage={"prompt_tokens": 20, "completion_tokens": 4},
+            cost=0.003,
+        ),
+    ]
+
+    result = service.create_draft(
+        request_with_urls(["https://example.com/article", "https://example.com/second"])
+    )
+
+    assert result.script == "Narration from research."
+    assert result.accounting.provider_rounds == 3
+    assert result.accounting.tool_calls == 2
+    assert runtime.executed_urls == [
+        "https://example.com/article",
+        "https://example.com/second",
+    ]
+    final_request_messages = adapter.calls[2].messages
+    assert any(
+        message.get("role") == "tool" and "URL_FETCH_FAILED" in message.get("content", "")
+        for message in final_request_messages
+    )
+
+
 def test_errors_do_not_persist_research_draft(service, adapter, store):
     adapter.queue_final(evidence_quote="invented words")
 

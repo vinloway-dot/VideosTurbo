@@ -398,6 +398,11 @@ class ResearchScriptService:
                 accounting=state.accounting,
             )
 
+        if not successful_calls:
+            batch_messages.extend(failed_messages)
+            state.messages.extend(batch_messages)
+            return
+
         packet = self.runtime.aggregate(state.sources)
         formatted_packet = self._format_evidence_packet(packet)
         state.source_prompt_fingerprint = self._fingerprint(formatted_packet)
