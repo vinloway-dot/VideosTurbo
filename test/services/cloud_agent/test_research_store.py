@@ -19,9 +19,11 @@ def make_successful_draft(script_hash: str | None = None) -> SuccessfulResearchD
         script_hash=script_hash or sha256_text("original narration"),
         provider="openrouter",
         model="openai/gpt-5.6-sol-pro",
-        evidence_mode="url",
-        system_prompt_fingerprint="s" * 64,
-        source_prompt_fingerprint="p" * 64,
+        evidence_mode="source_evidence + model_knowledge",
+        editable_prompt_fingerprint="e" * 64,
+        invariant_prompt_fingerprint="i" * 64,
+        tool_calls=2,
+        provider_rounds=3,
         usage=ResearchUsageAccounting(
             provider="openrouter",
             model="openai/gpt-5.6-sol-pro",
@@ -50,6 +52,12 @@ def test_store_persists_only_non_secret_provenance(tmp_path):
 
     assert loaded is not None
     assert loaded.script_hash == sha256_text("narration")
+    assert loaded.tool_calls == 2
+    assert loaded.provider_rounds == 3
+    assert loaded.editable_prompt_fingerprint == "e" * 64
+    assert loaded.invariant_prompt_fingerprint == "i" * 64
+    assert loaded.evidence_mode == "source_evidence + model_knowledge"
+    assert loaded.sources[0].content_hash
     assert "source body" not in loaded.model_dump_json()
     with sqlite3.connect(store.db_path) as connection:
         dump = "\n".join(connection.iterdump())
@@ -131,9 +139,11 @@ def test_successful_draft_rejects_non_canonical_script_hash():
             script_hash=("A" * 64),
             provider="openrouter",
             model="openai/gpt-5.6-sol-pro",
-            evidence_mode="url",
-            system_prompt_fingerprint="s" * 64,
-            source_prompt_fingerprint="p" * 64,
+            evidence_mode="source_evidence + model_knowledge",
+            editable_prompt_fingerprint="e" * 64,
+            invariant_prompt_fingerprint="i" * 64,
+            tool_calls=0,
+            provider_rounds=0,
             usage=ResearchUsageAccounting(
                 provider="openrouter",
                 model="openai/gpt-5.6-sol-pro",
@@ -186,3 +196,53 @@ def test_link_job_is_idempotent_and_factory_uses_configured_database(
 
     assert isinstance(store, ResearchDraftStore)
     assert [row[0] for row in rows] == ["job-1", "job-2"]
+
+
+def test_store_preserves_unavailable_cost_as_none(tmp_path):
+    store = ResearchDraftStore(tmp_path / "cloud-agent.sqlite3")
+    saved = store.save_success(
+        make_successful_draft().model_copy(update={"estimated_cost_usd": None})
+    )
+
+    assert saved.estimated_cost_usd is None
+
+
+def test_legacy_placeholder_zero_cost_migrates_as_unavailable(tmp_path):
+    db_path = tmp_path / "cloud-agent.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE research_drafts (
+                research_draft_id TEXT PRIMARY KEY,
+                script_hash TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                evidence_mode TEXT NOT NULL,
+                source_count INTEGER NOT NULL,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                estimated_cost_usd REAL NOT NULL DEFAULT 0,
+                system_prompt_fingerprint TEXT NOT NULL,
+                source_prompt_fingerprint TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO research_drafts VALUES (
+                'legacy-draft', ?, 'openrouter', 'openai/gpt-5.6-sol-pro',
+                'source_evidence', 0, 0, 0, 0, 0,
+                '', '', '2026-08-27T00:00:00+00:00', '2026-08-27T00:00:00+00:00'
+            )
+            """,
+            (sha256_text("legacy narration"),),
+        )
+
+    loaded = ResearchDraftStore(db_path).get("legacy-draft")
+
+    assert loaded is not None
+    assert loaded.estimated_cost_usd is None
+    assert loaded.evidence_mode == "source_evidence + model_knowledge"

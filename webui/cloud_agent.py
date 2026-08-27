@@ -8,9 +8,24 @@ API_PREFIX = "http://127.0.0.1:8080/api/v1/cloud-agent/"
 API_TIMEOUT_SECONDS = 15
 SESSION_CHECK_TIMEOUT_SECONDS = 45
 DRAFT_TIMEOUT_SECONDS = 120
+RESEARCH_DRAFT_TIMEOUT_SECONDS = 300
 RESEARCH_PROVIDER_OPTIONS = [
-    {"id": "openrouter", "label": "OpenRouter", "api_key_configured": False},
-    {"id": "aihubmix", "label": "AIHubMix", "api_key_configured": False},
+    {
+        "id": "openrouter",
+        "label": "OpenRouter",
+        "models": ["openai/gpt-5.6-sol-pro", "custom"],
+        "default_model": "openai/gpt-5.6-sol-pro",
+        "custom_model_id": "openai/gpt-5.6-sol-pro",
+        "api_key_configured": False,
+    },
+    {
+        "id": "aihubmix",
+        "label": "AIHubMix",
+        "models": ["gpt-5.6-sol", "custom"],
+        "default_model": "gpt-5.6-sol",
+        "custom_model_id": "gpt-5.6-sol",
+        "api_key_configured": False,
+    },
 ]
 
 
@@ -174,6 +189,25 @@ def _remove_research_api_key(provider):
     )
 
 
+def _submit_research_api_key(provider, *, remove):
+    state_key = f"cloud_agent_research_api_key_{provider}"
+    raw_value = str(st.session_state.pop(state_key, "") or "")
+    try:
+        if remove:
+            _remove_research_api_key(provider)
+            feedback = ("success", "Research API key removed.")
+        elif _save_research_api_key(provider, raw_value) is None:
+            feedback = (
+                "error",
+                "Enter a research API key, or explicitly remove the stored key.",
+            )
+        else:
+            feedback = ("success", "Research API key saved.")
+    except requests.RequestException as exc:
+        feedback = ("error", _api_error_message(exc))
+    st.session_state["cloud_agent_research_key_feedback"] = feedback
+
+
 def _prepare_research_draft(
     *,
     subject,
@@ -198,7 +232,7 @@ def _prepare_research_draft(
             "source_urls": source_urls,
             "custom_system_prompt": custom_system_prompt,
         },
-        timeout=DRAFT_TIMEOUT_SECONDS,
+        timeout=RESEARCH_DRAFT_TIMEOUT_SECONDS,
     )
 
 
@@ -221,7 +255,33 @@ def _research_job_fields(research_draft_id):
 
 
 def _research_source_urls(value):
-    return [line.strip() for line in str(value or "").splitlines() if line.strip()]
+    values = value if isinstance(value, list | tuple) else str(value or "").splitlines()
+    return [str(item or "").strip() for item in values if str(item or "").strip()]
+
+
+def _research_mode_options(enabled):
+    options = ["Standard Script"]
+    if enabled:
+        options.append("Research Script")
+    return options
+
+
+def _research_url_row_count(value):
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        count = 1
+    return min(3, max(1, count))
+
+
+def _research_provider_metadata(catalog, provider):
+    return next(
+        (item for item in catalog if item.get("id") == provider),
+        next(
+            (item for item in RESEARCH_PROVIDER_OPTIONS if item["id"] == provider),
+            RESEARCH_PROVIDER_OPTIONS[0],
+        ),
+    )
 
 
 def _research_model_choice(provider, settings):
@@ -443,6 +503,22 @@ def render_cloud_agent_panel():
             defaults.update(_load_cloud_agent_defaults())
         except requests.RequestException as exc:
             st.error(_api_error_message(exc))
+    research_settings = {
+        "enabled": True,
+        "provider": "openrouter",
+        "openrouter_model": "openai/gpt-5.6-sol-pro",
+        "openrouter_custom_model_id": "openai/gpt-5.6-sol-pro",
+        "aihubmix_model": "gpt-5.6-sol",
+        "aihubmix_custom_model_id": "gpt-5.6-sol",
+        "custom_system_prompt": "",
+    }
+    research_provider_catalog = _fallback_research_provider_catalog()
+    if hasattr(st, "runtime"):
+        try:
+            research_settings.update(_load_research_settings())
+            research_provider_catalog = _load_research_provider_catalog()
+        except requests.RequestException:
+            research_settings["enabled"] = False
     ui_state.setdefault("cloud_agent_provider", defaults["tts_provider"])
     ui_state.setdefault("cloud_agent_voice", defaults["voice_id"])
     ui_state.setdefault("cloud_agent_speed", defaults["voice_speed"])
@@ -495,10 +571,13 @@ def render_cloud_agent_panel():
             except requests.RequestException as exc:
                 st.error(_api_error_message(exc))
     script_mode = "Standard Script"
+    script_mode_options = _research_mode_options(research_settings["enabled"])
+    if ui_state.get("cloud_agent_script_mode") not in script_mode_options:
+        ui_state["cloud_agent_script_mode"] = "Standard Script"
     if hasattr(st, "radio"):
         script_mode = st.radio(
             "Script Creation Mode",
-            ["Standard Script", "Research Script"],
+            script_mode_options,
             key="cloud_agent_script_mode",
         )
     if script_mode == "Standard Script":
@@ -520,21 +599,6 @@ def render_cloud_agent_panel():
                 except requests.RequestException as exc:
                     st.error(_api_error_message(exc))
     else:
-        research_settings = {
-            "provider": "openrouter",
-            "openrouter_model": "openai/gpt-5.6-sol-pro",
-            "openrouter_custom_model_id": "",
-            "aihubmix_model": "gpt-5.6-sol",
-            "aihubmix_custom_model_id": "",
-            "custom_system_prompt": "",
-        }
-        research_provider_catalog = _fallback_research_provider_catalog()
-        if hasattr(st, "runtime"):
-            try:
-                research_settings.update(_load_research_settings())
-                research_provider_catalog = _load_research_provider_catalog()
-            except requests.RequestException as exc:
-                st.error(_api_error_message(exc))
         for key, value in (
             ("cloud_agent_research_provider", research_settings["provider"]),
             (
@@ -577,23 +641,50 @@ def render_cloud_agent_panel():
             ),
             {"api_key_configured": False},
         )
+        openrouter_metadata = _research_provider_metadata(
+            research_provider_catalog,
+            "openrouter",
+        )
+        aihubmix_metadata = _research_provider_metadata(
+            research_provider_catalog,
+            "aihubmix",
+        )
+        for provider_id, metadata in (
+            ("openrouter", openrouter_metadata),
+            ("aihubmix", aihubmix_metadata),
+        ):
+            model_key = f"cloud_agent_research_{provider_id}_model"
+            if ui_state.get(model_key) not in metadata["models"]:
+                ui_state[model_key] = metadata["default_model"]
         with st.expander("Research Settings", expanded=False):
-            openrouter_model = st.text_input(
+            openrouter_model = st.selectbox(
                 "OpenRouter Model",
+                options=openrouter_metadata["models"],
                 key="cloud_agent_research_openrouter_model",
             )
-            openrouter_custom_model_id = st.text_input(
-                "OpenRouter Custom Model ID",
-                key="cloud_agent_research_openrouter_custom_model_id",
+            openrouter_custom_model_id = str(
+                ui_state.get("cloud_agent_research_openrouter_custom_model_id", "")
+                or ""
             )
-            aihubmix_model = st.text_input(
+            if openrouter_model == "custom":
+                openrouter_custom_model_id = st.text_input(
+                    "OpenRouter Custom Model ID",
+                    key="cloud_agent_research_openrouter_custom_model_id",
+                )
+            aihubmix_model = st.selectbox(
                 "AIHubMix Model",
+                options=aihubmix_metadata["models"],
                 key="cloud_agent_research_aihubmix_model",
             )
-            aihubmix_custom_model_id = st.text_input(
-                "AIHubMix Custom Model ID",
-                key="cloud_agent_research_aihubmix_custom_model_id",
+            aihubmix_custom_model_id = str(
+                ui_state.get("cloud_agent_research_aihubmix_custom_model_id", "")
+                or ""
             )
+            if aihubmix_model == "custom":
+                aihubmix_custom_model_id = st.text_input(
+                    "AIHubMix Custom Model ID",
+                    key="cloud_agent_research_aihubmix_custom_model_id",
+                )
             research_custom_system_prompt = st.text_area(
                 "Research Custom System Prompt",
                 key="cloud_agent_research_custom_system_prompt",
@@ -607,6 +698,7 @@ def render_cloud_agent_panel():
                 try:
                     verified, message = _save_and_verify_research_settings(
                         {
+                            "enabled": True,
                             "provider": research_provider,
                             "openrouter_model": openrouter_model,
                             "openrouter_custom_model_id": openrouter_custom_model_id,
@@ -629,10 +721,13 @@ def render_cloud_agent_panel():
                 f"{research_provider_labels.get(research_provider, research_provider)} API key: "
                 f"{'configured' if selected_provider_metadata.get('api_key_configured') else 'not configured'}"
             )
-            research_api_key = st.text_input(
+            research_api_key_state_key = (
+                f"cloud_agent_research_api_key_{research_provider}"
+            )
+            st.text_input(
                 "Research API Key",
                 type="password",
-                key=f"cloud_agent_research_api_key_{research_provider}",
+                key=research_api_key_state_key,
             )
             remove_research_key = bool(
                 hasattr(st, "checkbox")
@@ -641,38 +736,37 @@ def render_cloud_agent_panel():
                     key=f"cloud_agent_research_remove_key_{research_provider}",
                 )
             )
-            if st.button(
+            st.button(
                 "Save Research API Key",
                 key="cloud_agent_save_research_api_key",
-            ):
-                try:
-                    if remove_research_key:
-                        _remove_research_api_key(research_provider)
-                        ui_state["cloud_agent_research_key_feedback"] = (
-                            "Research API key removed."
-                        )
-                        st.rerun()
-                    elif _save_research_api_key(
-                        research_provider, research_api_key
-                    ) is None:
-                        st.error(
-                            "Enter a research API key, or explicitly remove the stored key."
-                        )
-                    else:
-                        ui_state["cloud_agent_research_key_feedback"] = (
-                            "Research API key saved."
-                        )
-                        st.rerun()
-                except requests.RequestException as exc:
-                    st.error(_api_error_message(exc))
+                on_click=_submit_research_api_key,
+                args=(research_provider,),
+                kwargs={"remove": remove_research_key},
+            )
             if feedback := ui_state.get("cloud_agent_research_key_feedback"):
-                st.success(feedback)
-        source_urls_value = st.text_area(
-            "Source URLs",
-            key="cloud_agent_research_source_urls",
-            height=100,
-            help="Enter one URL per line.",
+                feedback_kind, feedback_message = feedback
+                if feedback_kind == "success":
+                    st.success(feedback_message)
+                else:
+                    st.error(feedback_message)
+        st.caption("Source URLs")
+        source_url_count = _research_url_row_count(
+            st.number_input(
+                "Number of Source URLs",
+                min_value=1,
+                max_value=3,
+                value=1,
+                step=1,
+                key="cloud_agent_research_source_url_count",
+            )
         )
+        source_url_values = [
+            st.text_input(
+                f"Source URL {index}",
+                key=f"cloud_agent_research_source_url_{index}",
+            )
+            for index in range(1, source_url_count + 1)
+        ]
         research_generation_status = st.empty()
         st.caption("Research generation may call the selected provider up to 3 rounds.")
         if st.button(
@@ -697,7 +791,7 @@ def render_cloud_agent_panel():
                                     custom_model_id=_research_custom_model_id(
                                         research_provider, ui_state
                                     ),
-                                    source_urls=_research_source_urls(source_urls_value),
+                                    source_urls=_research_source_urls(source_url_values),
                                     custom_system_prompt=research_custom_system_prompt,
                                 )
                             )

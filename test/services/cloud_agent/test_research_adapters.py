@@ -329,3 +329,26 @@ def test_timeout_and_auth_failures_are_classified_without_leaking_secrets():
     assert auth_captured.value.code == "PROVIDER_AUTHENTICATION_FAILED"
     assert "secret" not in str(auth_captured.value)
     assert "raw-response" not in str(auth_captured.value)
+
+
+def test_non_finite_provider_usage_and_cost_are_ignored_safely():
+    from app.services.cloud_agent.research.adapters import OpenRouterToolCallingAdapter
+
+    usage = {
+        "prompt_tokens": float("inf"),
+        "completion_tokens": float("nan"),
+        "total_tokens": float("-inf"),
+    }
+    response = _completion_response(
+        content=_final_payload_json(),
+        usage=usage,
+        cost=float("inf"),
+    )
+    adapter = OpenRouterToolCallingAdapter(
+        client_factory=_RecordingFactory(_FakeClient(completion_response=response))
+    )
+
+    result = adapter.complete(_provider_request())
+
+    assert result.usage is None
+    assert result.cost is None

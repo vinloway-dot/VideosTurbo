@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
@@ -314,7 +315,7 @@ class OpenAICompatibleToolCallingAdapter:
                 cost = float(value)
             except (TypeError, ValueError):
                 continue
-            if cost >= 0:
+            if math.isfinite(cost) and cost >= 0:
                 return cost
         return None
 
@@ -473,9 +474,11 @@ class OpenAICompatibleToolCallingAdapter:
         return getattr(holder, name, None)
 
     def _as_non_negative_int(self, value: Any) -> int:
+        if isinstance(value, float) and not math.isfinite(value):
+            return 0
         try:
             integer = int(value)
-        except (TypeError, ValueError):
+        except (OverflowError, TypeError, ValueError):
             return 0
         return integer if integer >= 0 else 0
 

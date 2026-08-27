@@ -658,6 +658,69 @@ def test_blank_research_key_is_not_sent_as_replacement():
     assert cloud_agent._research_key_payload(" new-key ") == {"api_key": "new-key"}
 
 
+def test_research_attempt_timeout_covers_the_full_bounded_operation(monkeypatch):
+    recorded = {}
+
+    def api(method, path, **kwargs):
+        recorded.update(method=method, path=path, **kwargs)
+        return {"research_draft_id": "draft-1"}
+
+    monkeypatch.setattr(cloud_agent, "_api", api)
+    cloud_agent._prepare_research_draft(
+        subject="Topic",
+        language="English",
+        target_words=130,
+        provider="openrouter",
+        model_choice="openai/gpt-5.6-sol-pro",
+        custom_model_id="",
+        source_urls=["https://example.com/article"],
+        custom_system_prompt="",
+    )
+
+    assert recorded["timeout"] >= 300
+
+
+def test_research_mode_and_url_row_helpers_enforce_explicit_ui_bounds():
+    assert cloud_agent._research_mode_options(False) == ["Standard Script"]
+    assert cloud_agent._research_mode_options(True) == [
+        "Standard Script",
+        "Research Script",
+    ]
+    assert cloud_agent._research_url_row_count(0) == 1
+    assert cloud_agent._research_url_row_count(2) == 2
+    assert cloud_agent._research_url_row_count(99) == 3
+    assert cloud_agent._research_source_urls(
+        [" https://one.example ", "", "https://two.example"]
+    ) == ["https://one.example", "https://two.example"]
+
+
+def test_research_model_options_come_from_provider_catalog():
+    provider = cloud_agent._fallback_research_provider_catalog()[0]
+
+    assert provider["models"] == ["openai/gpt-5.6-sol-pro", "custom"]
+    assert provider["default_model"] == "openai/gpt-5.6-sol-pro"
+    assert provider["custom_model_id"] == "openai/gpt-5.6-sol-pro"
+
+
+def test_research_key_submit_removes_raw_secret_before_api_call(monkeypatch):
+    state_key = "cloud_agent_research_api_key_openrouter"
+    session_state = {state_key: "raw-secret"}
+    monkeypatch.setattr(cloud_agent.st, "session_state", session_state)
+
+    def save(provider, value):
+        assert provider == "openrouter"
+        assert value == "raw-secret"
+        assert state_key not in session_state
+        return {"api_key_configured": True}
+
+    monkeypatch.setattr(cloud_agent, "_save_research_api_key", save)
+
+    cloud_agent._submit_research_api_key("openrouter", remove=False)
+
+    assert state_key not in session_state
+    assert "raw-secret" not in repr(session_state)
+
+
 def test_store_draft_clears_stale_research_provenance(monkeypatch):
     session_state = {
         "cloud_agent_research_draft_id": "draft-1",

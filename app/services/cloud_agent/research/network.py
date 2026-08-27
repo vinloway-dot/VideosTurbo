@@ -1,6 +1,8 @@
 import ipaddress
+import queue
 import socket
 import ssl
+import threading
 import time
 import zlib
 from dataclasses import dataclass
@@ -76,6 +78,8 @@ class PinnedPublicHTTPClient:
     MAX_HEADER_BYTES = 64 * 1024
     MAX_BODY_BYTES = 10 * 1024 * 1024
     MAX_REDIRECTS = 5
+    READ_BUFFER_BYTES = 64 * 1024
+    RESOLVER_TIMEOUT_SECONDS = 5.0
 
     def __init__(
         self,
@@ -84,11 +88,19 @@ class PinnedPublicHTTPClient:
         connector: Callable[..., socket.socket] | None = None,
         ssl_context_factory: Callable[[], ssl.SSLContext] | None = None,
         monotonic: Callable[[], float] | None = None,
+        resolver_timeout_seconds: float | None = None,
     ) -> None:
         self._resolver = resolver or socket.getaddrinfo
         self._connector = connector or socket.create_connection
         self._ssl_context_factory = ssl_context_factory or ssl.create_default_context
         self._monotonic = monotonic or time.monotonic
+        self.resolver_timeout_seconds = (
+            self.RESOLVER_TIMEOUT_SECONDS
+            if resolver_timeout_seconds is None
+            else float(resolver_timeout_seconds)
+        )
+        if self.resolver_timeout_seconds <= 0:
+            raise ValueError("resolver_timeout_seconds must be positive")
 
     def require_one_to_three_public_urls(self, raw_urls: list[str]) -> tuple[str, ...]:
         if not raw_urls:
@@ -98,11 +110,12 @@ class PinnedPublicHTTPClient:
 
         canonical_urls: list[str] = []
         seen: set[str] = set()
+        deadline = self._monotonic() + self.TOTAL_TIMEOUT_SECONDS
         for raw_url in raw_urls:
             if not str(raw_url or "").strip():
                 raise ResearchError("URL_INVALID", "blank URLs are not allowed")
             canonical = self._canonicalize_url(raw_url)
-            self._validated_connection_addresses(canonical)
+            self._validated_connection_addresses(canonical, deadline)
             if canonical.url not in seen:
                 canonical_urls.append(canonical.url)
                 seen.add(canonical.url)
@@ -163,7 +176,7 @@ class PinnedPublicHTTPClient:
         self, canonical: CanonicalURL, deadline: float
     ) -> DownloadedResource:
         self._check_deadline(deadline)
-        addresses = self._validated_connection_addresses(canonical)
+        addresses = self._validated_connection_addresses(canonical, deadline)
         self._check_deadline(deadline)
         ip_address = addresses[0]
         sock = None
@@ -251,22 +264,52 @@ class PinnedPublicHTTPClient:
             host_header=host_header,
         )
 
-    def _validated_connection_addresses(self, canonical: CanonicalURL) -> tuple[str, ...]:
+    def _validated_connection_addresses(
+        self, canonical: CanonicalURL, deadline: float
+    ) -> tuple[str, ...]:
         try:
             literal_ip = ipaddress.ip_address(canonical.hostname)
         except ValueError:
-            return self._resolve_public_addresses(canonical.hostname, canonical.port)
+            return self._resolve_public_addresses(
+                canonical.hostname,
+                canonical.port,
+                deadline,
+            )
         if not self._is_public_ip(literal_ip):
             raise ResearchError(
                 "URL_TARGET_NOT_PUBLIC", "literal IP target is not globally routable"
             )
         return (canonical.hostname,)
 
-    def _resolve_public_addresses(self, hostname: str, port: int) -> tuple[str, ...]:
+    def _resolve_public_addresses(
+        self, hostname: str, port: int, deadline: float
+    ) -> tuple[str, ...]:
+        result_queue: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+
+        def resolve() -> None:
+            try:
+                result_queue.put(
+                    (True, self._resolver(hostname, port, type=socket.SOCK_STREAM))
+                )
+            except Exception as exc:  # resolver failures are source-controlled
+                result_queue.put((False, exc))
+
+        threading.Thread(
+            target=resolve,
+            name="research-dns-resolver",
+            daemon=True,
+        ).start()
+        wait_seconds = self._remaining_timeout(
+            deadline,
+            cap_seconds=self.resolver_timeout_seconds,
+        )
         try:
-            answers = self._resolver(hostname, port, type=socket.SOCK_STREAM)
-        except OSError as exc:
-            raise ResearchError("URL_FETCH_FAILED", str(exc)) from exc
+            succeeded, result = result_queue.get(timeout=wait_seconds)
+        except queue.Empty as exc:
+            raise ResearchError("URL_FETCH_FAILED", "DNS resolution timed out") from exc
+        if not succeeded:
+            raise ResearchError("URL_FETCH_FAILED", "DNS resolution failed") from result
+        answers = result
         addresses = tuple(dict.fromkeys(answer[4][0] for answer in answers))
         if not addresses:
             raise ResearchError("URL_FETCH_FAILED", "DNS did not return any addresses")
@@ -345,12 +388,13 @@ class PinnedPublicHTTPClient:
             self._read_chunked_body(stream, sock, deadline, decoder, body)
         else:
             while True:
-                chunk = self._read(stream, sock, 64 * 1024, deadline)
+                chunk = self._read(stream, sock, self.READ_BUFFER_BYTES, deadline)
                 if not chunk:
                     break
                 self._append_decoded(body, decoder, chunk)
         if decoder is not None:
-            self._append_decoded(body, None, decoder.flush())
+            flush_limit = self.MAX_BODY_BYTES - len(body) + 1
+            self._append_decoded(body, None, decoder.flush(flush_limit))
             if len(body) > self.MAX_BODY_BYTES:
                 raise ResearchError("URL_CONTENT_TOO_LARGE", "response body exceeded limit")
         return bytes(body)
@@ -360,15 +404,27 @@ class PinnedPublicHTTPClient:
     ) -> None:
         while True:
             size_line = self._readline(stream, sock, deadline).decode("iso-8859-1").strip()
-            chunk_size = int(size_line.split(";", 1)[0], 16)
+            size_token = size_line.split(";", 1)[0].strip()
+            if not size_token or any(character not in "0123456789abcdefABCDEF" for character in size_token):
+                raise ResearchError("URL_FETCH_FAILED", "invalid chunk size")
+            chunk_size = int(size_token, 16)
+            if chunk_size > self.MAX_BODY_BYTES:
+                raise ResearchError(
+                    "URL_CONTENT_TOO_LARGE",
+                    "declared chunk exceeded response body limit",
+                )
             if chunk_size == 0:
                 while True:
                     trailer = self._readline(stream, sock, deadline)
                     if trailer in {b"\r\n", b"\n", b""}:
                         return
                 return
-            chunk = self._readexactly(stream, sock, chunk_size, deadline)
-            self._append_decoded(body, decoder, chunk)
+            remaining = chunk_size
+            while remaining:
+                read_size = min(remaining, self.READ_BUFFER_BYTES)
+                chunk = self._readexactly(stream, sock, read_size, deadline)
+                self._append_decoded(body, decoder, chunk)
+                remaining -= len(chunk)
             ending = self._readexactly(stream, sock, 2, deadline)
             if ending != b"\r\n":
                 raise ResearchError("URL_FETCH_FAILED", "invalid chunk terminator")
@@ -433,7 +489,7 @@ class PinnedPublicHTTPClient:
 
     def _check_deadline(self, deadline: float) -> None:
         if self._monotonic() > deadline:
-            raise ResearchError("PROVIDER_TIMEOUT", "request deadline exceeded")
+            raise ResearchError("URL_FETCH_FAILED", "source request deadline exceeded")
 
     def _format_netloc(self, hostname: str, port: int | None) -> str:
         if ":" in hostname and not hostname.startswith("["):
@@ -461,7 +517,7 @@ class PinnedPublicHTTPClient:
     def _remaining_timeout(self, deadline: float, *, cap_seconds: float) -> float:
         remaining = min(cap_seconds, deadline - self._monotonic())
         if remaining <= 0:
-            raise ResearchError("PROVIDER_TIMEOUT", "request deadline exceeded")
+            raise ResearchError("URL_FETCH_FAILED", "source request deadline exceeded")
         return remaining
 
     def _is_public_ip(self, value: ipaddress._BaseAddress) -> bool:

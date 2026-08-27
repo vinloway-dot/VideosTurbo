@@ -4,10 +4,11 @@ import sqlite3
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+from typing import Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 from app.services.cloud_agent.research.errors import ResearchError
 from app.services.cloud_agent.research.models import ResearchUsageAccounting
@@ -103,9 +104,13 @@ class ResearchSourceDraft(BaseModel):
     url: str
     title: str = ""
     body: str = Field(default="", exclude=True)
-    source_hash: str = Field(default="", max_length=64)
+    content_hash: str = Field(
+        default="",
+        max_length=64,
+        validation_alias=AliasChoices("content_hash", "source_hash"),
+    )
 
-    @field_validator("title", "body", "source_hash")
+    @field_validator("title", "body", "content_hash")
     @classmethod
     def _strip_text(cls, value: str) -> str:
         return str(value or "").strip()
@@ -116,9 +121,9 @@ class ResearchSourceDraft(BaseModel):
         return _safe_public_url(value)
 
     @model_validator(mode="after")
-    def _derive_source_hash(self):
-        if not self.source_hash:
-            self.source_hash = sha256_text(self.body or self.url)
+    def _derive_content_hash(self):
+        if not self.content_hash:
+            self.content_hash = sha256_text(self.body or self.url)
         return self
 
 
@@ -127,11 +132,29 @@ class SuccessfulResearchDraft(BaseModel):
     script_hash: str = Field(max_length=64)
     provider: str
     model: str
-    evidence_mode: str = ""
-    system_prompt_fingerprint: str = Field(default="", max_length=64)
-    source_prompt_fingerprint: str = Field(default="", max_length=64)
+    evidence_mode: Literal["source_evidence + model_knowledge"] = (
+        "source_evidence + model_knowledge"
+    )
+    editable_prompt_fingerprint: str = Field(
+        default="",
+        max_length=64,
+        validation_alias=AliasChoices(
+            "editable_prompt_fingerprint",
+            "source_prompt_fingerprint",
+        ),
+    )
+    invariant_prompt_fingerprint: str = Field(
+        default="",
+        max_length=64,
+        validation_alias=AliasChoices(
+            "invariant_prompt_fingerprint",
+            "system_prompt_fingerprint",
+        ),
+    )
+    tool_calls: int = Field(default=0, ge=0)
+    provider_rounds: int = Field(default=0, ge=0)
     usage: ResearchUsageAccounting
-    estimated_cost_usd: float = Field(default=0.0, ge=0)
+    estimated_cost_usd: float | None = Field(default=None, ge=0)
     sources: list[ResearchSourceDraft] = Field(default_factory=list)
     created_at: str = Field(default_factory=utc_now)
 
@@ -141,8 +164,8 @@ class SuccessfulResearchDraft(BaseModel):
         "provider",
         "model",
         "evidence_mode",
-        "system_prompt_fingerprint",
-        "source_prompt_fingerprint",
+        "editable_prompt_fingerprint",
+        "invariant_prompt_fingerprint",
     )
     @classmethod
     def _strip_text(cls, value: str) -> str:
@@ -163,7 +186,7 @@ class PersistedResearchSource(BaseModel):
     position: int = Field(ge=0)
     url: str
     title: str = ""
-    source_hash: str
+    content_hash: str
     created_at: str
 
 
@@ -174,10 +197,12 @@ class PersistedResearchDraft(BaseModel):
     model: str
     evidence_mode: str
     source_count: int = Field(ge=0)
+    tool_calls: int = Field(ge=0)
+    provider_rounds: int = Field(ge=0)
     usage: ResearchUsageAccounting
-    estimated_cost_usd: float = Field(ge=0)
-    system_prompt_fingerprint: str = ""
-    source_prompt_fingerprint: str = ""
+    estimated_cost_usd: float | None = Field(default=None, ge=0)
+    editable_prompt_fingerprint: str = ""
+    invariant_prompt_fingerprint: str = ""
     created_at: str
     updated_at: str
     sources: list[PersistedResearchSource] = Field(default_factory=list)
@@ -212,8 +237,13 @@ class ResearchDraftStore:
                     output_tokens INTEGER NOT NULL DEFAULT 0,
                     total_tokens INTEGER NOT NULL DEFAULT 0,
                     estimated_cost_usd REAL NOT NULL DEFAULT 0,
-                    system_prompt_fingerprint TEXT NOT NULL,
-                    source_prompt_fingerprint TEXT NOT NULL,
+                    cost_available INTEGER NOT NULL DEFAULT 0,
+                    tool_calls INTEGER NOT NULL DEFAULT 0,
+                    provider_rounds INTEGER NOT NULL DEFAULT 0,
+                    editable_prompt_fingerprint TEXT NOT NULL DEFAULT '',
+                    invariant_prompt_fingerprint TEXT NOT NULL DEFAULT '',
+                    system_prompt_fingerprint TEXT NOT NULL DEFAULT '',
+                    source_prompt_fingerprint TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -232,6 +262,14 @@ class ResearchDraftStore:
                     FOREIGN KEY(research_draft_id) REFERENCES research_drafts(research_draft_id)
                         ON DELETE CASCADE
                 )
+                """
+            )
+            self._ensure_draft_columns(connection)
+            connection.execute(
+                """
+                UPDATE research_drafts
+                SET evidence_mode = 'source_evidence + model_knowledge'
+                WHERE evidence_mode != 'source_evidence + model_knowledge'
                 """
             )
             connection.execute(
@@ -259,6 +297,24 @@ class ResearchDraftStore:
                 """
             )
 
+    def _ensure_draft_columns(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(research_drafts)").fetchall()
+        }
+        additions = {
+            "cost_available": "INTEGER NOT NULL DEFAULT 0",
+            "tool_calls": "INTEGER NOT NULL DEFAULT 0",
+            "provider_rounds": "INTEGER NOT NULL DEFAULT 0",
+            "editable_prompt_fingerprint": "TEXT NOT NULL DEFAULT ''",
+            "invariant_prompt_fingerprint": "TEXT NOT NULL DEFAULT ''",
+        }
+        for name, definition in additions.items():
+            if name not in columns:
+                connection.execute(
+                    f"ALTER TABLE research_drafts ADD COLUMN {name} {definition}"
+                )
+
     def save_success(self, draft: SuccessfulResearchDraft) -> PersistedResearchDraft:
         persisted = SuccessfulResearchDraft.model_validate(draft)
         now = persisted.created_at or utc_now()
@@ -270,9 +326,11 @@ class ResearchDraftStore:
                     INSERT INTO research_drafts (
                         research_draft_id, script_hash, provider, model, evidence_mode,
                         source_count, input_tokens, output_tokens, total_tokens,
-                        estimated_cost_usd, system_prompt_fingerprint,
-                        source_prompt_fingerprint, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        estimated_cost_usd, cost_available, tool_calls, provider_rounds,
+                        editable_prompt_fingerprint, invariant_prompt_fingerprint,
+                        system_prompt_fingerprint, source_prompt_fingerprint,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         persisted.research_draft_id,
@@ -284,9 +342,14 @@ class ResearchDraftStore:
                         persisted.usage.input_tokens,
                         persisted.usage.output_tokens,
                         persisted.usage.total_tokens,
-                        persisted.estimated_cost_usd,
-                        persisted.system_prompt_fingerprint,
-                        persisted.source_prompt_fingerprint,
+                        persisted.estimated_cost_usd or 0.0,
+                        int(persisted.estimated_cost_usd is not None),
+                        persisted.tool_calls,
+                        persisted.provider_rounds,
+                        persisted.editable_prompt_fingerprint,
+                        persisted.invariant_prompt_fingerprint,
+                        persisted.invariant_prompt_fingerprint,
+                        persisted.editable_prompt_fingerprint,
                         now,
                         now,
                     ),
@@ -322,7 +385,7 @@ class ResearchDraftStore:
                     position,
                     source.url,
                     source.title,
-                    source.source_hash,
+                    source.content_hash,
                     created_at,
                 ),
             )
@@ -394,6 +457,8 @@ class ResearchDraftStore:
             model=row["model"],
             evidence_mode=row["evidence_mode"],
             source_count=row["source_count"],
+            tool_calls=row["tool_calls"],
+            provider_rounds=row["provider_rounds"],
             usage=ResearchUsageAccounting(
                 provider=row["provider"],
                 model=row["model"],
@@ -401,9 +466,11 @@ class ResearchDraftStore:
                 output_tokens=row["output_tokens"],
                 total_tokens=row["total_tokens"],
             ),
-            estimated_cost_usd=row["estimated_cost_usd"],
-            system_prompt_fingerprint=row["system_prompt_fingerprint"],
-            source_prompt_fingerprint=row["source_prompt_fingerprint"],
+            estimated_cost_usd=(
+                row["estimated_cost_usd"] if bool(row["cost_available"]) else None
+            ),
+            editable_prompt_fingerprint=row["editable_prompt_fingerprint"],
+            invariant_prompt_fingerprint=row["invariant_prompt_fingerprint"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             sources=[
@@ -413,7 +480,7 @@ class ResearchDraftStore:
                     position=source_row["position"],
                     url=_safe_public_url(source_row["source_url"]),
                     title=source_row["source_title"],
-                    source_hash=source_row["source_hash"],
+                    content_hash=source_row["source_hash"],
                     created_at=source_row["created_at"],
                 )
                 for source_row in source_rows

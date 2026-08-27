@@ -53,3 +53,16 @@ def test_generation_key_lookup_raises_typed_error_when_missing(monkeypatch):
         service.get_api_key_for_generation("openrouter")
 
     assert excinfo.value.code == "PROVIDER_API_KEY_MISSING"
+
+
+def test_provider_catalog_exposes_model_default_and_custom_handoff(monkeypatch):
+    monkeypatch.setitem(
+        config.app,
+        "cloud_agent_research_openrouter_custom_model",
+        "custom/openrouter-model",
+    )
+    metadata = ResearchSettingsService().get_provider("openrouter")
+
+    assert metadata.models == ["openai/gpt-5.6-sol-pro", "custom"]
+    assert metadata.default_model == "openai/gpt-5.6-sol-pro"
+    assert metadata.custom_model_id == "custom/openrouter-model"

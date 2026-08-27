@@ -1,6 +1,8 @@
 import gzip
 from itertools import chain, repeat
 import socket
+import threading
+import time
 import zlib
 
 import pytest
@@ -126,11 +128,13 @@ class _TrackingResponseFile:
     def __init__(self, chunks: list[bytes]):
         self._chunks = list(chunks)
         self.closed = False
+        self.read_sizes: list[int] = []
 
     def readline(self, _limit=-1):
         return self._chunks.pop(0)
 
     def read(self, size=-1):
+        self.read_sizes.append(size)
         if size == -1:
             if not self._chunks:
                 return b""
@@ -383,7 +387,7 @@ def test_get_refreshes_socket_timeout_before_each_blocking_read(fake_network):
     assert response.body == b"body"
     timeout_history = fake_network.sockets[-1].timeout_history
     assert len(timeout_history) >= 6
-    assert timeout_history[:3] == [5.0, 4.0, 3.0]
+    assert timeout_history[0] <= client.CONNECT_TIMEOUT_SECONDS
     assert timeout_history[-1] < timeout_history[0]
     assert timeout_history == sorted(timeout_history, reverse=True)
 
@@ -417,14 +421,14 @@ def test_connect_and_tls_use_remaining_total_deadline(fake_network):
         {
             "ip": "93.184.216.34",
             "port": 443,
-            "timeout": 1.0,
+            "timeout": pytest.approx(0.8),
             "server_hostname": "public.example",
         }
     ]
     assert ssl_context.wrap_calls == [
         {
             "server_hostname": "public.example",
-            "socket_timeout": pytest.approx(0.8),
+            "socket_timeout": pytest.approx(0.6),
         }
     ]
 
@@ -442,7 +446,7 @@ def test_connect_rejects_when_total_deadline_is_already_exhausted(fake_network):
     with pytest.raises(ResearchError) as excinfo:
         client.get("https://public.example/article")
 
-    assert excinfo.value.code == "PROVIDER_TIMEOUT"
+    assert excinfo.value.code == "URL_FETCH_FAILED"
     assert fake_network.connect_calls == []
 
 
@@ -451,6 +455,7 @@ def test_decoder_caps_incremental_output_before_body_extension(client, fake_netw
         def __init__(self):
             self.calls: list[int | None] = []
             self.unconsumed_tail = b"x"
+            self.flush_limit = None
 
         def decompress(self, chunk: bytes, max_length: int | None = None) -> bytes:
             self.calls.append(max_length)
@@ -461,7 +466,10 @@ def test_decoder_caps_incremental_output_before_body_extension(client, fake_netw
             self.unconsumed_tail = b""
             return b"B"
 
-        def flush(self) -> bytes:
+        def flush(self, max_length=None) -> bytes:
+            self.flush_limit = max_length
+            if max_length is None:
+                raise AssertionError("decoder flush must receive a bounded max length")
             return b""
 
     fake_network.resolve("public.example", ["93.184.216.34"])
@@ -484,3 +492,102 @@ def test_decoder_caps_incremental_output_before_body_extension(client, fake_netw
 
     assert excinfo.value.code == "URL_CONTENT_TOO_LARGE"
     assert decoder.calls[0] == client.MAX_BODY_BYTES
+
+
+def test_decoder_flush_uses_a_bounded_remaining_output_limit(
+    client, fake_network, monkeypatch
+):
+    class _FakeDecoder:
+        unconsumed_tail = b""
+        unused_data = b""
+
+        def __init__(self):
+            self.flush_limit = None
+
+        def decompress(self, _chunk, _max_length):
+            return b"safe"
+
+        def flush(self, max_length=None):
+            self.flush_limit = max_length
+            if max_length is None:
+                raise AssertionError("decoder flush must be bounded")
+            return b""
+
+    fake_network.resolve("public.example", ["93.184.216.34"])
+    fake_network.respond(
+        "public.example",
+        _http_response(
+            200,
+            headers={"Content-Encoding": "gzip"},
+            body=b"compressed",
+        ),
+    )
+    decoder = _FakeDecoder()
+    monkeypatch.setattr(client, "_build_decoder", lambda _encoding: decoder)
+
+    response = client.get("https://public.example/article")
+
+    assert response.body == b"safe"
+    assert decoder.flush_limit == client.MAX_BODY_BYTES - len(b"safe") + 1
+
+
+@pytest.mark.parametrize(
+    ("size_line", "expected_code"),
+    [
+        (b"-1\r\n", "URL_FETCH_FAILED"),
+        (b"100000000\r\n", "URL_CONTENT_TOO_LARGE"),
+    ],
+)
+def test_chunk_sizes_are_validated_before_any_bounded_incremental_read(
+    fake_network, size_line, expected_code
+):
+    fake_network.resolve("public.example", ["93.184.216.34"])
+    response_file = _TrackingResponseFile(
+        [
+            b"HTTP/1.1 200 OK\r\n",
+            b"Content-Type: text/html; charset=utf-8\r\n",
+            b"Transfer-Encoding: chunked\r\n",
+            b"Connection: close\r\n",
+            b"\r\n",
+            size_line,
+            b"attacker-controlled-body",
+        ]
+    )
+    fake_network.respond(
+        "public.example",
+        _http_response(200, headers={"Transfer-Encoding": "chunked"}),
+    )
+    fake_network.respond_with_file("public.example", response_file)
+    client = PinnedPublicHTTPClient(
+        resolver=fake_network.getaddrinfo,
+        connector=fake_network.create_connection,
+        ssl_context_factory=lambda: _FakeSSLContext(fake_network.connect_calls),
+    )
+
+    with pytest.raises(ResearchError) as excinfo:
+        client.get("https://public.example/article")
+
+    assert excinfo.value.code == expected_code
+    assert all(0 <= size <= client.READ_BUFFER_BYTES for size in response_file.read_sizes)
+
+
+def test_dns_resolution_is_bounded_and_classified_as_url_fetch_failure():
+    release = threading.Event()
+
+    def blocked_resolver(*_args, **_kwargs):
+        release.wait(5)
+        return []
+
+    client = PinnedPublicHTTPClient(
+        resolver=blocked_resolver,
+        resolver_timeout_seconds=0.01,
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(ResearchError) as excinfo:
+            client.require_one_to_three_public_urls(["https://public.example/article"])
+    finally:
+        release.set()
+
+    assert excinfo.value.code == "URL_FETCH_FAILED"
+    assert time.monotonic() - started < 0.5

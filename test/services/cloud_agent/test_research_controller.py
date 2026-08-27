@@ -1,6 +1,7 @@
 import importlib
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -93,6 +94,7 @@ def matching_research_job_payload() -> dict:
 
 def valid_settings_payload() -> dict:
     return {
+        "enabled": True,
         "provider": "aihubmix",
         "openrouter_model": "openai/gpt-5.6-sol-pro",
         "openrouter_custom_model_id": "openai/gpt-5.6-sol-pro",
@@ -129,7 +131,7 @@ class _ResearchServiceStub:
                     source_id="source-1",
                     url="https://example.com/article",
                     title="Example Article",
-                    source_hash="a" * 64,
+                    content_hash="a" * 64,
                 )
             ],
             accounting=ResearchAccounting(
@@ -152,6 +154,9 @@ class _ResearchServiceStub:
 class _LinkFailingResearchStore(ResearchDraftStore):
     def link_job(self, research_draft_id: str, job_id: str) -> None:
         raise sqlite3.OperationalError("link insert failed")
+
+
+_BROKEN_RESEARCH_STORE = object()
 
 
 def _seed_research_draft(store: ResearchDraftStore, script: str) -> None:
@@ -205,13 +210,26 @@ def _research_client(
     app.dependency_overrides[cloud_agent.get_research_service] = (
         lambda: research_service or _ResearchServiceStub()
     )
-    app.dependency_overrides[cloud_agent.get_research_draft_store] = (
-        lambda: research_store or ResearchDraftStore(str(tmp_path / "cloud-agent.sqlite3"))
-    )
+    if research_store is _BROKEN_RESEARCH_STORE:
+        app.dependency_overrides[cloud_agent.get_research_draft_store] = lambda: pytest.fail(
+            "Standard Start must not construct Research storage"
+        )
+    else:
+        resolved_research_store = research_store or ResearchDraftStore(
+            str(tmp_path / "cloud-agent.sqlite3")
+        )
+        app.dependency_overrides[cloud_agent.get_research_draft_store] = (
+            lambda: resolved_research_store
+        )
+        if hasattr(cloud_agent, "get_research_draft_store_factory"):
+            app.dependency_overrides[cloud_agent.get_research_draft_store_factory] = (
+                lambda: lambda: resolved_research_store
+            )
     app.dependency_overrides[cloud_agent.get_research_settings_service] = (
         lambda: ResearchSettingsService()
     )
     monkeypatch.setattr(config, "save_config", lambda: None)
+    monkeypatch.setitem(config.app, "cloud_agent_research_enabled", True)
     monkeypatch.setitem(
         config.app, "cloud_agent_research_default_provider", "openrouter"
     )
@@ -266,6 +284,8 @@ def test_research_draft_route_is_on_existing_cloud_agent_router(tmp_path, monkey
 
     assert response.status_code == 200
     assert response.json()["data"]["research_draft_id"] == "draft-1"
+    assert response.json()["data"]["sources"][0]["content_hash"] == "a" * 64
+    assert "source_hash" not in response.json()["data"]["sources"][0]
 
 
 def test_research_route_inventory_uses_only_cloud_agent_prefix():
@@ -287,7 +307,7 @@ def test_research_failure_is_typed_safe_and_creates_no_job(tmp_path, monkeypatch
                     provider_rounds=0,
                     tool_calls=0,
                     usage={},
-                    cost=0.0,
+                    cost=None,
                 ),
             )
         ),
@@ -303,6 +323,24 @@ def test_research_failure_is_typed_safe_and_creates_no_job(tmp_path, monkeypatch
     assert response.json()["message"] == "กรุณาใส่ URL อย่างน้อยหนึ่งแหล่ง"
     assert "secret" not in response.text
     assert client.app.state.job_store.list_jobs() == []
+
+
+def test_safe_accounting_drops_non_finite_provider_metadata():
+    cloud_agent = _cloud_agent_controller()
+
+    assert cloud_agent._safe_accounting(
+        SimpleNamespace(
+            tool_calls=float("inf"),
+            provider_rounds=float("nan"),
+            usage={"tokens": float("inf"), "valid_tokens": 12},
+            cost=float("inf"),
+        )
+    ) == {
+        "tool_calls": 0,
+        "provider_rounds": 0,
+        "usage": {"valid_tokens": 12},
+        "cost": None,
+    }
 
 
 def test_research_detail_route_returns_safe_persisted_metadata(
@@ -368,6 +406,18 @@ def test_standard_draft_does_not_resolve_or_call_research_service(
     assert response.status_code == 200
 
 
+def test_standard_start_does_not_construct_research_storage(tmp_path, monkeypatch):
+    client = research_client(
+        tmp_path,
+        monkeypatch,
+        research_store=_BROKEN_RESEARCH_STORE,
+    )
+
+    response = client.post("/api/v1/cloud-agent/jobs", json=valid_job_payload())
+
+    assert response.status_code == 200
+
+
 @pytest.mark.parametrize(
     ("method", "path"),
     [
@@ -392,6 +442,44 @@ def test_load_refresh_and_save_never_call_provider(
     )
 
     assert response.status_code == 200
+
+
+def test_provider_catalog_exposes_selectable_catalog_and_custom_model_handoff(
+    tmp_path, monkeypatch
+):
+    response = research_client(tmp_path, monkeypatch).get(
+        "/api/v1/cloud-agent/research/providers"
+    )
+
+    assert response.status_code == 200
+    providers = {item["id"]: item for item in response.json()["data"]}
+    assert providers["openrouter"] == {
+        "id": "openrouter",
+        "label": "OpenRouter",
+        "models": ["openai/gpt-5.6-sol-pro", "custom"],
+        "default_model": "openai/gpt-5.6-sol-pro",
+        "custom_model_id": "openai/gpt-5.6-sol-pro",
+        "api_key_configured": False,
+    }
+    assert providers["aihubmix"]["models"] == ["gpt-5.6-sol", "custom"]
+
+
+def test_disabled_research_rejects_generation_without_constructing_service(
+    tmp_path, monkeypatch
+):
+    client = research_client(
+        tmp_path,
+        monkeypatch,
+        research_service=lambda: pytest.fail("disabled Research must stay inactive"),
+    )
+    monkeypatch.setitem(config.app, "cloud_agent_research_enabled", False)
+
+    response = client.post(
+        "/api/v1/cloud-agent/research/drafts",
+        json=research_payload(),
+    )
+
+    assert response.status_code == 404
 
 
 def test_provider_key_routes_are_write_only_and_confirmed(tmp_path, monkeypatch):
@@ -446,7 +534,7 @@ def test_oversized_provider_key_request_returns_safe_typed_error(
         "tool_calls": 0,
         "provider_rounds": 0,
         "usage": {},
-        "cost": 0.0,
+        "cost": None,
     }
     assert oversized_secret not in response.text
     assert "input" not in response.text
@@ -475,7 +563,7 @@ def test_malformed_provider_key_json_returns_safe_typed_error(
         "tool_calls": 0,
         "provider_rounds": 0,
         "usage": {},
-        "cost": 0.0,
+        "cost": None,
     }
     assert "secret" not in response.text
     assert "detail" not in response.text

@@ -5,31 +5,65 @@ from app.services.cloud_agent.research.errors import ResearchError
 
 
 _PROVIDERS = {
-    "openrouter": ("OpenRouter", "cloud_agent_research_openrouter_api_key"),
-    "aihubmix": ("AIHubMix", "cloud_agent_research_aihubmix_api_key"),
+    "openrouter": {
+        "label": "OpenRouter",
+        "api_key_name": "cloud_agent_research_openrouter_api_key",
+        "models": ["openai/gpt-5.6-sol-pro", "custom"],
+        "default_model": "openai/gpt-5.6-sol-pro",
+        "custom_model_name": "cloud_agent_research_openrouter_custom_model",
+    },
+    "aihubmix": {
+        "label": "AIHubMix",
+        "api_key_name": "cloud_agent_research_aihubmix_api_key",
+        "models": ["gpt-5.6-sol", "custom"],
+        "default_model": "gpt-5.6-sol",
+        "custom_model_name": "cloud_agent_research_aihubmix_custom_model",
+    },
 }
 
 
 class ResearchProviderMetadata(BaseModel):
     id: str
     label: str
+    models: list[str]
+    default_model: str
+    custom_model_id: str
     api_key_configured: bool
 
 
 class ResearchSettingsService:
-    KEY_NAMES = {provider_id: key for provider_id, (_label, key) in _PROVIDERS.items()}
+    KEY_NAMES = {
+        provider_id: str(metadata["api_key_name"])
+        for provider_id, metadata in _PROVIDERS.items()
+    }
 
     def list_providers(self) -> list[ResearchProviderMetadata]:
         return [self.get_provider(provider_id) for provider_id in _PROVIDERS]
 
     def get_provider(self, provider_id: str) -> ResearchProviderMetadata:
         normalized = self._require_provider(provider_id)
-        label, key_name = _PROVIDERS[normalized]
+        metadata = _PROVIDERS[normalized]
+        key_name = str(metadata["api_key_name"])
         return ResearchProviderMetadata(
             id=normalized,
-            label=label,
+            label=str(metadata["label"]),
+            models=list(metadata["models"]),
+            default_model=str(metadata["default_model"]),
+            custom_model_id=str(
+                config.app.get(str(metadata["custom_model_name"]), "") or ""
+            ).strip(),
             api_key_configured=bool(str(config.app.get(key_name, "") or "").strip()),
         )
+
+    def validate_model_choice(self, provider_id: str, model_choice: str) -> str:
+        metadata = self.get_provider(provider_id)
+        normalized = str(model_choice or "").strip()
+        if normalized not in metadata.models:
+            raise ResearchError(
+                "PROVIDER_MODEL_UNSUPPORTED",
+                f"unsupported catalog model choice for {metadata.id}",
+            )
+        return normalized
 
     def set_api_key(self, provider_id: str, value: str) -> ResearchProviderMetadata:
         normalized = self._require_provider(provider_id)

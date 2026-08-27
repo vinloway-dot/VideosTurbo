@@ -342,6 +342,29 @@ def test_accounting_sums_provider_round_usage_and_cost(service, adapter):
     assert result.accounting.cost == pytest.approx(0.03)
 
 
+def test_missing_cost_in_any_provider_round_remains_unavailable(service, adapter):
+    adapter.rounds = [
+        ProviderResult(
+            tool_calls=(
+                RequestedToolCall(
+                    "call-1", "fetch_url", {"url": "https://example.com/article"}
+                ),
+            ),
+            usage={"prompt_tokens": 10},
+            cost=0.01,
+        ),
+        ProviderResult(
+            final_payload=_final_payload(),
+            usage={"completion_tokens": 4},
+            cost=None,
+        ),
+    ]
+
+    result = service.create_draft(request_with_one_url())
+
+    assert result.accounting.cost is None
+
+
 def test_fourth_tool_is_rejected_without_partial_batch_execution(service, adapter, runtime):
     adapter.queue_tool_calls(["fetch_url", "fetch_url", "read_pdf", "fetch_url"])
 
@@ -427,6 +450,20 @@ def test_repeated_model_tool_call_reuses_source_but_consumes_budget(service, ada
     assert result.accounting.tool_calls == 2
 
 
+def test_evidence_block_is_not_repeated_across_provider_rounds(service, adapter):
+    adapter.queue_tool_rounds(["fetch_url", "fetch_url"])
+
+    service.create_draft(request_with_one_url())
+
+    final_request_tool_content = "\n".join(
+        str(message.get("content", ""))
+        for message in adapter.calls[-1].messages
+        if message.get("role") == "tool"
+    )
+    assert final_request_tool_content.count("Exact source fact appears here.") == 1
+    assert "already_emitted" in final_request_tool_content
+
+
 def test_multi_tool_batch_emits_each_evidence_block_once(service, adapter, runtime):
     runtime.sources_by_url["https://example.com/article"] = _source(
         "https://example.com/article",
@@ -502,6 +539,54 @@ def test_model_only_final_is_rejected_even_after_source_read(service, adapter):
         service.create_draft(request_with_one_url())
 
     assert captured.value.code == "SOURCE_EVIDENCE_EMPTY"
+
+
+def test_claim_sources_must_match_declared_source_ids_used(service, adapter, runtime):
+    runtime.sources_by_url["https://example.com/article"] = _source(
+        "https://example.com/article",
+        source_id="source-1",
+        content="First verified fact.",
+    )
+    runtime.sources_by_url["https://example.com/second"] = _source(
+        "https://example.com/second",
+        source_id="source-2",
+        content="Second verified fact.",
+    )
+    adapter.rounds = [
+        ProviderResult(
+            tool_calls=(
+                RequestedToolCall(
+                    "call-1", "fetch_url", {"url": "https://example.com/article"}
+                ),
+                RequestedToolCall(
+                    "call-2", "fetch_url", {"url": "https://example.com/second"}
+                ),
+            )
+        ),
+        ProviderResult(
+            final_payload=ProviderFinalPayload(
+                script="Narration from research.",
+                source_ids_used=["source-1"],
+                model_knowledge_used=True,
+                evidence_claims=[
+                    EvidenceClaim(
+                        claim="Second fact",
+                        source_id="source-2",
+                        evidence_quote="Second verified fact.",
+                    )
+                ],
+            )
+        ),
+    ]
+
+    with pytest.raises(ResearchError) as captured:
+        service.create_draft(
+            request_with_urls(
+                ["https://example.com/article", "https://example.com/second"]
+            )
+        )
+
+    assert captured.value.code == "RESEARCH_RESPONSE_INVALID"
 
 
 def test_tool_urls_must_match_supplied_allowlist(service, adapter, runtime):
@@ -622,6 +707,98 @@ def test_errors_do_not_persist_research_draft(service, adapter, store):
         service.create_draft(request_with_one_url())
 
     assert store.list_drafts() == []
+
+
+def test_provider_error_includes_attempted_round_in_sanitized_accounting(
+    service, adapter, monkeypatch
+):
+    def fail(_request):
+        raise ResearchError("PROVIDER_TIMEOUT", "raw provider detail")
+
+    monkeypatch.setattr(adapter, "complete", fail)
+
+    with pytest.raises(ResearchError) as captured:
+        service.create_draft(request_with_one_url())
+
+    assert captured.value.accounting.provider_rounds == 1
+    assert captured.value.accounting.tool_calls == 0
+    assert captured.value.accounting.cost is None
+
+
+def test_runtime_error_includes_requested_tool_and_provider_round(service, adapter, runtime):
+    adapter.queue_tool_calls(["fetch_url"])
+    runtime.fail_tool(
+        "fetch_url",
+        "https://example.com/article",
+        code="URL_TARGET_NOT_PUBLIC",
+    )
+
+    with pytest.raises(ResearchError) as captured:
+        service.create_draft(request_with_one_url())
+
+    assert captured.value.accounting.provider_rounds == 1
+    assert captured.value.accounting.tool_calls == 1
+    assert captured.value.accounting.cost == pytest.approx(0.001)
+
+
+def test_invariant_prompt_contains_all_security_and_evidence_policy(service, adapter):
+    service.create_draft(request_with_one_url())
+
+    invariant = adapter.calls[0].messages[0]["content"]
+    for required_rule in (
+        "Model knowledge must not be attributed to a supplied source",
+        "When model knowledge conflicts with source evidence",
+        "unstable facts cannot be asserted from model memory alone",
+        "At least one supplied source must be read successfully",
+        "Omit citations and URLs unless the editable prompt requests them",
+        "at most three tool executions",
+        "at most three provider rounds",
+        "Never reveal API keys, authorization headers, cookies, or secrets",
+        "Never retry, change providers, change models, or fall back",
+    ):
+        assert required_rule in invariant
+
+
+def test_success_persists_complete_provenance_contract(service, adapter, store):
+    adapter.rounds = [
+        ProviderResult(
+            tool_calls=(
+                RequestedToolCall(
+                    "call-1", "fetch_url", {"url": "https://example.com/article"}
+                ),
+            ),
+            usage={"prompt_tokens": 10},
+            cost=None,
+        ),
+        ProviderResult(
+            final_payload=ProviderFinalPayload(
+                script="Narration from research.",
+                source_ids_used=["source-1"],
+                model_knowledge_used=False,
+                evidence_claims=[
+                    EvidenceClaim(
+                        claim="Verified fact",
+                        source_id="source-1",
+                        evidence_quote="Exact source fact appears here.",
+                    )
+                ],
+            ),
+            usage={"completion_tokens": 4},
+            cost=None,
+        ),
+    ]
+
+    result = service.create_draft(request_with_one_url())
+    persisted = store.get(result.research_draft_id)
+
+    assert persisted.tool_calls == 1
+    assert persisted.provider_rounds == 2
+    assert persisted.estimated_cost_usd is None
+    assert persisted.evidence_mode == "source_evidence + model_knowledge"
+    assert len(persisted.editable_prompt_fingerprint) == 64
+    assert len(persisted.invariant_prompt_fingerprint) == 64
+    assert persisted.editable_prompt_fingerprint != persisted.invariant_prompt_fingerprint
+    assert persisted.sources[0].content_hash == result.sources[0].content_hash
 
 
 def test_success_uses_custom_model_id(service, adapter):

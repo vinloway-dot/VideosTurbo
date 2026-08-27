@@ -30,7 +30,7 @@ _BLOCK_TAGS = (
     "section",
     "td",
 )
-_HTML_MIME_PREFIXES = ("text/html", "application/xhtml+xml")
+_HTML_MIME_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 _COOKIE_MARKERS = ("cookie", "consent", "gdpr", "privacy")
 _CAPTCHA_MARKERS = (
     "captcha",
@@ -130,10 +130,20 @@ class ResearchToolRuntime:
 
     def _extract_html(self, response: DownloadedResource) -> ResearchSource:
         content_type = response.headers.get("content-type", "").lower()
-        if not content_type.startswith(_HTML_MIME_PREFIXES):
+        mime_type = content_type.split(";", 1)[0].strip()
+        if mime_type not in _HTML_MIME_TYPES:
             raise ResearchError("URL_CONTENT_UNSUPPORTED", "HTML content is required")
 
-        html = response.body.decode(self._charset_from_content_type(content_type), "replace")
+        try:
+            html = response.body.decode(
+                self._charset_from_content_type(content_type),
+                "replace",
+            )
+        except LookupError as exc:
+            raise ResearchError(
+                "URL_CONTENT_UNSUPPORTED",
+                "HTML declared an unsupported charset",
+            ) from exc
         soup = BeautifulSoup(html, "html.parser")
         if soup.find("input", attrs={"type": re.compile(r"^password$", re.I)}):
             raise ResearchError("URL_CONTENT_UNSUPPORTED", "password-protected content is unsupported")
@@ -158,12 +168,12 @@ class ResearchToolRuntime:
             title=title[: self.MAX_TITLE_LENGTH],
             content=text,
             content_hash=sha256(text.encode("utf-8")).hexdigest(),
-            mime_type=content_type.split(";", 1)[0],
+            mime_type=mime_type,
         )
 
     def _extract_pdf(self, response: DownloadedResource) -> ResearchSource:
         content_type = response.headers.get("content-type", "").lower()
-        if not content_type.startswith("application/pdf"):
+        if content_type.split(";", 1)[0].strip() != "application/pdf":
             raise ResearchError("PDF_INVALID", "PDF MIME type is required")
         if not response.body.startswith(b"%PDF-"):
             raise ResearchError("PDF_INVALID", "PDF signature is required")
@@ -175,21 +185,32 @@ class ResearchToolRuntime:
             reader = self._pdf_reader_factory(BytesIO(response.body))
         except Exception as exc:
             raise ResearchError("PDF_INVALID", str(exc)) from exc
-        if getattr(reader, "is_encrypted", False):
+        try:
+            is_encrypted = bool(getattr(reader, "is_encrypted", False))
+            pages = reader.pages
+            page_count = len(pages)
+        except Exception as exc:
+            raise ResearchError("PDF_INVALID", "PDF page tree is malformed") from exc
+        if is_encrypted:
             raise ResearchError("PDF_INVALID", "encrypted PDFs are unsupported")
-        if len(reader.pages) > self.MAX_PDF_PAGES:
+        if page_count > self.MAX_PDF_PAGES:
             raise ResearchError("PDF_TOO_LARGE", "PDF page count exceeded limit")
 
-        page_texts = [
-            self._normalize_text(page.extract_text() or "")
-            for page in reader.pages
-        ]
+        try:
+            page_texts = [
+                self._normalize_text(page.extract_text() or "") for page in pages
+            ]
+        except Exception as exc:
+            raise ResearchError("PDF_INVALID", "PDF text extraction failed") from exc
         text = "\n\n".join(segment for segment in page_texts if segment)
         if not text:
             raise ResearchError("PDF_TEXT_UNAVAILABLE", "PDF does not contain extractable text")
 
-        metadata = getattr(reader, "metadata", {}) or {}
-        raw_title = metadata.get("/Title") if isinstance(metadata, dict) else ""
+        try:
+            metadata = getattr(reader, "metadata", {}) or {}
+            raw_title = metadata.get("/Title") if hasattr(metadata, "get") else ""
+        except Exception as exc:
+            raise ResearchError("PDF_INVALID", "PDF metadata is malformed") from exc
         title = self._normalize_text(raw_title)
         return ResearchSource(
             source_id=self._source_id(response.final_url, text),
@@ -282,4 +303,19 @@ class ResearchToolRuntime:
         return (
             "display:none" in normalized_style
             or "visibility:hidden" in normalized_style
+            or re.search(r"(?:^|;)opacity:0(?:\.0+)?(?:;|$)", normalized_style)
+            is not None
+            or (
+                ("position:absolute" in normalized_style or "position:fixed" in normalized_style)
+                and re.search(
+                    r"(?:left|right|top|bottom):-\d{3,}(?:px|em|rem|%)?(?:;|$)",
+                    normalized_style,
+                )
+                is not None
+            )
+            or re.search(
+                r"(?:^|;)text-indent:-\d{3,}(?:px|em|rem|%)?(?:;|$)",
+                normalized_style,
+            )
+            is not None
         )

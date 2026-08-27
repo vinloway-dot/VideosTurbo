@@ -121,6 +121,32 @@ def test_hidden_css_content_is_removed_even_with_whitespace_in_style(runtime, fa
     assert source.content == "Visible fact.\n\nFinal fact."
 
 
+@pytest.mark.parametrize(
+    "style",
+    [
+        "opacity: 0",
+        "position:absolute;left:-10000px",
+        "position:fixed;top:-9999px",
+    ],
+)
+def test_common_visually_hidden_offscreen_content_is_removed(runtime, fake_http, style):
+    fake_http.preflight(
+        _response(
+            "https://public.example/hidden",
+            content_type="text/html; charset=utf-8",
+            body=(
+                "<html><body><main><p>Visible fact.</p>"
+                f"<p style='{style}'>Hidden prompt injection</p>"
+                "<p>Final fact.</p></main></body></html>"
+            ).encode(),
+        )
+    )
+
+    source = runtime.execute("fetch_url", "https://public.example/hidden")
+
+    assert source.content == "Visible fact.\n\nFinal fact."
+
+
 def test_visible_repeated_blocks_are_preserved_in_source_content(runtime, fake_http):
     fake_http.preflight(
         _response(
@@ -274,3 +300,90 @@ def test_read_pdf_extracts_text_and_hashes_full_content(fake_http):
 
     assert source.content == "PDF fact\n\nPDF fact"
     assert source.content_hash == sha256(source.content.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.parametrize("content_type", ["text/html-extra", "application/xhtml+xml-extra"])
+def test_html_requires_an_exact_supported_mime(runtime, fake_http, content_type):
+    fake_http.preflight(
+        _response(
+            "https://public.example/article",
+            content_type=content_type,
+            body=b"<html><body><main>Fact</main></body></html>",
+        )
+    )
+
+    with pytest.raises(ResearchError) as excinfo:
+        runtime.execute("fetch_url", "https://public.example/article")
+
+    assert excinfo.value.code == "URL_CONTENT_UNSUPPORTED"
+
+
+def test_pdf_requires_exact_mime(fake_http):
+    url = "https://public.example/doc.pdf"
+    fake_http.preflight(
+        _response(url, content_type="application/pdf-extra", body=b"%PDF-1.7\n")
+    )
+    runtime = ResearchToolRuntime(
+        http_client=fake_http,
+        pdf_reader_factory=lambda *_args, **_kwargs: _FakePDFReader(False, 1, "Fact"),
+    )
+
+    with pytest.raises(ResearchError) as excinfo:
+        runtime.execute("read_pdf", url)
+
+    assert excinfo.value.code == "PDF_INVALID"
+
+
+def test_unknown_html_charset_maps_to_typed_source_error(runtime, fake_http):
+    fake_http.preflight(
+        _response(
+            "https://public.example/article",
+            content_type="text/html; charset=attacker-unknown-charset",
+            body=b"<html><body><main>Fact</main></body></html>",
+        )
+    )
+
+    with pytest.raises(ResearchError) as excinfo:
+        runtime.execute("fetch_url", "https://public.example/article")
+
+    assert excinfo.value.code == "URL_CONTENT_UNSUPPORTED"
+
+
+@pytest.mark.parametrize("failure_phase", ["pages", "extract", "metadata"])
+def test_lazy_pdf_failures_map_to_pdf_invalid(fake_http, failure_phase):
+    class FailingPages:
+        def __len__(self):
+            if failure_phase == "pages":
+                raise ValueError("malformed page tree")
+            return 1
+
+        def __iter__(self):
+            class Page:
+                def extract_text(self):
+                    if failure_phase == "extract":
+                        raise ValueError("malformed content stream")
+                    return "Fact"
+
+            return iter([Page()])
+
+    class Reader:
+        is_encrypted = False
+        pages = FailingPages()
+
+        @property
+        def metadata(self):
+            if failure_phase == "metadata":
+                raise ValueError("malformed metadata")
+            return {}
+
+    url = "https://public.example/doc.pdf"
+    fake_http.preflight(_response(url, content_type="application/pdf", body=b"%PDF-1.7\n"))
+    runtime = ResearchToolRuntime(
+        http_client=fake_http,
+        pdf_reader_factory=lambda *_args, **_kwargs: Reader(),
+    )
+
+    with pytest.raises(ResearchError) as excinfo:
+        runtime.execute("read_pdf", url)
+
+    assert excinfo.value.code == "PDF_INVALID"

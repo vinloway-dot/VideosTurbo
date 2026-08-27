@@ -53,6 +53,7 @@ CLOUD_AGENT_DEFAULTS = {
 }
 
 RESEARCH_DEFAULTS = {
+    "cloud_agent_research_enabled": False,
     "cloud_agent_research_default_provider": "openrouter",
     "cloud_agent_research_openrouter_model": "openai/gpt-5.6-sol-pro",
     "cloud_agent_research_openrouter_custom_model": "openai/gpt-5.6-sol-pro",

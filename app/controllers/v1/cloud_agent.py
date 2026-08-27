@@ -1,6 +1,8 @@
 import json
+import math
 import shutil
 from pathlib import Path
+from typing import Callable
 
 from fastapi import Depends, Request
 from fastapi.responses import FileResponse
@@ -85,6 +87,7 @@ _FINAL_CHECKPOINTS = {
     CloudJobCheckpoint.COMPLETED,
 }
 _RESEARCH_SETTINGS_KEYS = {
+    "enabled": "cloud_agent_research_enabled",
     "provider": "cloud_agent_research_default_provider",
     "openrouter_model": "cloud_agent_research_openrouter_model",
     "openrouter_custom_model_id": "cloud_agent_research_openrouter_custom_model",
@@ -101,6 +104,7 @@ _RESEARCH_HTTP_STATUS = {
 
 
 class ResearchSettingsPayload(BaseModel):
+    enabled: bool | None = None
     provider: str
     openrouter_model: str = Field(max_length=256)
     openrouter_custom_model_id: str = Field(default="", max_length=256)
@@ -163,6 +167,7 @@ def get_cloud_agent_defaults_service() -> CloudAgentDefaultsService:
 
 
 def get_research_service() -> ResearchScriptService:
+    _require_research_enabled()
     return build_research_script_service()
 
 
@@ -172,6 +177,10 @@ def get_research_settings_service() -> ResearchSettingsService:
 
 def get_research_draft_store() -> ResearchDraftStore:
     return build_research_draft_store()
+
+
+def get_research_draft_store_factory() -> Callable[[], ResearchDraftStore]:
+    return get_research_draft_store
 
 
 def _job_data(job) -> dict:
@@ -206,11 +215,32 @@ def _safe_accounting(value) -> dict:
     usage = getattr(value, "usage", {})
     if usage is None:
         usage = {}
+    safe_usage = {
+        str(key): number
+        for key, number in dict(usage).items()
+        if isinstance(number, int | float)
+        and math.isfinite(number)
+        and number >= 0
+    }
+    cost = getattr(value, "cost", None)
+    if not isinstance(cost, int | float) or not math.isfinite(cost) or cost < 0:
+        cost = None
+
+    def safe_count(name: str) -> int:
+        raw_value = getattr(value, name, 0)
+        if (
+            not isinstance(raw_value, int | float)
+            or not math.isfinite(raw_value)
+            or raw_value < 0
+        ):
+            return 0
+        return int(raw_value)
+
     return {
-        "tool_calls": int(getattr(value, "tool_calls", 0) or 0),
-        "provider_rounds": int(getattr(value, "provider_rounds", 0) or 0),
-        "usage": dict(usage),
-        "cost": float(getattr(value, "cost", 0.0) or 0.0),
+        "tool_calls": safe_count("tool_calls"),
+        "provider_rounds": safe_count("provider_rounds"),
+        "usage": safe_usage,
+        "cost": float(cost) if cost is not None else None,
     }
 
 
@@ -228,9 +258,23 @@ def _research_http_exception(exc: ResearchError) -> HttpException:
 
 def _research_settings_data() -> dict:
     return {
-        name: str(config.app.get(key, "") or "").strip()
-        for name, key in _RESEARCH_SETTINGS_KEYS.items()
+        "enabled": bool(config.app.get(_RESEARCH_SETTINGS_KEYS["enabled"], False)),
+        **{
+            name: str(config.app.get(key, "") or "").strip()
+            for name, key in _RESEARCH_SETTINGS_KEYS.items()
+            if name != "enabled"
+        },
     }
+
+
+def _require_research_enabled() -> None:
+    if bool(config.app.get("cloud_agent_research_enabled", False)):
+        return
+    raise HttpException(
+        task_id="cloud-agent-research",
+        status_code=404,
+        message="Research Script is disabled.",
+    )
 
 
 def _validated_research_provider(
@@ -244,13 +288,23 @@ def _update_research_settings(
     service: ResearchSettingsService,
 ) -> dict:
     provider_id = _validated_research_provider(body.provider, service)
+    openrouter_model = service.validate_model_choice(
+        "openrouter",
+        body.openrouter_model,
+    )
+    aihubmix_model = service.validate_model_choice(
+        "aihubmix",
+        body.aihubmix_model,
+    )
     with config.runtime_config_lock():
+        if body.enabled is not None:
+            config.app[_RESEARCH_SETTINGS_KEYS["enabled"]] = body.enabled
         config.app[_RESEARCH_SETTINGS_KEYS["provider"]] = provider_id
-        config.app[_RESEARCH_SETTINGS_KEYS["openrouter_model"]] = body.openrouter_model
+        config.app[_RESEARCH_SETTINGS_KEYS["openrouter_model"]] = openrouter_model
         config.app[_RESEARCH_SETTINGS_KEYS["openrouter_custom_model_id"]] = (
             body.openrouter_custom_model_id
         )
-        config.app[_RESEARCH_SETTINGS_KEYS["aihubmix_model"]] = body.aihubmix_model
+        config.app[_RESEARCH_SETTINGS_KEYS["aihubmix_model"]] = aihubmix_model
         config.app[_RESEARCH_SETTINGS_KEYS["aihubmix_custom_model_id"]] = (
             body.aihubmix_custom_model_id
         )
@@ -582,6 +636,7 @@ def create_research_draft(
 ):
     del request
     try:
+        _require_research_enabled()
         data = service.create_draft(body).model_dump(mode="json")
     except ResearchError as exc:
         raise _research_http_exception(exc) from exc
@@ -612,11 +667,14 @@ def create_cloud_agent_job(
     store: CloudJobStore = Depends(get_cloud_job_store),
     storage: CloudJobStorage = Depends(get_cloud_job_storage),
     voices: DraftVoiceService = Depends(get_draft_voice_service),
-    research_store: ResearchDraftStore = Depends(get_research_draft_store),
+    research_store_factory: Callable[[], ResearchDraftStore] = Depends(
+        get_research_draft_store_factory
+    ),
 ):
     del request
     prepared_voice = str(body.prepared_voice_fingerprint or "").strip()
     research_draft_id = str(body.research_draft_id or "").strip()
+    research_store = None
     if prepared_voice:
         try:
             voices.get(prepared_voice)
@@ -624,6 +682,7 @@ def create_cloud_agent_job(
             raise HttpException(task_id="cloud-agent-job", status_code=422, message=str(exc)) from exc
     if research_draft_id:
         try:
+            research_store = research_store_factory()
             research_store.assert_script_matches(research_draft_id, body.script)
         except ResearchError as exc:
             raise _research_http_exception(exc) from exc
@@ -645,6 +704,8 @@ def create_cloud_agent_job(
             raise HttpException(task_id=job.id, status_code=422, message="prepared narration could not be materialized") from exc
     if research_draft_id:
         try:
+            if research_store is None:
+                research_store = research_store_factory()
             research_store.link_job(research_draft_id, job.id)
         except Exception as exc:
             raise _research_association_failed(store, job.id, exc) from exc
