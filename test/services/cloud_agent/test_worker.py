@@ -55,6 +55,12 @@ class BlockingWorkflow:
         )
 
 
+class ExplodingWorkflow:
+    def run(self, job_id: str, *, worker_id: str):
+        del job_id, worker_id
+        raise RuntimeError("unexpected browser failure")
+
+
 class RecordingStore(CloudJobStore):
     def __init__(self, db_path: str):
         super().__init__(db_path)
@@ -160,6 +166,20 @@ def test_worker_does_not_auto_claim_paused_or_human_required_jobs(tmp_path):
 
     assert worker.run_once() is False
     assert workflow.calls == []
+
+
+def test_worker_records_unexpected_workflow_failure_without_crashing(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+    worker = CloudAgentWorker(store, ExplodingWorkflow(), worker_id="worker-a")
+
+    assert worker.run_once() is True
+
+    persisted = store.get_job(job.id)
+    assert persisted is not None
+    assert persisted.status is CloudJobStatus.HUMAN_REQUIRED
+    assert persisted.error_code == "WORKER_RUNTIME_ERROR"
+    assert persisted.error_message == "Cloud Agent workflow stopped: RuntimeError"
 
 
 def test_default_worker_id_contains_hostname_pid_and_random_suffix(tmp_path):

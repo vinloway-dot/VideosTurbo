@@ -302,6 +302,47 @@ class FakeNoVideosTabPage:
     no_uploaded_videos_tab = True
 
 
+class _LiveSidebarControl:
+    def __init__(self, page, name, *, present=True):
+        self.page = page
+        self.name = name
+        self.present = present
+
+    def count(self):
+        return int(self.present)
+
+    def is_visible(self):
+        return self.present
+
+    def is_enabled(self):
+        return self.present
+
+    def click(self):
+        self.page.sidebar_clicks.append(self.name)
+
+
+class FakeLiveCanvaSidebarPage:
+    """Models Canva's current sidebar, where Elements/Uploads are not tabs."""
+
+    def __init__(self):
+        self.sidebar_clicks = []
+
+    def get_by_role(self, role, *, name, exact):
+        if (role, name, exact) == ("tab", "Elements", True):
+            return _LiveSidebarControl(self, "legacy-elements", present=False)
+        if (role, name, exact) == ("button", "Add elements", True):
+            return _LiveSidebarControl(self, "Add elements")
+        raise AssertionError(f"unexpected role lookup: {role} {name}")
+
+    def get_by_text(self, name, *, exact):
+        assert (name, exact) == ("Uploads", True)
+        return _LiveSidebarControl(
+            self,
+            "Uploads",
+            present=self.sidebar_clicks == ["Add elements"],
+        )
+
+
 class _ClickOnly:
     def click(self):
         return None
@@ -1385,6 +1426,15 @@ def test_canva_open_uploaded_videos_uses_visible_tab_when_hidden_stale_tab_remai
 
     assert panel is page.video_panel
     assert page.visible_video_tab.clicked is True
+
+
+def test_canva_activates_current_sidebar_when_elements_and_uploads_are_not_tabs():
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    page = FakeLiveCanvaSidebarPage()
+
+    client._activate_uploads(page)
+
+    assert page.sidebar_clicks == ["Add elements", "Uploads"]
 
 
 def test_canva_open_uploaded_audio_reactivates_uploads_before_reading_media_tabs(

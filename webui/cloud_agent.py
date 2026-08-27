@@ -29,6 +29,14 @@ def _api_error_message(error):
     return "Cloud Agent request could not be completed."
 
 
+def _job_error_message(job):
+    code = str(job.get("error_code", "") or "").strip()
+    message = str(job.get("error_message", "") or "").strip()
+    if code and message:
+        return f"{code}: {message}"
+    return code or message
+
+
 def _prepare_draft(*, subject, language, target_words, script):
     return _api(
         "POST",
@@ -177,6 +185,26 @@ def render_cloud_agent_panel():
                     st.caption("Flow failed before generation. Existing narration will be reused.")
             except requests.RequestException as exc:
                 st.error(_api_error_message(exc))
+    if job_id.strip():
+        try:
+            job = _api("GET", f"jobs/{job_id.strip()}")
+            st.json(
+                {
+                    key: job.get(key)
+                    for key in (
+                        "status",
+                        "checkpoint",
+                        "current_step",
+                        "progress",
+                        "error_code",
+                        "error_message",
+                    )
+                }
+            )
+            if message := _job_error_message(job):
+                st.error(message)
+        except requests.RequestException as exc:
+            st.error(_api_error_message(exc))
     st.caption("job status/history")
     st.caption("final video")
     st.caption("measured narration duration")

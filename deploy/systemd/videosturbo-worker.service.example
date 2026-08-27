@@ -2,6 +2,8 @@
 Description=VideosTurbo Cloud Agent Worker
 After=network-online.target videosturbo-xvfb.service videosturbo-openbox.service
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple

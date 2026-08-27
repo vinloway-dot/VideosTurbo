@@ -463,16 +463,22 @@ class CloudAgentWorkflow:
 
             return self._get_job(job.id)
         except CanvaUIVerificationError as exc:
-            if exc.audio_card_count is None:
-                raise
             current = self._get_job(job.id)
             return self.store.patch_job(
                 current.id,
                 status=CloudJobStatus.HUMAN_REQUIRED,
                 checkpoint=current.checkpoint,
                 current_step="human_required",
-                canva_audio_card_count=exc.audio_card_count,
-                error_code="CANVA_AUDIO_CARD_VERIFICATION_FAILED",
+                canva_audio_card_count=(
+                    exc.audio_card_count
+                    if exc.audio_card_count is not None
+                    else current.canva_audio_card_count
+                ),
+                error_code=(
+                    "CANVA_AUDIO_CARD_VERIFICATION_FAILED"
+                    if exc.audio_card_count is not None
+                    else "CANVA_UI_VERIFICATION_FAILED"
+                ),
                 error_message=str(exc),
             )
         except NarrationTooLongError as exc:

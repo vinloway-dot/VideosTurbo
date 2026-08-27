@@ -394,6 +394,12 @@ class AudioEvidenceCanva(RecordingCanva):
         )
 
 
+class GenericCanvaVerificationFailure(RecordingCanva):
+    def assemble_and_export(self, job, clips, audio, output):
+        del job, clips, audio, output
+        raise CanvaUIVerificationError("Canva Uploads sidebar cannot be verified")
+
+
 class EventRecordingCanva(RecordingCanva):
     def __init__(self, events):
         super().__init__()
@@ -618,6 +624,25 @@ def test_workflow_preserves_flow_ready_and_persists_audio_card_evidence(
     assert result.status is CloudJobStatus.HUMAN_REQUIRED
     assert result.checkpoint is CloudJobCheckpoint.FLOW_READY
     assert result.canva_audio_card_count == 0
+
+
+def test_workflow_persists_generic_canva_verification_failure_for_webui(
+    monkeypatch, tmp_path
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        canva=GenericCanvaVerificationFailure(),
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert result.status is CloudJobStatus.HUMAN_REQUIRED
+    assert result.checkpoint is CloudJobCheckpoint.FLOW_READY
+    assert result.error_code == "CANVA_UI_VERIFICATION_FAILED"
+    assert "Uploads sidebar" in result.error_message
 
 
 def test_generation_fence_precedes_submit_and_flow_ready_commit_is_atomic(

@@ -5,7 +5,7 @@ import time
 import uuid
 from typing import Protocol
 
-from app.models.cloud_agent import CloudJobRecord
+from app.models.cloud_agent import CloudJobRecord, CloudJobStatus
 from app.services.cloud_agent.job_store import CloudJobStore
 
 
@@ -66,7 +66,19 @@ class CloudAgentWorker:
         )
         renewal_thread.start()
         try:
-            self.workflow.run(job.id, worker_id=self.worker_id)
+            try:
+                self.workflow.run(job.id, worker_id=self.worker_id)
+            except Exception as exc:
+                self.store.patch_job(
+                    job.id,
+                    status=CloudJobStatus.HUMAN_REQUIRED,
+                    current_step="human_required",
+                    error_code="WORKER_RUNTIME_ERROR",
+                    error_message=(
+                        "Cloud Agent workflow stopped: "
+                        f"{type(exc).__name__}"
+                    ),
+                )
         finally:
             stop_renewal.set()
             renewal_thread.join()

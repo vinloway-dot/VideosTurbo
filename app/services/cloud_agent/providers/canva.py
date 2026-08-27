@@ -337,8 +337,31 @@ class CanvaAssemblyClient:
 
     @staticmethod
     def _activate_uploads(page: Any) -> None:
-        page.get_by_role("tab", name="Elements", exact=True).click()
-        page.get_by_role("tab", name="Uploads", exact=True).click()
+        legacy_elements = page.get_by_role("tab", name="Elements", exact=True)
+        if CanvaAssemblyClient._is_single_visible_control(legacy_elements):
+            legacy_elements.click()
+            page.get_by_role("tab", name="Uploads", exact=True).click()
+            return
+
+        add_elements = page.get_by_role("button", name="Add elements", exact=True)
+        if not CanvaAssemblyClient._is_single_visible_control(add_elements):
+            raise CanvaUIVerificationError("Canva Add elements control cannot be verified")
+        add_elements.click()
+        uploads = page.get_by_text("Uploads", exact=True)
+        if not CanvaAssemblyClient._is_single_visible_control(uploads):
+            raise CanvaUIVerificationError("Canva Uploads control cannot be verified")
+        uploads.click()
+
+    @staticmethod
+    def _is_single_visible_control(control: Any) -> bool:
+        """Accept the live Playwright control and small legacy test doubles."""
+        if not hasattr(control, "count"):
+            return True
+        return (
+            control.count() == 1
+            and control.is_visible()
+            and control.is_enabled()
+        )
 
     def _delete_uploaded_video_card(self, page: Any, cards: Any) -> None:
         card, card_box = self._first_visible_box(cards)

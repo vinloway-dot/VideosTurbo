@@ -92,6 +92,15 @@ def test_cloud_agent_api_allows_a_canva_readiness_timeout_longer_than_the_provid
     assert recorded["timeout"] >= 30
 
 
+def test_cloud_agent_ui_formats_persisted_job_failure_for_the_operator():
+    assert cloud_agent._job_error_message(
+        {
+            "error_code": "CANVA_UI_VERIFICATION_FAILED",
+            "error_message": "Canva Uploads control cannot be verified",
+        }
+    ) == "CANVA_UI_VERIFICATION_FAILED: Canva Uploads control cannot be verified"
+
+
 def test_canva_check_timeout_is_shown_as_a_safe_webui_error(monkeypatch):
     class Column:
         def __init__(self, pressed_key=""):
