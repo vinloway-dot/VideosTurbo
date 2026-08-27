@@ -3,6 +3,7 @@ from pathlib import Path
 
 from fastapi import Depends, Request
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field, field_validator
 
 from app.config import config
 from app.controllers.v1.base import new_router
@@ -26,6 +27,9 @@ from app.services.cloud_agent.factory import (
     build_pre_flow_retry_service,
     build_session_manager,
     build_cloud_tts_settings_service,
+    build_research_draft_store,
+    build_research_script_service,
+    build_research_settings_service,
     build_draft_voice_service,
     build_cloud_agent_defaults_service,
 )
@@ -33,6 +37,14 @@ from app.services.cloud_agent.draft_voice import DraftVoiceError, DraftVoiceServ
 from app.services.cloud_agent.defaults import CloudAgentDefaultsError, CloudAgentDefaultsService
 from app.services.cloud_agent.retry import PreFlowRetryService
 from app.services.cloud_agent.preflight import _probe_storage_writable
+from app.services.cloud_agent.research import (
+    ResearchDraftRequest,
+    ResearchError,
+    public_research_message,
+)
+from app.services.cloud_agent.research.service import ResearchScriptService
+from app.services.cloud_agent.research.settings import ResearchSettingsService
+from app.services.cloud_agent.research.store import ResearchDraftStore
 from app.services.cloud_agent.session import SessionManager
 from app.services.cloud_agent.tts_settings import (
     CloudTTSSettingsError,
@@ -71,6 +83,54 @@ _FINAL_CHECKPOINTS = {
     CloudJobCheckpoint.FINAL_VALIDATED,
     CloudJobCheckpoint.COMPLETED,
 }
+_RESEARCH_SETTINGS_KEYS = {
+    "provider": "cloud_agent_research_default_provider",
+    "openrouter_model": "cloud_agent_research_openrouter_model",
+    "openrouter_custom_model_id": "cloud_agent_research_openrouter_custom_model",
+    "aihubmix_model": "cloud_agent_research_aihubmix_model",
+    "aihubmix_custom_model_id": "cloud_agent_research_aihubmix_custom_model",
+    "custom_system_prompt": "cloud_agent_research_custom_system_prompt",
+}
+_RESEARCH_HTTP_STATUS = {
+    "PROVIDER_API_KEY_MISSING": 422,
+    "PROVIDER_AUTHENTICATION_FAILED": 401,
+    "PROVIDER_TIMEOUT": 504,
+    "URL_FETCH_FAILED": 502,
+}
+
+
+class ResearchSettingsPayload(BaseModel):
+    provider: str
+    openrouter_model: str = Field(max_length=256)
+    openrouter_custom_model_id: str = Field(default="", max_length=256)
+    aihubmix_model: str = Field(max_length=256)
+    aihubmix_custom_model_id: str = Field(default="", max_length=256)
+    custom_system_prompt: str = Field(default="", max_length=8000)
+
+    @field_validator(
+        "provider",
+        "openrouter_model",
+        "openrouter_custom_model_id",
+        "aihubmix_model",
+        "aihubmix_custom_model_id",
+        "custom_system_prompt",
+    )
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return str(value or "").strip()
+
+
+class ResearchAPIKeyPatch(BaseModel):
+    api_key: str = Field(default="", max_length=4096)
+
+    @field_validator("api_key")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return str(value or "").strip()
+
+
+class ConfirmResearchKeyRemoval(BaseModel):
+    confirmed: bool
 
 
 def get_cloud_job_store() -> CloudJobStore:
@@ -101,6 +161,18 @@ def get_cloud_agent_defaults_service() -> CloudAgentDefaultsService:
     return build_cloud_agent_defaults_service()
 
 
+def get_research_service() -> ResearchScriptService:
+    return build_research_script_service()
+
+
+def get_research_settings_service() -> ResearchSettingsService:
+    return build_research_settings_service()
+
+
+def get_research_draft_store() -> ResearchDraftStore:
+    return build_research_draft_store()
+
+
 def _job_data(job) -> dict:
     return job.model_dump(mode="json")
 
@@ -123,6 +195,80 @@ def _require_job(store: CloudJobStore, job_id: str):
             message=f"cloud agent job not found: {job_id}",
         )
     return job
+
+
+def _research_http_status(code: str) -> int:
+    return _RESEARCH_HTTP_STATUS.get(str(code or "").strip(), 422)
+
+
+def _safe_accounting(value) -> dict:
+    usage = getattr(value, "usage", {})
+    if usage is None:
+        usage = {}
+    return {
+        "tool_calls": int(getattr(value, "tool_calls", 0) or 0),
+        "provider_rounds": int(getattr(value, "provider_rounds", 0) or 0),
+        "usage": dict(usage),
+        "cost": float(getattr(value, "cost", 0.0) or 0.0),
+    }
+
+
+def _research_http_exception(exc: ResearchError) -> HttpException:
+    return HttpException(
+        task_id="cloud-agent-research",
+        status_code=_research_http_status(exc.code),
+        message=public_research_message(exc.code),
+        data={
+            "code": exc.code,
+            "accounting": _safe_accounting(getattr(exc, "accounting", None)),
+        },
+    )
+
+
+def _research_settings_data() -> dict:
+    return {
+        name: str(config.app.get(key, "") or "").strip()
+        for name, key in _RESEARCH_SETTINGS_KEYS.items()
+    }
+
+
+def _update_research_settings(body: ResearchSettingsPayload) -> dict:
+    with config.runtime_config_lock():
+        config.app[_RESEARCH_SETTINGS_KEYS["provider"]] = body.provider
+        config.app[_RESEARCH_SETTINGS_KEYS["openrouter_model"]] = body.openrouter_model
+        config.app[_RESEARCH_SETTINGS_KEYS["openrouter_custom_model_id"]] = (
+            body.openrouter_custom_model_id
+        )
+        config.app[_RESEARCH_SETTINGS_KEYS["aihubmix_model"]] = body.aihubmix_model
+        config.app[_RESEARCH_SETTINGS_KEYS["aihubmix_custom_model_id"]] = (
+            body.aihubmix_custom_model_id
+        )
+        config.app[_RESEARCH_SETTINGS_KEYS["custom_system_prompt"]] = (
+            body.custom_system_prompt
+        )
+        config.save_config()
+    return _research_settings_data()
+
+
+def _research_association_failed(
+    store: CloudJobStore, job_id: str, exc: Exception
+) -> HttpException:
+    failed_job = store.patch_job(
+        job_id,
+        status=CloudJobStatus.FAILED,
+        current_step="research_draft_association_failed",
+        error_code="RESEARCH_DRAFT_ASSOCIATION_FAILED",
+        error_message="research draft association failed",
+    )
+    return HttpException(
+        task_id=failed_job.id,
+        status_code=422,
+        message=public_research_message("RESEARCH_RESPONSE_INVALID"),
+        data={
+            "code": "RESEARCH_DRAFT_ASSOCIATION_FAILED",
+            "accounting": _safe_accounting(None),
+        },
+    )
 
 
 def _invalid_transition(job_id: str, action: str, status: CloudJobStatus) -> None:
@@ -321,6 +467,99 @@ def get_cloud_agent_draft_voice_audio(
     return FileResponse(path=str(path), media_type="audio/mpeg", filename="voice.mp3")
 
 
+@router.get("/cloud-agent/research/providers")
+def list_research_providers(
+    request: Request,
+    service: ResearchSettingsService = Depends(get_research_settings_service),
+):
+    del request
+    return utils.get_response(
+        200, [item.model_dump(mode="json") for item in service.list_providers()]
+    )
+
+
+@router.get("/cloud-agent/research/settings")
+def get_research_settings(
+    request: Request,
+    service: ResearchSettingsService = Depends(get_research_settings_service),
+):
+    del request, service
+    return utils.get_response(200, _research_settings_data())
+
+
+@router.put("/cloud-agent/research/settings")
+def update_research_settings(
+    body: ResearchSettingsPayload,
+    request: Request,
+    service: ResearchSettingsService = Depends(get_research_settings_service),
+):
+    del request, service
+    return utils.get_response(200, _update_research_settings(body))
+
+
+@router.put("/cloud-agent/research/providers/{provider_id}/api-key")
+def update_research_provider_api_key(
+    provider_id: str,
+    body: ResearchAPIKeyPatch,
+    request: Request,
+    service: ResearchSettingsService = Depends(get_research_settings_service),
+):
+    del request
+    try:
+        data = service.set_api_key(provider_id, body.api_key).model_dump(mode="json")
+    except ResearchError as exc:
+        raise _research_http_exception(exc) from exc
+    return utils.get_response(200, data)
+
+
+@router.delete("/cloud-agent/research/providers/{provider_id}/api-key")
+def delete_research_provider_api_key(
+    provider_id: str,
+    body: ConfirmResearchKeyRemoval,
+    request: Request,
+    service: ResearchSettingsService = Depends(get_research_settings_service),
+):
+    del request
+    try:
+        data = service.remove_api_key(provider_id, body.confirmed).model_dump(
+            mode="json"
+        )
+    except ResearchError as exc:
+        raise _research_http_exception(exc) from exc
+    return utils.get_response(200, data)
+
+
+@router.post("/cloud-agent/research/drafts")
+def create_research_draft(
+    body: ResearchDraftRequest,
+    request: Request,
+    service: ResearchScriptService = Depends(get_research_service),
+):
+    del request
+    try:
+        data = service.create_draft(body).model_dump(mode="json")
+    except ResearchError as exc:
+        raise _research_http_exception(exc) from exc
+    return utils.get_response(200, data)
+
+
+@router.get("/cloud-agent/research/drafts/{research_draft_id}")
+def get_research_draft(
+    research_draft_id: str,
+    request: Request,
+    store: ResearchDraftStore = Depends(get_research_draft_store),
+):
+    del request
+    draft = store.get(research_draft_id)
+    if draft is None:
+        raise HttpException(
+            task_id="cloud-agent-research",
+            status_code=404,
+            message=f"research draft not found: {research_draft_id}",
+        )
+    return utils.get_response(200, draft.model_dump(mode="json"))
+
+
 @router.post("/cloud-agent/jobs")
 def create_cloud_agent_job(
     request: Request,
@@ -328,14 +567,21 @@ def create_cloud_agent_job(
     store: CloudJobStore = Depends(get_cloud_job_store),
     storage: CloudJobStorage = Depends(get_cloud_job_storage),
     voices: DraftVoiceService = Depends(get_draft_voice_service),
+    research_store: ResearchDraftStore = Depends(get_research_draft_store),
 ):
     del request
     prepared_voice = str(body.prepared_voice_fingerprint or "").strip()
+    research_draft_id = str(body.research_draft_id or "").strip()
     if prepared_voice:
         try:
             voices.get(prepared_voice)
         except DraftVoiceError as exc:
             raise HttpException(task_id="cloud-agent-job", status_code=422, message=str(exc)) from exc
+    if research_draft_id:
+        try:
+            research_store.assert_script_matches(research_draft_id, body.script)
+        except ResearchError as exc:
+            raise _research_http_exception(exc) from exc
 
     job = store.create_job(body, status=CloudJobStatus.DRAFT)
     if prepared_voice:
@@ -352,6 +598,11 @@ def create_cloud_agent_job(
                 error_message="prepared narration could not be materialized",
             )
             raise HttpException(task_id=job.id, status_code=422, message="prepared narration could not be materialized") from exc
+    if research_draft_id:
+        try:
+            research_store.link_job(research_draft_id, job.id)
+        except Exception as exc:
+            raise _research_association_failed(store, job.id, exc) from exc
     job = store.patch_job(job.id, status=CloudJobStatus.QUEUED, current_step="queued")
     return utils.get_response(200, _job_data(job))
 
