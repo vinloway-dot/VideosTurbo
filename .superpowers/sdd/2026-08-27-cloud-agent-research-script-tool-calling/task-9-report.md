@@ -65,6 +65,6 @@ Outstanding concerns
 - `GET /api/v1/cloud-agent/research/settings` returned `provider="unsupported"`. This did not block the safe smoke because the endpoint still returned `200`, but it is worth reviewing before any future live research attempt.
 - VNC port `5900` is also listening on IPv6 loopback (`[::1]`) in addition to `127.0.0.1`. This remains loopback-only, so it stayed within the task's safe-boundary intent.
 
-Pending finalization
---------------------
-- The verification document change still needs its docs-only commit, push, and final CI confirmation.
+Final CI confirmation
+---------------------
+- After pushing docs commit `b853756`, Draft PR `#4` CI run `33097492762` passed on all three jobs while the PR remained Draft.
