@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-27
 
-**Status:** Approved in conversation; pending written-spec review
+**Status:** Approved by the operator on 2026-08-27
 
 **Scope:** Script drafting only. TTS, Google Flow, Canva, worker checkpoints, and final validation remain unchanged.
 
