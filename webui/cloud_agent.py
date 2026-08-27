@@ -727,41 +727,44 @@ def _refresh_script_editor(*, subject, language, words, custom_system_prompt):
 
 def _render_script_editor(*, brief, ui_state):
     with st.container(key="cloud_agent_script_card", border=True):
-        title_row = st.columns([1, 0.24], vertical_alignment="center")
-        title_row[0].subheader("Script editor")
-        if title_row[1].button(
-            "Regenerate",
-            key="cloud_agent_refresh_draft",
-            icon=":material/refresh:",
-            width="stretch",
-        ):
-            _refresh_script_editor(
-                subject=brief.subject,
-                language=brief.language,
-                words=brief.words,
-                custom_system_prompt=brief.custom_system_prompt,
-            )
-        if brief.script_mode == "Research Script":
-            summary = cloud_agent_ui.research_summary(
-                research_draft_id=ui_state.get("cloud_agent_research_draft_id"),
-                sources=ui_state.get("cloud_agent_research_sources", []),
-                accounting=ui_state.get("cloud_agent_research_accounting", {}),
-            )
-            cloud_agent_ui.render_research_summary(summary)
-        script = st.text_area(
-            "Script",
-            key="cloud_agent_script",
-            height=120,
-            label_visibility="collapsed",
-        )
-        with st.expander("View master prompt", expanded=False):
-            master_prompt = st.text_area(
-                "Master prompt",
-                key="cloud_agent_master_prompt",
-                disabled=True,
+        script = str(ui_state.get("cloud_agent_script") or "")
+        master_prompt = str(ui_state.get("cloud_agent_master_prompt") or "")
+        with st.expander("Script editor", expanded=bool(script)):
+            title_row = st.columns([1, 0.24], vertical_alignment="center")
+            title_row[0].subheader("Script editor")
+            if title_row[1].button(
+                "Regenerate",
+                key="cloud_agent_refresh_draft",
+                icon=":material/refresh:",
+                width="stretch",
+            ):
+                _refresh_script_editor(
+                    subject=brief.subject,
+                    language=brief.language,
+                    words=brief.words,
+                    custom_system_prompt=brief.custom_system_prompt,
+                )
+            if brief.script_mode == "Research Script":
+                summary = cloud_agent_ui.research_summary(
+                    research_draft_id=ui_state.get("cloud_agent_research_draft_id"),
+                    sources=ui_state.get("cloud_agent_research_sources", []),
+                    accounting=ui_state.get("cloud_agent_research_accounting", {}),
+                )
+                cloud_agent_ui.render_research_summary(summary)
+            script = st.text_area(
+                "Script",
+                key="cloud_agent_script",
+                height=120,
                 label_visibility="collapsed",
             )
-        st.caption(f"{len(script.split())} words")
+            with st.expander("View master prompt", expanded=False):
+                master_prompt = st.text_area(
+                    "Master prompt",
+                    key="cloud_agent_master_prompt",
+                    disabled=True,
+                    label_visibility="collapsed",
+                )
+            st.caption(f"{len(script.split())} words")
         return script, master_prompt
 
 

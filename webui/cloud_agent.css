@@ -146,7 +146,7 @@ div.st-key-cloud_agent_generation_setup_card [data-testid="stExpander"] {
 
 .vt-production-status {
     margin: 1.5rem 0 0.75rem;
-    padding: 1rem;
+    padding: 0.6rem;
     border: 1px solid var(--vt-border);
     border-radius: var(--vt-radius);
     background: var(--vt-surface);
@@ -170,7 +170,7 @@ div.st-key-cloud_agent_generation_setup_card [data-testid="stExpander"] {
     display: grid;
     grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 0.5rem;
-    margin: 1rem 0 0;
+    margin: 0.4rem 0 0;
     padding: 0;
     list-style: none;
 }
@@ -180,8 +180,8 @@ div.st-key-cloud_agent_generation_setup_card [data-testid="stExpander"] {
     align-items: center;
     justify-content: center;
     gap: 0.4rem;
-    min-height: 2.4rem;
-    padding: 0.45rem;
+    min-height: 2rem;
+    padding: 0.25rem;
     border: 1px solid var(--vt-border);
     border-radius: 9px;
     color: var(--vt-text-muted);

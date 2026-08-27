@@ -45,6 +45,45 @@ def test_script_mode_uses_approved_segmented_control_and_retained_key(monkeypatc
     ]
 
 
+def test_empty_script_editor_stays_collapsed_for_safe_default_layout(monkeypatch):
+    class Column:
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def button(self, *_args, **_kwargs):
+            return False
+
+    class Streamlit:
+        def __init__(self):
+            self.expanders = []
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def columns(self, *_args, **_kwargs):
+            return [Column(), Column()]
+
+        def expander(self, label, **kwargs):
+            self.expanders.append((label, kwargs))
+            return nullcontext()
+
+        def text_area(self, *_args, **_kwargs):
+            return ""
+
+        def caption(self, *_args, **_kwargs):
+            return None
+
+    fake = Streamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake)
+
+    cloud_agent._render_script_editor(
+        brief=cloud_agent._BriefSelection("", 130, "en-US", "Standard Script", ""),
+        ui_state={},
+    )
+
+    assert fake.expanders[0] == ("Script editor", {"expanded": False})
+
+
 class ExpanderStreamlit:
     def __init__(self):
         self.calls = []
