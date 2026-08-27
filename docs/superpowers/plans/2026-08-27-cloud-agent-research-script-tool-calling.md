@@ -933,8 +933,8 @@ Validate the final envelope at request time: every `source_ids_used` and
 at least one successful source must be listed in `source_ids_used`. A result that
 uses model knowledge but no source evidence fails with `SOURCE_EVIDENCE_EMPTY`.
 Every claim marked unstable must have a verified source/quote. The spoken script
-does not include those internal references unless the editable prompt requests
-citations. Then create the existing six-clip plan/master prompt, save provenance
+does not include those internal references unless the per-draft citation toggle
+is enabled. Then create the existing six-clip plan/master prompt, save provenance
 last, and return common draft result. On any error, persist no successful draft
 and create no job.
 

@@ -12,6 +12,7 @@ class ResearchDraftRequest(BaseModel):
     custom_model_id: str = Field(default="", max_length=256)
     source_urls: list[str] = Field(default_factory=list)
     custom_system_prompt: str = Field(default="", max_length=8000)
+    allow_citations: bool = False
 
     @field_validator(
         "subject",

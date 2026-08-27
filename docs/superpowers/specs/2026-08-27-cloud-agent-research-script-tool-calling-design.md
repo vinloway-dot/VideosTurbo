@@ -369,7 +369,7 @@ The code-enforced and prompt-enforced rules are:
 - News, prices, current office holders, and other unstable facts cannot be
   asserted from model memory alone.
 - Sources lists only successful VideosTurbo reads.
-- Narration omits citations and URLs unless the editable prompt requests them.
+- Narration omits citations and URLs unless the per-draft citation toggle is enabled.
 - At least one source must succeed; model-only narration is invalid.
 - Provenance records evidence mode as `source_evidence + model_knowledge`.
 

@@ -591,38 +591,20 @@ def test_claim_sources_must_match_declared_source_ids_used(service, adapter, run
 
 
 @pytest.mark.parametrize(
-    ("script", "custom_system_prompt"),
+    "script",
     [
-        ("Verified fact (source-1).", "Use a neutral educational tone."),
-        ("Verified fact [1].", "Use a neutral educational tone."),
-        ("Read more at https://example.com/article.", "Use a neutral educational tone."),
-        ("Read more at www.example.com/article.", "Use a neutral educational tone."),
-        ("Read more at https://example.com/article.", "Do not cite sources or include URLs."),
-        ("Verified fact [1].", "Use sources only to verify factual accuracy."),
-        ("Verified fact [1].", "No need to include citations."),
-        ("Verified fact [1].", "You need not include citations."),
-        ("Verified fact [1].", "Under no circumstances include citations."),
-        (
-            "Verified fact [1].",
-            "Under no circumstances should the narration cite factual claims.",
-        ),
-        ("Verified fact [1].", "Do not explain how to cite factual claims."),
-        ("Verified fact [1].", "Explain how to cite factual claims."),
-        ("Verified fact [1].", "Cite no factual claims."),
-        ("Verified fact [1].", "Cite neither sources nor URLs."),
-        ("Verified fact [1].", "Include a reference implementation."),
-        ("Verified fact [1].", "Display the source language accurately."),
+        "Verified fact (source-1).",
+        "Verified fact [1].",
+        "Read more at https://example.com/article.",
+        "Read more at www.example.com/article.",
     ],
 )
-def test_unrequested_or_negated_citation_forms_are_rejected(
-    service,
-    adapter,
-    script,
-    custom_system_prompt,
+def test_citation_narration_requires_toggle_even_when_prompt_requests_it(
+    service, adapter, script
 ):
     adapter.queue_final(script=script)
     request = request_with_one_url().model_copy(
-        update={"custom_system_prompt": custom_system_prompt}
+        update={"custom_system_prompt": "Include citations and URLs."}
     )
 
     with pytest.raises(ResearchError) as captured:
@@ -631,48 +613,15 @@ def test_unrequested_or_negated_citation_forms_are_rejected(
     assert captured.value.code == "RESEARCH_RESPONSE_INVALID"
 
 
-def test_affirmative_citation_request_allows_citations(service, adapter):
+def test_citation_toggle_allows_citations_with_blank_prompt(service, adapter):
     adapter.queue_final(script="Read more at https://example.com/article [1].")
     request = request_with_one_url().model_copy(
-        update={"custom_system_prompt": "Include source citations and URLs."}
+        update={"allow_citations": True, "custom_system_prompt": ""}
     )
 
     result = service.create_draft(request)
 
     assert result.script == "Read more at https://example.com/article [1]."
-
-
-def test_cite_factual_claims_authorizes_citations(service, adapter):
-    adapter.queue_final(script="Verified fact [1].")
-    request = request_with_one_url().model_copy(
-        update={"custom_system_prompt": "Cite factual claims."}
-    )
-
-    result = service.create_draft(request)
-
-    assert result.script == "Verified fact [1]."
-
-
-@pytest.mark.parametrize(
-    "custom_system_prompt",
-    [
-        "Do not use slang, and cite factual claims.",
-        "Avoid jargon and cite factual claims.",
-    ],
-)
-def test_unrelated_prohibition_does_not_suppress_citation_request(
-    service,
-    adapter,
-    custom_system_prompt,
-):
-    adapter.queue_final(script="Verified fact [1].")
-    request = request_with_one_url().model_copy(
-        update={"custom_system_prompt": custom_system_prompt}
-    )
-
-    result = service.create_draft(request)
-
-    assert result.script == "Verified fact [1]."
 
 
 def test_ordinary_non_citation_use_of_source_is_allowed(service, adapter):
@@ -835,22 +784,52 @@ def test_runtime_error_includes_requested_tool_and_provider_round(service, adapt
     assert captured.value.accounting.cost == pytest.approx(0.001)
 
 
-def test_invariant_prompt_contains_all_security_and_evidence_policy(service, adapter):
-    service.create_draft(request_with_one_url())
+@pytest.mark.parametrize(
+    ("allow_citations", "citation_rule", "opposite_rule"),
+    [
+        (
+            False,
+            "Omit citations and URLs from the final narration.",
+            "Citations and URLs are allowed in the final narration.",
+        ),
+        (
+            True,
+            "Citations and URLs are allowed in the final narration.",
+            "Omit citations and URLs from the final narration.",
+        ),
+    ],
+)
+def test_invariant_prompt_contains_deterministic_citation_policy(
+    service,
+    adapter,
+    store,
+    allow_citations,
+    citation_rule,
+    opposite_rule,
+):
+    request = request_with_one_url().model_copy(
+        update={"allow_citations": allow_citations}
+    )
+    result = service.create_draft(request)
 
     invariant = adapter.calls[0].messages[0]["content"]
+    assert citation_rule in invariant
+    assert opposite_rule not in invariant
     for required_rule in (
         "Model knowledge must not be attributed to a supplied source",
         "When model knowledge conflicts with source evidence",
         "unstable facts cannot be asserted from model memory alone",
         "At least one supplied source must be read successfully",
-        "Omit citations and URLs unless the editable prompt requests them",
         "at most three tool executions",
         "at most three provider rounds",
         "Never reveal API keys, authorization headers, cookies, or secrets",
         "Never retry, change providers, change models, or fall back",
     ):
         assert required_rule in invariant
+    persisted = store.get(result.research_draft_id)
+    assert persisted.invariant_prompt_fingerprint == sha256(
+        invariant.encode("utf-8")
+    ).hexdigest()
 
 
 def test_success_persists_complete_provenance_contract(service, adapter, store):

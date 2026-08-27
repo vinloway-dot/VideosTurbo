@@ -658,7 +658,7 @@ def test_blank_research_key_is_not_sent_as_replacement():
     assert cloud_agent._research_key_payload(" new-key ") == {"api_key": "new-key"}
 
 
-def test_research_attempt_timeout_covers_the_full_bounded_operation(monkeypatch):
+def test_research_payload_forwards_citation_toggle_and_bounded_timeout(monkeypatch):
     recorded = {}
 
     def api(method, path, **kwargs):
@@ -675,9 +675,11 @@ def test_research_attempt_timeout_covers_the_full_bounded_operation(monkeypatch)
         custom_model_id="",
         source_urls=["https://example.com/article"],
         custom_system_prompt="",
+        allow_citations=True,
     )
 
     assert recorded["timeout"] >= 300
+    assert recorded["json"]["allow_citations"] is True
 
 
 def test_research_mode_and_url_row_helpers_enforce_explicit_ui_bounds():
@@ -848,6 +850,7 @@ def test_research_failure_never_stores_draft(monkeypatch):
             self.errors = []
             self.captions = []
             self.radios = []
+            self.checkboxes = []
 
         def subheader(self, *_args, **_kwargs):
             return None
@@ -905,7 +908,8 @@ def test_research_failure_never_stores_draft(monkeypatch):
         def warning(self, *_args, **_kwargs):
             return None
 
-        def checkbox(self, *_args, **_kwargs):
+        def checkbox(self, label, **kwargs):
+            self.checkboxes.append((label, kwargs))
             return False
 
         def link_button(self, *_args, **_kwargs):
@@ -920,7 +924,10 @@ def test_research_failure_never_stores_draft(monkeypatch):
         def audio(self, *_args, **_kwargs):
             return None
 
-    def prepare_research_draft(**_kwargs):
+    prepared = {}
+
+    def prepare_research_draft(**kwargs):
+        prepared.update(kwargs)
         error = requests.HTTPError("research failed")
         error.response = Response()
         raise error
@@ -937,6 +944,11 @@ def test_research_failure_never_stores_draft(monkeypatch):
     cloud_agent.render_cloud_agent_panel()
 
     assert fake_streamlit.errors == ["กรุณาใส่ URL อย่างน้อยหนึ่งแหล่ง"]
+    assert (
+        "อนุญาตให้ใส่อ้างอิงในสคริปต์",
+        {"key": "cloud_agent_research_allow_citations", "value": False},
+    ) in fake_streamlit.checkboxes
+    assert prepared["allow_citations"] is False
 
 
 def test_start_button_forwards_stored_research_draft_id(monkeypatch):

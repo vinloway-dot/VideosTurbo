@@ -288,6 +288,21 @@ def test_research_draft_route_is_on_existing_cloud_agent_router(tmp_path, monkey
     assert "source_hash" not in response.json()["data"]["sources"][0]
 
 
+def test_research_draft_route_forwards_citation_toggle(tmp_path, monkeypatch):
+    service = _ResearchServiceStub()
+    response = research_client(
+        tmp_path,
+        monkeypatch,
+        research_service=service,
+    ).post(
+        "/api/v1/cloud-agent/research/drafts",
+        json={**research_payload(), "allow_citations": True},
+    )
+
+    assert response.status_code == 200
+    assert service.calls[0].allow_citations is True
+
+
 def test_research_route_inventory_uses_only_cloud_agent_prefix():
     routes = registered_cloud_agent_routes()
 

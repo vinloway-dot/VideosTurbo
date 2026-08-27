@@ -24,7 +24,7 @@ def valid_job_payload() -> dict:
     }
 
 
-def test_research_request_preserves_urls_for_domain_preflight():
+def test_research_request_preserves_urls_and_defaults_citations_off():
     request = ResearchDraftRequest(
         subject="topic",
         language="",
@@ -37,6 +37,12 @@ def test_research_request_preserves_urls_for_domain_preflight():
     )
 
     assert request.source_urls == []
+    assert request.allow_citations is False
+    assert request.model_dump(mode="json")["allow_citations"] is False
+
+    enabled = request.model_copy(update={"allow_citations": True})
+
+    assert enabled.allow_citations is True
 
 
 def test_error_exposes_code_but_not_internal_detail():

@@ -87,12 +87,15 @@ RESEARCH_INVARIANT_PROMPT = "\n".join(
         "Model knowledge must not be attributed to a supplied source.",
         "When model knowledge conflicts with source evidence, prefer the source or disclose or omit the conflict.",
         "News, prices, current office holders, and other unstable facts cannot be asserted from model memory alone.",
-        "Omit citations and URLs unless the editable prompt requests them.",
         "After using tools, return a final JSON evidence envelope.",
         "Every factual source attribution must identify a successful source and exact supporting quote.",
         "Every unstable claim must include a verified source quote.",
     ]
 )
+_RESEARCH_CITATION_POLICY = {
+    False: "Omit citations and URLs from the final narration.",
+    True: "Citations and URLs are allowed in the final narration.",
+}
 
 
 class ResearchAccounting(BaseModel):
@@ -286,9 +289,20 @@ class ResearchScriptService:
         if custom_prompt:
             editable_parts.extend(["User style requirements:", custom_prompt])
         return [
-            {"role": "system", "content": RESEARCH_INVARIANT_PROMPT},
+            {
+                "role": "system",
+                "content": self._invariant_prompt(request.allow_citations),
+            },
             {"role": "user", "content": "\n".join(editable_parts)},
         ]
+
+    def _invariant_prompt(self, allow_citations: bool) -> str:
+        return "\n".join(
+            [
+                RESEARCH_INVARIANT_PROMPT,
+                _RESEARCH_CITATION_POLICY[bool(allow_citations)],
+            ]
+        )
 
     def _provider_request(
         self,
@@ -627,7 +641,7 @@ class ResearchScriptService:
                     request.custom_system_prompt
                 ),
                 invariant_prompt_fingerprint=self._fingerprint(
-                    RESEARCH_INVARIANT_PROMPT
+                    self._invariant_prompt(request.allow_citations)
                 ),
                 tool_calls=state.accounting.tool_calls,
                 provider_rounds=state.accounting.provider_rounds,
@@ -741,9 +755,9 @@ class ResearchScriptService:
                 "declared source ids did not match evidence claims",
                 accounting=accounting,
             )
-        if self._narration_has_citation(
-            final_payload.script
-        ) and not self._prompt_requests_citations(request.custom_system_prompt):
+        if self._narration_has_citation(final_payload.script) and not bool(
+            request.allow_citations
+        ):
             raise ResearchError(
                 "RESEARCH_RESPONSE_INVALID",
                 "narration included an unrequested citation or URL",
@@ -761,54 +775,6 @@ class ResearchScriptService:
                 r"\bsource-[a-z0-9][a-z0-9_-]*\b",
             )
         )
-
-    def _prompt_requests_citations(self, value: str) -> bool:
-        prompt = str(value or "").lower()
-        intent_units = re.split(
-            r"[.!?;\n]+|\b(?:but|however)\b|(?:,\s*)?\band\b",
-            prompt,
-        )
-        request_patterns = (
-            re.compile(r"\b(?P<action>cite)\b"),
-            re.compile(
-                r"\b(?P<action>reference|link\s+to)\b"
-                r"[^.!?;\n]{0,80}?\b(?:sources?|claims?|facts?|urls?)\b"
-            ),
-            re.compile(
-                r"\b(?P<action>include|add|provide|show|display|list)\b"
-                r"[^.!?;\n]{0,80}?\b(?:citations?|urls?|references|sources|"
-                r"source\s+(?:citations?|links?)|reference\s+(?:links?|list|section)|"
-                r"links?\s+to\s+sources?)\b"
-            ),
-            re.compile(
-                r"\b(?P<action>use)\b[^.!?;\n]{0,80}?"
-                r"\b(?:citations?|urls?|references|source\s+(?:citations?|links?)|"
-                r"reference\s+(?:links?|list|section))\b"
-            ),
-        )
-        negation = re.compile(
-            r"\b(?:do\s+not|don't|never|need\s+not|no\s+need\s+to|"
-            r"not\s+(?:necessary|required)\s+to|under\s+no\s+circumstances|"
-            r"(?:should|must|may|can|could|would|will)\s+not|avoid(?:ing)?|"
-            r"omit(?:ting)?|without|refrain\s+from)\b"
-        )
-        meta_instruction = re.compile(
-            r"\b(?:explain|describe|discuss|teach|demonstrate|show|tell)\b"
-            r"[^.!?;\n]{0,40}\bhow\s+to\s*$"
-        )
-        post_action_negation = re.compile(r"^\s*(?:no|neither)\b")
-        for intent_unit in intent_units:
-            for pattern in request_patterns:
-                for match in pattern.finditer(intent_unit):
-                    prefix = intent_unit[: match.start("action")]
-                    action_tail = intent_unit[match.end("action") :]
-                    if (
-                        negation.search(prefix) is None
-                        and meta_instruction.search(prefix) is None
-                        and post_action_negation.search(action_tail) is None
-                    ):
-                        return True
-        return False
 
     def _normalize_evidence_text(self, value: str) -> str:
         return re.sub(r"\s+", " ", str(value or "")).strip()

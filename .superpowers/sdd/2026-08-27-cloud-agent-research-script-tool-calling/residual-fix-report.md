@@ -297,3 +297,58 @@ All checks passed!
 
 All fix-round-3 checks remained local and non-paid. Protected configuration backups
 remained unmodified and unstaged.
+
+## Architectural correction: explicit per-draft citation toggle
+
+### Approved correction
+
+Citation authorization no longer depends on natural-language prompt parsing.
+`ResearchDraftRequest.allow_citations` is the sole authorization signal and defaults
+to `false` for backward compatibility. The Research WebUI exposes the opt-in checkbox
+`อนุญาตให้ใส่อ้างอิงในสคริปต์` and forwards its value through the draft API request;
+Standard mode remains unchanged.
+
+The heuristic `_prompt_requests_citations` was removed. Existing citation detection
+is retained, so citation-bearing narration fails whenever the toggle is off, including
+when the editable prompt asks for citations. With the toggle on, citation-bearing
+narration succeeds even with a blank editable prompt. The immutable provider prompt
+and its persisted fingerprint now deterministically include the corresponding allowed
+or omitted policy.
+
+The approved design and implementation plan were updated only where they previously
+described editable-prompt parsing as the citation authorization mechanism.
+
+### RED evidence
+
+```text
+$ uv run pytest test/services/cloud_agent/test_research_contracts.py::test_research_request_preserves_urls_and_defaults_citations_off test/services/cloud_agent/test_research_service.py::test_citation_narration_requires_toggle_even_when_prompt_requests_it test/services/cloud_agent/test_research_service.py::test_citation_toggle_allows_citations_with_blank_prompt test/services/cloud_agent/test_research_service.py::test_invariant_prompt_contains_deterministic_citation_policy test/services/cloud_agent/test_research_controller.py::test_research_draft_route_forwards_citation_toggle test/services/test_cloud_agent_webui.py::test_research_payload_forwards_citation_toggle_and_bounded_timeout test/services/test_cloud_agent_webui.py::test_research_failure_never_stores_draft -q --tb=short
+11 failed, 11 warnings in 4.47s
+```
+
+The intended failures showed the missing model/API field, continued prompt-based
+authorization, rejection of toggle-enabled output because the toggle did not yet
+exist, absent deterministic prompt policies, missing controller/helper forwarding,
+and the missing Research checkbox.
+
+### GREEN evidence
+
+```text
+$ uv run pytest test/services/cloud_agent/test_research_contracts.py::test_research_request_preserves_urls_and_defaults_citations_off test/services/cloud_agent/test_research_service.py::test_citation_narration_requires_toggle_even_when_prompt_requests_it test/services/cloud_agent/test_research_service.py::test_citation_toggle_allows_citations_with_blank_prompt test/services/cloud_agent/test_research_service.py::test_invariant_prompt_contains_deterministic_citation_policy test/services/cloud_agent/test_research_controller.py::test_research_draft_route_forwards_citation_toggle test/services/test_cloud_agent_webui.py::test_research_payload_forwards_citation_toggle_and_bounded_timeout test/services/test_cloud_agent_webui.py::test_research_failure_never_stores_draft -q --tb=short
+11 passed, 11 warnings in 3.83s
+
+$ uv run pytest test/services/cloud_agent/test_research_contracts.py test/services/cloud_agent/test_research_service.py test/services/cloud_agent/test_research_controller.py test/services/test_cloud_agent_webui.py -q --tb=short
+95 passed, 11 warnings in 22.40s
+
+$ uv run pytest test/services/cloud_agent/test_research_contracts.py test/services/cloud_agent/test_research_settings.py test/services/cloud_agent/test_research_store.py test/services/cloud_agent/test_research_network.py test/services/cloud_agent/test_research_runtime.py test/services/cloud_agent/test_research_adapters.py test/services/cloud_agent/test_research_service.py test/services/cloud_agent/test_research_controller.py test/services/test_cloud_agent_controller.py test/services/test_cloud_agent_webui.py -q --tb=short
+198 passed, 11 warnings in 29.82s
+
+$ uv run ruff check app webui test
+All checks passed!
+
+$ uv lock --check
+Resolved 130 packages in 2ms
+```
+
+All architectural-correction checks remained local and non-paid. No real provider or
+browser calls were made. Protected configuration backups remained unmodified and
+unstaged.

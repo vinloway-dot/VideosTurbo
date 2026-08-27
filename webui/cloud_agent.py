@@ -218,6 +218,7 @@ def _prepare_research_draft(
     custom_model_id,
     source_urls,
     custom_system_prompt,
+    allow_citations,
 ):
     return _api(
         "POST",
@@ -231,6 +232,7 @@ def _prepare_research_draft(
             "custom_model_id": custom_model_id,
             "source_urls": source_urls,
             "custom_system_prompt": custom_system_prompt,
+            "allow_citations": bool(allow_citations),
         },
         timeout=RESEARCH_DRAFT_TIMEOUT_SECONDS,
     )
@@ -750,6 +752,13 @@ def render_cloud_agent_panel():
                 else:
                     st.error(feedback_message)
         st.caption("Source URLs")
+        research_allow_citations = bool(
+            st.checkbox(
+                "อนุญาตให้ใส่อ้างอิงในสคริปต์",
+                value=False,
+                key="cloud_agent_research_allow_citations",
+            )
+        )
         source_url_count = _research_url_row_count(
             st.number_input(
                 "Number of Source URLs",
@@ -793,6 +802,7 @@ def render_cloud_agent_panel():
                                     ),
                                     source_urls=_research_source_urls(source_url_values),
                                     custom_system_prompt=research_custom_system_prompt,
+                                    allow_citations=research_allow_citations,
                                 )
                             )
                     st.rerun()
