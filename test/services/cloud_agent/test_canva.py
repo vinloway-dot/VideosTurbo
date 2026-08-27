@@ -129,6 +129,39 @@ class FakeCanvaEditorPage:
             Path(output).write_bytes(b"final-mp4")
 
 
+class _CaptionControl:
+    def __init__(self, page, name):
+        self.page = page
+        self.name = name
+
+    def click(self):
+        self.page.actions.append(("caption_control", self.name))
+
+    def wait_for(self, **_kwargs):
+        return None
+
+
+class FakeCaptionStylePage:
+    """Models Canva's Captions flow ending in an explicit style selection."""
+
+    def __init__(self):
+        self.actions = []
+
+    def select_video_clip(self, index):
+        self.actions.append(("select_clip", index))
+
+    def get_by_role(self, role, *, name, exact):
+        assert role == "button"
+        assert exact is True
+        assert name in {"Captions", "Generate captions"}
+        return _CaptionControl(self, name)
+
+    def get_by_text(self, name, *, exact):
+        assert exact is True
+        assert name == "Classic"
+        return _CaptionControl(self, name)
+
+
 class FakePreparedCanvaEditorPage(FakeCanvaEditorPage):
     """Boundary double for verified workspace preparation operations."""
 
@@ -1280,6 +1313,21 @@ def test_canva_moves_current_audio_track_to_timeline_zero_before_verifying():
     assert page.audio_track_selected is True
     assert page.audio_position_text == "0 seconds"
     assert page.mouse.moves
+
+
+def test_canva_auto_captions_selects_classic_style_after_generation():
+    """Catches exporting generated captions without applying the required Classic style."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    page = FakeCaptionStylePage()
+
+    client._generate_auto_captions(page)
+
+    assert page.actions == [
+        ("select_clip", 1),
+        ("caption_control", "Captions"),
+        ("caption_control", "Generate captions"),
+        ("caption_control", "Classic"),
+    ]
 
 
 def test_canva_waits_for_final_download_to_become_enabled_after_captions():
