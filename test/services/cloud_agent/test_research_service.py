@@ -602,6 +602,12 @@ def test_claim_sources_must_match_declared_source_ids_used(service, adapter, run
         ("Verified fact [1].", "No need to include citations."),
         ("Verified fact [1].", "You need not include citations."),
         ("Verified fact [1].", "Under no circumstances include citations."),
+        (
+            "Verified fact [1].",
+            "Under no circumstances should the narration cite factual claims.",
+        ),
+        ("Verified fact [1].", "Do not explain how to cite factual claims."),
+        ("Verified fact [1].", "Explain how to cite factual claims."),
         ("Verified fact [1].", "Include a reference implementation."),
         ("Verified fact [1].", "Display the source language accurately."),
     ],

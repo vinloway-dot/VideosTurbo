@@ -199,3 +199,56 @@ All checks passed!
 
 All review-round checks remained local and non-paid. The protected configuration
 backups remained unmodified and unstaged.
+
+## Fix round 2: scoped negation and meta-instructions
+
+### Review finding
+
+The standalone `cite` action still became authorization when negation was more than
+two words before it. This allowed long scoped prohibitions and explanatory
+instructions about citation mechanics to authorize citations in final narration.
+
+Citation intent now evaluates negation across the complete same clause. Punctuation
+and explicit contrast markers still delimit clauses, so a later clear positive request
+can authorize citations. `how to cite` explanatory/meta constructions are rejected,
+while the direct affirmative `Cite factual claims.` remains authorized.
+
+### RED evidence
+
+```text
+$ uv run pytest test/services/cloud_agent/test_research_service.py::test_unrequested_or_negated_citation_forms_are_rejected test/services/cloud_agent/test_research_service.py::test_cite_factual_claims_authorizes_citations -q
+2 failed, 12 passed in 2.25s
+```
+
+The expected failures accepted `Under no circumstances should the narration cite
+factual claims.` and `Do not explain how to cite factual claims.` as citation
+authorization.
+
+The explanatory/meta guard was independently mutation-checked after removing it:
+
+```text
+$ uv run pytest test/services/cloud_agent/test_research_service.py::test_unrequested_or_negated_citation_forms_are_rejected -q
+1 failed, 13 passed in 1.99s
+```
+
+The expected failure accepted `Explain how to cite factual claims.` as permission to
+emit citations.
+
+### GREEN evidence
+
+```text
+$ uv run pytest test/services/cloud_agent/test_research_service.py::test_unrequested_or_negated_citation_forms_are_rejected test/services/cloud_agent/test_research_service.py::test_affirmative_citation_request_allows_citations test/services/cloud_agent/test_research_service.py::test_cite_factual_claims_authorizes_citations test/services/cloud_agent/test_research_service.py::test_ordinary_non_citation_use_of_source_is_allowed -q
+17 passed in 1.82s
+
+$ uv run pytest test/services/cloud_agent/test_research_service.py -q
+44 passed in 2.95s
+
+$ uv run pytest test/services/cloud_agent/test_research_contracts.py test/services/cloud_agent/test_research_settings.py test/services/cloud_agent/test_research_store.py test/services/cloud_agent/test_research_network.py test/services/cloud_agent/test_research_runtime.py test/services/cloud_agent/test_research_adapters.py test/services/cloud_agent/test_research_service.py test/services/cloud_agent/test_research_controller.py test/services/test_cloud_agent_controller.py test/services/test_cloud_agent_webui.py -q
+207 passed, 11 warnings in 27.53s
+
+$ uv run ruff check app webui test
+All checks passed!
+```
+
+All fix-round-2 checks remained local and non-paid. Protected configuration backups
+remained unmodified and unstaged.

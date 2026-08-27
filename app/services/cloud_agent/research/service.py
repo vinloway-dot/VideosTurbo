@@ -784,22 +784,22 @@ class ResearchScriptService:
             ),
         )
         negation = re.compile(
-            r"(?:\b(?:do\s+not|don't|never|need\s+not|no\s+need\s+to|"
-            r"not\s+(?:necessary|required)\s+to|under\s+no\s+circumstances|"
-            r"(?:should|must|may|can|could|would|will)\s+not)\b"
-            r"(?:\s+\w+){0,2}\s*)$"
-        )
-        shared_negation = re.compile(
             r"\b(?:do\s+not|don't|never|need\s+not|no\s+need\s+to|"
-            r"under\s+no\s+circumstances)\b[^.!?;\n]{0,60}\bor\s*$"
+            r"not\s+(?:necessary|required)\s+to|under\s+no\s+circumstances|"
+            r"(?:should|must|may|can|could|would|will)\s+not|avoid(?:ing)?|"
+            r"omit(?:ting)?|without|refrain\s+from)\b"
+        )
+        meta_instruction = re.compile(
+            r"\b(?:explain|describe|discuss|teach|demonstrate|show|tell)\b"
+            r"[^.!?;\n]{0,40}\bhow\s+to\s*$"
         )
         for clause in clauses:
             for pattern in request_patterns:
                 for match in pattern.finditer(clause):
                     prefix = clause[: match.start("action")]
                     if (
-                        negation.search(prefix[-80:]) is None
-                        and shared_negation.search(prefix[-80:]) is None
+                        negation.search(prefix) is None
+                        and meta_instruction.search(prefix) is None
                     ):
                         return True
         return False
