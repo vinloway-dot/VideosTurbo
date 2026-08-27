@@ -52,6 +52,17 @@ CLOUD_AGENT_DEFAULTS = {
     "cloud_agent_default_custom_system_prompt": "",
 }
 
+RESEARCH_DEFAULTS = {
+    "cloud_agent_research_default_provider": "openrouter",
+    "cloud_agent_research_openrouter_model": "openai/gpt-5.6-sol-pro",
+    "cloud_agent_research_openrouter_custom_model": "openai/gpt-5.6-sol-pro",
+    "cloud_agent_research_aihubmix_model": "gpt-5.6-sol",
+    "cloud_agent_research_aihubmix_custom_model": "gpt-5.6-sol",
+    "cloud_agent_research_custom_system_prompt": "",
+    "cloud_agent_research_openrouter_api_key": "",
+    "cloud_agent_research_aihubmix_api_key": "",
+}
+
 
 class _SynchronizedConfig(dict):
     """保持 dict 使用方式不变，同时让运行期配置写操作服从同一把锁。"""
@@ -113,6 +124,8 @@ class _SynchronizedConfig(dict):
 def _apply_cloud_agent_defaults(app_config):
     """Apply Cloud Agent defaults without replacing existing user settings."""
     for key, value in CLOUD_AGENT_DEFAULTS.items():
+        app_config.setdefault(key, copy.deepcopy(value))
+    for key, value in RESEARCH_DEFAULTS.items():
         app_config.setdefault(key, copy.deepcopy(value))
     return app_config
 

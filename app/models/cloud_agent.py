@@ -64,6 +64,7 @@ class CloudJobCreate(BaseModel):
     script: str
     master_prompt: str
     clip_plan: SixClipPlan
+    research_draft_id: str = Field(default="", exclude=True, max_length=64)
     language: str = ""
     target_words: int = Field(default=130, ge=40, le=400)
     tts_provider: str
