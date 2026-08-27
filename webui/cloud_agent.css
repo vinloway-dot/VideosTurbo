@@ -208,3 +208,30 @@ div.st-key-cloud_agent_generation_setup_card [data-testid="stExpander"] {
 @media (max-width: 760px) {
     .vt-production-status__stages { grid-template-columns: 1fr; }
 }
+
+@media (max-width: 1100px) {
+    div[data-testid="stMainBlockContainer"] { padding-inline: 1rem; }
+    div[class*="st-key-cloud_agent_workspace"] div[data-testid="stHorizontalBlock"] {
+        flex-wrap: wrap;
+    }
+    div[class*="st-key-cloud_agent_workspace"] div[data-testid="column"] {
+        flex: 1 1 100% !important;
+        width: 100% !important;
+    }
+}
+
+@media (max-width: 760px) {
+    .vt-workflow { grid-template-columns: 1fr; }
+    .vt-system-status { margin-top: 2rem; }
+    div[data-testid="stMainBlockContainer"] { padding: 0.9rem 0.7rem 1.5rem; }
+    div[class*="st-key-cloud_agent_"] button { width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+    }
+}

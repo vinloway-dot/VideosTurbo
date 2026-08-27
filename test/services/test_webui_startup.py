@@ -46,6 +46,17 @@ class TestWebuiStartup(unittest.TestCase):
                     for item in app.caption
                 )
 
+                button_labels = [item.label for item in app.button]
+                for required in (
+                    "Generate script",
+                    "Create voice",
+                    "Continue to production",
+                ):
+                    if button_labels.count(required) != 1:
+                        raise RuntimeError(
+                            f"unexpected {{required!r}} count: {{button_labels}}"
+                        )
+
                 import app.config
 
                 project_root = Path({str(ROOT_DIR)!r}).resolve()

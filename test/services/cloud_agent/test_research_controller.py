@@ -243,11 +243,17 @@ def _research_client(
         "cloud_agent_research_openrouter_custom_model",
         "openai/gpt-5.6-sol-pro",
     )
+    monkeypatch.delitem(
+        config.app, "cloud_agent_research_openrouter_api_key", raising=False
+    )
     monkeypatch.setitem(config.app, "cloud_agent_research_aihubmix_model", "gpt-5.6-sol")
     monkeypatch.setitem(
         config.app,
         "cloud_agent_research_aihubmix_custom_model",
         "gpt-5.6-sol",
+    )
+    monkeypatch.delitem(
+        config.app, "cloud_agent_research_aihubmix_api_key", raising=False
     )
     monkeypatch.setitem(config.app, "cloud_agent_research_custom_system_prompt", "")
     client = TestClient(app, raise_server_exceptions=False)

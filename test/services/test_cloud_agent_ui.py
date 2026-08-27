@@ -42,6 +42,22 @@ def test_cloud_agent_theme_is_a_project_local_css_asset():
     assert "--vt-primary:" in css_path.read_text(encoding="utf-8")
 
 
+def test_cloud_agent_theme_includes_responsive_and_reduced_motion_rules():
+    css = Path("webui/cloud_agent.css").read_text(encoding="utf-8")
+    cloud_agent_source = Path("webui/cloud_agent.py").read_text(encoding="utf-8")
+
+    assert 'with st.container(key="cloud_agent_workspace"):' in cloud_agent_source
+    assert "@media (max-width: 1100px)" in css
+    assert "flex-wrap: wrap;" in css
+    assert "flex: 1 1 100% !important;" in css
+    assert "@media (max-width: 760px)" in css
+    assert ".vt-workflow { grid-template-columns: 1fr; }" in css
+    assert "div[class*=\"st-key-cloud_agent_\"] button { width: 100%; }" in css
+    assert "@media (prefers-reduced-motion: reduce)" in css
+    assert "transition-duration: 0.01ms !important;" in css
+    assert "animation-iteration-count: 1 !important;" in css
+
+
 def test_workflow_step_advances_only_from_accepted_local_artifacts():
     assert derive_workflow_step(False, False, None) == 1
     assert derive_workflow_step(True, False, None) == 2

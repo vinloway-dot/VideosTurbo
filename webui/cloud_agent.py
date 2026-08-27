@@ -1274,33 +1274,36 @@ def render_cloud_agent_panel():
             job_snapshot,
         )
     )
-    workspace = st.columns([1.85, 1], gap="large", vertical_alignment="top")
-    with workspace[0]:
-        brief = _render_video_brief(
-            ui_state=ui_state,
-            defaults=defaults,
-            research_settings=research_settings,
-            research_provider_catalog=research_provider_catalog,
-        )
-        script, master_prompt = _render_script_editor(brief=brief, ui_state=ui_state)
-    with workspace[1]:
-        generation = _render_generation_setup(
-            ui_state=ui_state,
-            defaults=defaults,
-            research_settings=research_settings,
-            research_provider_catalog=research_provider_catalog,
-            script=script,
-            script_mode=brief.script_mode,
-            research_provider=brief.research_provider,
-            research_model=brief.research_model,
-        )
-        _render_start_action(
-            brief=brief,
-            script=script,
-            master_prompt=master_prompt,
-            generation=generation,
-            ui_state=ui_state,
-        )
+    with st.container(key="cloud_agent_workspace"):
+        workspace = st.columns([1.85, 1], gap="large", vertical_alignment="top")
+        with workspace[0]:
+            brief = _render_video_brief(
+                ui_state=ui_state,
+                defaults=defaults,
+                research_settings=research_settings,
+                research_provider_catalog=research_provider_catalog,
+            )
+            script, master_prompt = _render_script_editor(
+                brief=brief, ui_state=ui_state
+            )
+        with workspace[1]:
+            generation = _render_generation_setup(
+                ui_state=ui_state,
+                defaults=defaults,
+                research_settings=research_settings,
+                research_provider_catalog=research_provider_catalog,
+                script=script,
+                script_mode=brief.script_mode,
+                research_provider=brief.research_provider,
+                research_model=brief.research_model,
+            )
+            _render_start_action(
+                brief=brief,
+                script=script,
+                master_prompt=master_prompt,
+                generation=generation,
+                ui_state=ui_state,
+            )
 
     job_snapshot = dict(ui_state.get("cloud_agent_job_snapshot") or {})
     cloud_agent_ui.render_production_status(

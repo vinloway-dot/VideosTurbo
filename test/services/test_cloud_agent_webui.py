@@ -559,6 +559,9 @@ def test_pause_refreshes_snapshot_without_mutating_the_lookup_widget(monkeypatch
         def columns(self, _count, **_kwargs):
             return [Column(), Column(), Column(), Column()]
 
+        def container(self, **_kwargs):
+            return nullcontext()
+
         def button(self, *_args, **_kwargs):
             return False
 
