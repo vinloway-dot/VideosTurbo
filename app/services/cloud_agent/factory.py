@@ -21,6 +21,12 @@ from app.services.cloud_agent.defaults import CloudAgentDefaultsService
 from app.services.cloud_agent.retry import PreFlowRetryService
 from app.services.cloud_agent.worker import CloudAgentWorker
 from app.services.cloud_agent.workflow import CloudAgentWorkflow
+from app.services.cloud_agent.research.adapters import (
+    AIHubMixToolCallingAdapter,
+    OpenRouterToolCallingAdapter,
+)
+from app.services.cloud_agent.research.runtime import ResearchToolRuntime
+from app.services.cloud_agent.research.service import ResearchScriptService
 from app.services.cloud_agent.research.settings import ResearchSettingsService
 from app.services.cloud_agent.research.store import ResearchDraftStore
 
@@ -125,6 +131,18 @@ def build_research_settings_service() -> ResearchSettingsService:
 
 def build_research_draft_store() -> ResearchDraftStore:
     return ResearchDraftStore(str(config.app["cloud_agent_db_path"]))
+
+
+def build_research_script_service() -> ResearchScriptService:
+    return ResearchScriptService(
+        runtime=ResearchToolRuntime(),
+        settings=build_research_settings_service(),
+        store=build_research_draft_store(),
+        adapters={
+            "openrouter": OpenRouterToolCallingAdapter(),
+            "aihubmix": AIHubMixToolCallingAdapter(),
+        },
+    )
 
 
 def build_worker() -> CloudAgentWorker:
