@@ -449,40 +449,7 @@ def render_cloud_agent_panel():
     ui_state.setdefault(
         "cloud_agent_custom_system_prompt", defaults["custom_system_prompt"]
     )
-    research_settings = {
-        "provider": "openrouter",
-        "openrouter_model": "openai/gpt-5.6-sol-pro",
-        "openrouter_custom_model_id": "",
-        "aihubmix_model": "gpt-5.6-sol",
-        "aihubmix_custom_model_id": "",
-        "custom_system_prompt": "",
-    }
-    research_provider_catalog = _fallback_research_provider_catalog()
-    if hasattr(st, "runtime"):
-        try:
-            research_settings.update(_load_research_settings())
-            research_provider_catalog = _load_research_provider_catalog()
-        except requests.RequestException as exc:
-            st.error(_api_error_message(exc))
-    for key, value in (
-        ("cloud_agent_research_provider", research_settings["provider"]),
-        ("cloud_agent_research_openrouter_model", research_settings["openrouter_model"]),
-        (
-            "cloud_agent_research_openrouter_custom_model_id",
-            research_settings["openrouter_custom_model_id"],
-        ),
-        ("cloud_agent_research_aihubmix_model", research_settings["aihubmix_model"]),
-        (
-            "cloud_agent_research_aihubmix_custom_model_id",
-            research_settings["aihubmix_custom_model_id"],
-        ),
-        (
-            "cloud_agent_research_custom_system_prompt",
-            research_settings["custom_system_prompt"],
-        ),
-        ("cloud_agent_script_mode", "Standard Script"),
-    ):
-        ui_state.setdefault(key, value)
+    ui_state.setdefault("cloud_agent_script_mode", "Standard Script")
     st.subheader("Cloud Agent")
     subject = st.text_area(
         "Video Subject",
@@ -534,116 +501,6 @@ def render_cloud_agent_panel():
             ["Standard Script", "Research Script"],
             key="cloud_agent_script_mode",
         )
-    research_provider_labels = {
-        item["id"]: item["label"] for item in research_provider_catalog
-    }
-    if ui_state.get("cloud_agent_research_provider") not in research_provider_labels:
-        ui_state["cloud_agent_research_provider"] = next(
-            iter(research_provider_labels), "openrouter"
-        )
-    research_provider = st.selectbox(
-        "Research Provider",
-        list(research_provider_labels),
-        format_func=lambda value: research_provider_labels[value],
-        key="cloud_agent_research_provider",
-    )
-    selected_provider_metadata = next(
-        (
-            item
-            for item in research_provider_catalog
-            if item["id"] == research_provider
-        ),
-        {"api_key_configured": False},
-    )
-    with st.expander("Research Settings", expanded=False):
-        openrouter_model = st.text_input(
-            "OpenRouter Model",
-            key="cloud_agent_research_openrouter_model",
-        )
-        openrouter_custom_model_id = st.text_input(
-            "OpenRouter Custom Model ID",
-            key="cloud_agent_research_openrouter_custom_model_id",
-        )
-        aihubmix_model = st.text_input(
-            "AIHubMix Model",
-            key="cloud_agent_research_aihubmix_model",
-        )
-        aihubmix_custom_model_id = st.text_input(
-            "AIHubMix Custom Model ID",
-            key="cloud_agent_research_aihubmix_custom_model_id",
-        )
-        research_custom_system_prompt = st.text_area(
-            "Research Custom System Prompt",
-            key="cloud_agent_research_custom_system_prompt",
-            max_chars=8000,
-            help="Leave blank to use the research system default prompt.",
-        )
-        if st.button(
-            "Save Research Settings",
-            key="cloud_agent_save_research_settings",
-        ):
-            try:
-                verified, message = _save_and_verify_research_settings(
-                    {
-                        "provider": research_provider,
-                        "openrouter_model": openrouter_model,
-                        "openrouter_custom_model_id": openrouter_custom_model_id,
-                        "aihubmix_model": aihubmix_model,
-                        "aihubmix_custom_model_id": aihubmix_custom_model_id,
-                        "custom_system_prompt": research_custom_system_prompt,
-                    }
-                )
-                if verified:
-                    ui_state["cloud_agent_research_settings_feedback"] = message
-                    st.rerun()
-                else:
-                    st.error(message)
-            except requests.RequestException as exc:
-                st.error(_api_error_message(exc))
-        if feedback := ui_state.get("cloud_agent_research_settings_feedback"):
-            st.success(feedback)
-    with st.expander("Research Provider Key", expanded=False):
-        st.caption(
-            f"{research_provider_labels.get(research_provider, research_provider)} API key: "
-            f"{'configured' if selected_provider_metadata.get('api_key_configured') else 'not configured'}"
-        )
-        research_api_key = st.text_input(
-            "Research API Key",
-            type="password",
-            key=f"cloud_agent_research_api_key_{research_provider}",
-        )
-        remove_research_key = bool(
-            hasattr(st, "checkbox")
-            and st.checkbox(
-                "Remove stored research API key",
-                key=f"cloud_agent_research_remove_key_{research_provider}",
-            )
-        )
-        if st.button(
-            "Save Research API Key",
-            key="cloud_agent_save_research_api_key",
-        ):
-            try:
-                if remove_research_key:
-                    _remove_research_api_key(research_provider)
-                    ui_state["cloud_agent_research_key_feedback"] = "Research API key removed."
-                    st.rerun()
-                elif _save_research_api_key(research_provider, research_api_key) is None:
-                    st.error("Enter a research API key, or explicitly remove the stored key.")
-                else:
-                    ui_state["cloud_agent_research_key_feedback"] = "Research API key saved."
-                    st.rerun()
-            except requests.RequestException as exc:
-                st.error(_api_error_message(exc))
-        if feedback := ui_state.get("cloud_agent_research_key_feedback"):
-            st.success(feedback)
-    source_urls_value = st.text_area(
-        "Source URLs",
-        key="cloud_agent_research_source_urls",
-        height=100,
-        help="Enter one URL per line.",
-    )
-    research_generation_status = st.empty()
     if script_mode == "Standard Script":
         if st.button("Generate Script", key="cloud_agent_generate_script"):
             if not subject.strip():
@@ -663,6 +520,160 @@ def render_cloud_agent_panel():
                 except requests.RequestException as exc:
                     st.error(_api_error_message(exc))
     else:
+        research_settings = {
+            "provider": "openrouter",
+            "openrouter_model": "openai/gpt-5.6-sol-pro",
+            "openrouter_custom_model_id": "",
+            "aihubmix_model": "gpt-5.6-sol",
+            "aihubmix_custom_model_id": "",
+            "custom_system_prompt": "",
+        }
+        research_provider_catalog = _fallback_research_provider_catalog()
+        if hasattr(st, "runtime"):
+            try:
+                research_settings.update(_load_research_settings())
+                research_provider_catalog = _load_research_provider_catalog()
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
+        for key, value in (
+            ("cloud_agent_research_provider", research_settings["provider"]),
+            (
+                "cloud_agent_research_openrouter_model",
+                research_settings["openrouter_model"],
+            ),
+            (
+                "cloud_agent_research_openrouter_custom_model_id",
+                research_settings["openrouter_custom_model_id"],
+            ),
+            ("cloud_agent_research_aihubmix_model", research_settings["aihubmix_model"]),
+            (
+                "cloud_agent_research_aihubmix_custom_model_id",
+                research_settings["aihubmix_custom_model_id"],
+            ),
+            (
+                "cloud_agent_research_custom_system_prompt",
+                research_settings["custom_system_prompt"],
+            ),
+        ):
+            ui_state.setdefault(key, value)
+        research_provider_labels = {
+            item["id"]: item["label"] for item in research_provider_catalog
+        }
+        if ui_state.get("cloud_agent_research_provider") not in research_provider_labels:
+            ui_state["cloud_agent_research_provider"] = next(
+                iter(research_provider_labels), "openrouter"
+            )
+        research_provider = st.selectbox(
+            "Research Provider",
+            list(research_provider_labels),
+            format_func=lambda value: research_provider_labels[value],
+            key="cloud_agent_research_provider",
+        )
+        selected_provider_metadata = next(
+            (
+                item
+                for item in research_provider_catalog
+                if item["id"] == research_provider
+            ),
+            {"api_key_configured": False},
+        )
+        with st.expander("Research Settings", expanded=False):
+            openrouter_model = st.text_input(
+                "OpenRouter Model",
+                key="cloud_agent_research_openrouter_model",
+            )
+            openrouter_custom_model_id = st.text_input(
+                "OpenRouter Custom Model ID",
+                key="cloud_agent_research_openrouter_custom_model_id",
+            )
+            aihubmix_model = st.text_input(
+                "AIHubMix Model",
+                key="cloud_agent_research_aihubmix_model",
+            )
+            aihubmix_custom_model_id = st.text_input(
+                "AIHubMix Custom Model ID",
+                key="cloud_agent_research_aihubmix_custom_model_id",
+            )
+            research_custom_system_prompt = st.text_area(
+                "Research Custom System Prompt",
+                key="cloud_agent_research_custom_system_prompt",
+                max_chars=8000,
+                help="Leave blank to use the research system default prompt.",
+            )
+            if st.button(
+                "Save Research Settings",
+                key="cloud_agent_save_research_settings",
+            ):
+                try:
+                    verified, message = _save_and_verify_research_settings(
+                        {
+                            "provider": research_provider,
+                            "openrouter_model": openrouter_model,
+                            "openrouter_custom_model_id": openrouter_custom_model_id,
+                            "aihubmix_model": aihubmix_model,
+                            "aihubmix_custom_model_id": aihubmix_custom_model_id,
+                            "custom_system_prompt": research_custom_system_prompt,
+                        }
+                    )
+                    if verified:
+                        ui_state["cloud_agent_research_settings_feedback"] = message
+                        st.rerun()
+                    else:
+                        st.error(message)
+                except requests.RequestException as exc:
+                    st.error(_api_error_message(exc))
+            if feedback := ui_state.get("cloud_agent_research_settings_feedback"):
+                st.success(feedback)
+        with st.expander("Research Provider Key", expanded=False):
+            st.caption(
+                f"{research_provider_labels.get(research_provider, research_provider)} API key: "
+                f"{'configured' if selected_provider_metadata.get('api_key_configured') else 'not configured'}"
+            )
+            research_api_key = st.text_input(
+                "Research API Key",
+                type="password",
+                key=f"cloud_agent_research_api_key_{research_provider}",
+            )
+            remove_research_key = bool(
+                hasattr(st, "checkbox")
+                and st.checkbox(
+                    "Remove stored research API key",
+                    key=f"cloud_agent_research_remove_key_{research_provider}",
+                )
+            )
+            if st.button(
+                "Save Research API Key",
+                key="cloud_agent_save_research_api_key",
+            ):
+                try:
+                    if remove_research_key:
+                        _remove_research_api_key(research_provider)
+                        ui_state["cloud_agent_research_key_feedback"] = (
+                            "Research API key removed."
+                        )
+                        st.rerun()
+                    elif _save_research_api_key(
+                        research_provider, research_api_key
+                    ) is None:
+                        st.error(
+                            "Enter a research API key, or explicitly remove the stored key."
+                        )
+                    else:
+                        ui_state["cloud_agent_research_key_feedback"] = (
+                            "Research API key saved."
+                        )
+                        st.rerun()
+                except requests.RequestException as exc:
+                    st.error(_api_error_message(exc))
+            if feedback := ui_state.get("cloud_agent_research_key_feedback"):
+                st.success(feedback)
+        source_urls_value = st.text_area(
+            "Source URLs",
+            key="cloud_agent_research_source_urls",
+            height=100,
+            help="Enter one URL per line.",
+        )
+        research_generation_status = st.empty()
         st.caption("Research generation may call the selected provider up to 3 rounds.")
         if st.button(
             "Generate Research Script",
@@ -701,8 +712,9 @@ def render_cloud_agent_panel():
     master_prompt = st.text_area(
         "View Master Prompt", key="cloud_agent_master_prompt", disabled=True
     )
-    _render_research_accounting(ui_state.get("cloud_agent_research_accounting", {}))
-    _render_research_sources(ui_state.get("cloud_agent_research_sources", []))
+    if script_mode == "Research Script":
+        _render_research_accounting(ui_state.get("cloud_agent_research_accounting", {}))
+        _render_research_sources(ui_state.get("cloud_agent_research_sources", []))
     if st.button("Refresh Draft", key="cloud_agent_refresh_draft"):
         script_for_refresh = str(st.session_state.get("cloud_agent_script", ""))
         if not script_for_refresh.strip():
@@ -951,6 +963,9 @@ def render_cloud_agent_panel():
     if controls[2].button("Start", key="cloud_agent_start"):
         clip_plan = st.session_state.get("cloud_agent_clip_plan")
         draft_script = str(st.session_state.get("cloud_agent_draft_script", ""))
+        research_draft_id = str(
+            st.session_state.get("cloud_agent_research_draft_id", "") or ""
+        )
         if not clip_plan or draft_script != script.strip():
             st.error("Generate or refresh the draft before starting the job.")
         elif not voice.strip():
@@ -968,6 +983,7 @@ def render_cloud_agent_panel():
                         tts_provider=provider,
                         voice_id=voice,
                         voice_speed=speed,
+                        research_draft_id=research_draft_id,
                         prepared_voice_fingerprint=(
                             prepared_voice["fingerprint"]
                             if prepared_voice

@@ -874,3 +874,164 @@ def test_research_failure_never_stores_draft(monkeypatch):
     cloud_agent.render_cloud_agent_panel()
 
     assert fake_streamlit.errors == ["กรุณาใส่ URL อย่างน้อยหนึ่งแหล่ง"]
+
+
+def test_start_button_forwards_stored_research_draft_id(monkeypatch):
+    recorded = {}
+
+    class Column:
+        def __init__(self, pressed_key=""):
+            self.pressed_key = pressed_key
+
+        def button(self, _label, *, key):
+            return key == self.pressed_key
+
+        def link_button(self, *_args, **_kwargs):
+            return None
+
+    class Streamlit:
+        def __init__(self):
+            self.session_state = {
+                "cloud_agent_script": "Ready narration",
+                "cloud_agent_draft_script": "Ready narration",
+                "cloud_agent_master_prompt": "Ready prompt",
+                "cloud_agent_clip_plan": {"target_words": 130, "segments": [{"index": 1}] * 6},
+                "cloud_agent_research_draft_id": "draft-1",
+                "cloud_agent_voice": "voice-1",
+            }
+            self.rendered_text_inputs = []
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def text_input(self, label, **kwargs):
+            self.rendered_text_inputs.append(label)
+            return self.session_state.get(kwargs.get("key", ""), kwargs.get("value", ""))
+
+        def text_area(self, label, **kwargs):
+            if label == "Video Subject":
+                return "Research start"
+            return self.session_state.get(kwargs.get("key", ""), "")
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, **_kwargs):
+            return options[0]
+
+        def radio(self, _label, options, **_kwargs):
+            return "Standard Script"
+
+        def expander(self, *_args, **_kwargs):
+            return nullcontext()
+
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def columns(self, _count):
+            return [Column(), Column(), Column("cloud_agent_start"), Column()]
+
+        def empty(self):
+            return nullcontext()
+
+        def caption(self, *_args, **_kwargs):
+            return None
+
+        def error(self, message):
+            raise AssertionError(message)
+
+        def success(self, *_args, **_kwargs):
+            return None
+
+        def json(self, *_args, **_kwargs):
+            return None
+
+    def start_job(**kwargs):
+        recorded.update(kwargs)
+        return {"id": "job-123"}
+
+    fake_streamlit = Streamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(cloud_agent, "_start_job", start_job)
+
+    cloud_agent.render_cloud_agent_panel()
+
+    assert recorded["research_draft_id"] == "draft-1"
+
+
+def test_standard_mode_hides_research_only_controls(monkeypatch):
+    class Column:
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def link_button(self, *_args, **_kwargs):
+            return None
+
+    class Streamlit:
+        def __init__(self):
+            self.session_state = {}
+            self.selectbox_labels = []
+            self.text_input_labels = []
+            self.text_area_labels = []
+            self.expander_labels = []
+            self.button_labels = []
+            self.captions = []
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def text_input(self, label, **kwargs):
+            self.text_input_labels.append(label)
+            return self.session_state.get(kwargs.get("key", ""), kwargs.get("value", ""))
+
+        def text_area(self, label, **kwargs):
+            self.text_area_labels.append(label)
+            return self.session_state.get(kwargs.get("key", ""), "")
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, label, options, **_kwargs):
+            self.selectbox_labels.append(label)
+            return options[0]
+
+        def radio(self, _label, options, **_kwargs):
+            return "Standard Script"
+
+        def expander(self, label, **_kwargs):
+            self.expander_labels.append(label)
+            return nullcontext()
+
+        def button(self, label, **_kwargs):
+            self.button_labels.append(label)
+            return False
+
+        def columns(self, _count):
+            return [Column(), Column(), Column(), Column()]
+
+        def empty(self):
+            return nullcontext()
+
+        def caption(self, message):
+            self.captions.append(message)
+
+        def error(self, *_args, **_kwargs):
+            return None
+
+        def success(self, *_args, **_kwargs):
+            return None
+
+    fake_streamlit = Streamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+
+    cloud_agent.render_cloud_agent_panel()
+
+    assert "Research Provider" not in fake_streamlit.selectbox_labels
+    assert "Research API Key" not in fake_streamlit.text_input_labels
+    assert "Source URLs" not in fake_streamlit.text_area_labels
+    assert "Research Settings" not in fake_streamlit.expander_labels
+    assert "Research Provider Key" not in fake_streamlit.expander_labels
+    assert "Save Research Settings" not in fake_streamlit.button_labels
+    assert "Save Research API Key" not in fake_streamlit.button_labels
+    assert "Generate Research Script" not in fake_streamlit.button_labels
+    assert "Research generation may call the selected provider up to 3 rounds." not in fake_streamlit.captions
