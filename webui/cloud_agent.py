@@ -1334,7 +1334,11 @@ def render_cloud_agent_panel():
                 except requests.RequestException as exc:
                     st.error(_api_error_message(exc))
 
-        job_id = st.text_input("Job ID", key="cloud_agent_job_id")
+        ui_state.setdefault(
+            "cloud_agent_job_lookup_id",
+            str(ui_state.get("cloud_agent_job_id") or ""),
+        )
+        job_id = st.text_input("Job ID", key="cloud_agent_job_lookup_id")
         action_controls = st.columns(4)
         for action, column in zip(
             ("Pause", "Resume", "Retry", "Cancel"), action_controls
@@ -1359,10 +1363,6 @@ def render_cloud_agent_panel():
                     st.error(message)
             except requests.RequestException as exc:
                 st.error(_api_error_message(exc))
-        st.caption("job status/history")
-        st.caption("final video")
-        st.caption("measured narration duration")
-        st.caption("Canva playback factor")
         st.caption(
             "Narration Too Long: shorten script; reduce Target Words; increase Voice Rate"
         )

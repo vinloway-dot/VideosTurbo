@@ -94,6 +94,13 @@ def test_cloud_agent_ui_is_a_thin_fastapi_client_with_required_controls_and_stat
     assert "/api/v1/cloud-agent/" in source
     assert "sqlite3" not in source.lower()
     assert "PersistentBrowserManager" not in source
+    for placeholder in (
+        "job status/history",
+        "final video",
+        "measured narration duration",
+        "Canva playback factor",
+    ):
+        assert placeholder not in source
 
 
 def test_cloud_agent_video_subject_uses_compact_multiline_text_area():
@@ -519,6 +526,100 @@ def test_successful_start_stores_job_for_production_status(monkeypatch):
 
     assert session_state["cloud_agent_job_id"] == "job-123"
     assert session_state["cloud_agent_job_snapshot"]["status"] == "QUEUED"
+
+
+def test_pause_refreshes_snapshot_without_mutating_the_lookup_widget(monkeypatch):
+    class WidgetSessionState(dict):
+        def __init__(self):
+            super().__init__({"cloud_agent_job_lookup_id": "job-123"})
+            self.instantiated_widget_keys = set()
+
+        def __setitem__(self, key, value):
+            if key in self.instantiated_widget_keys:
+                raise RuntimeError(f"widget key mutated after instantiation: {key}")
+            super().__setitem__(key, value)
+
+    class Column:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def button(self, _label, *, key, **_kwargs):
+            return key == "cloud_agent_pause"
+
+        def link_button(self, *_args, **_kwargs):
+            return None
+
+    class Streamlit:
+        def __init__(self):
+            self.session_state = WidgetSessionState()
+
+        def columns(self, _count, **_kwargs):
+            return [Column(), Column(), Column(), Column()]
+
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def expander(self, *_args, **_kwargs):
+            return nullcontext()
+
+        def text_input(self, _label, *, key, **_kwargs):
+            self.session_state.instantiated_widget_keys.add(key)
+            return self.session_state.get(key, "job-123")
+
+        def caption(self, *_args, **_kwargs):
+            return None
+
+        def error(self, message):
+            raise AssertionError(message)
+
+    fake_streamlit = Streamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_render_video_brief",
+        lambda **_kwargs: cloud_agent._BriefSelection(
+            "Rice", 130, "en-US", "Standard Script", ""
+        ),
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_render_script_editor",
+        lambda **_kwargs: ("Ready narration", "Ready master prompt"),
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_render_generation_setup",
+        lambda **_kwargs: cloud_agent._GenerationSelection(
+            "elevenlabs", "voice-1", 1.0, None
+        ),
+    )
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_ui, "render_workflow_rail", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_ui, "render_production_status", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_api",
+        lambda method, path, **_kwargs: {
+            "id": "job-123",
+            "status": "PAUSED",
+            "checkpoint": "TTS_READY",
+            "current_step": "paused",
+            "progress": 40,
+        }
+        if (method, path) == ("POST", "jobs/job-123/pause")
+        else pytest.fail(f"unexpected API call: {method} {path}"),
+    )
+
+    cloud_agent.render_cloud_agent_panel()
+
+    assert fake_streamlit.session_state["cloud_agent_job_id"] == "job-123"
+    assert fake_streamlit.session_state["cloud_agent_job_snapshot"]["status"] == "PAUSED"
 
 
 def test_job_snapshot_allow_lists_the_production_status_fields(monkeypatch):
