@@ -764,7 +764,10 @@ class ResearchScriptService:
 
     def _prompt_requests_citations(self, value: str) -> bool:
         prompt = str(value or "").lower()
-        clauses = re.split(r"[.!?;\n]+|\b(?:but|however)\b", prompt)
+        intent_units = re.split(
+            r"[.!?;\n]+|\b(?:but|however)\b|(?:,\s*)?\band\b",
+            prompt,
+        )
         request_patterns = (
             re.compile(r"\b(?P<action>cite)\b"),
             re.compile(
@@ -793,13 +796,16 @@ class ResearchScriptService:
             r"\b(?:explain|describe|discuss|teach|demonstrate|show|tell)\b"
             r"[^.!?;\n]{0,40}\bhow\s+to\s*$"
         )
-        for clause in clauses:
+        post_action_negation = re.compile(r"^\s*(?:no|neither)\b")
+        for intent_unit in intent_units:
             for pattern in request_patterns:
-                for match in pattern.finditer(clause):
-                    prefix = clause[: match.start("action")]
+                for match in pattern.finditer(intent_unit):
+                    prefix = intent_unit[: match.start("action")]
+                    action_tail = intent_unit[match.end("action") :]
                     if (
                         negation.search(prefix) is None
                         and meta_instruction.search(prefix) is None
+                        and post_action_negation.search(action_tail) is None
                     ):
                         return True
         return False

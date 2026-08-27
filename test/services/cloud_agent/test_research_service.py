@@ -608,6 +608,8 @@ def test_claim_sources_must_match_declared_source_ids_used(service, adapter, run
         ),
         ("Verified fact [1].", "Do not explain how to cite factual claims."),
         ("Verified fact [1].", "Explain how to cite factual claims."),
+        ("Verified fact [1].", "Cite no factual claims."),
+        ("Verified fact [1].", "Cite neither sources nor URLs."),
         ("Verified fact [1].", "Include a reference implementation."),
         ("Verified fact [1].", "Display the source language accurately."),
     ],
@@ -644,6 +646,28 @@ def test_cite_factual_claims_authorizes_citations(service, adapter):
     adapter.queue_final(script="Verified fact [1].")
     request = request_with_one_url().model_copy(
         update={"custom_system_prompt": "Cite factual claims."}
+    )
+
+    result = service.create_draft(request)
+
+    assert result.script == "Verified fact [1]."
+
+
+@pytest.mark.parametrize(
+    "custom_system_prompt",
+    [
+        "Do not use slang, and cite factual claims.",
+        "Avoid jargon and cite factual claims.",
+    ],
+)
+def test_unrelated_prohibition_does_not_suppress_citation_request(
+    service,
+    adapter,
+    custom_system_prompt,
+):
+    adapter.queue_final(script="Verified fact [1].")
+    request = request_with_one_url().model_copy(
+        update={"custom_system_prompt": custom_system_prompt}
     )
 
     result = service.create_draft(request)
