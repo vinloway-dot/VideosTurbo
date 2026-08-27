@@ -125,7 +125,10 @@ def test_hidden_css_content_is_removed_even_with_whitespace_in_style(runtime, fa
     "style",
     [
         "opacity: 0",
+        "opacity:0!important",
+        "opacity:.0",
         "position:absolute;left:-10000px",
+        "position:absolute;left:-100vw",
         "position:fixed;top:-9999px",
     ],
 )
@@ -381,6 +384,28 @@ def test_lazy_pdf_failures_map_to_pdf_invalid(fake_http, failure_phase):
     runtime = ResearchToolRuntime(
         http_client=fake_http,
         pdf_reader_factory=lambda *_args, **_kwargs: Reader(),
+    )
+
+    with pytest.raises(ResearchError) as excinfo:
+        runtime.execute("read_pdf", url)
+
+    assert excinfo.value.code == "PDF_INVALID"
+
+
+def test_pdf_factory_type_error_from_both_signatures_maps_to_pdf_invalid(fake_http):
+    url = "https://public.example/doc.pdf"
+    fake_http.preflight(
+        _response(url, content_type="application/pdf", body=b"%PDF-1.7\n")
+    )
+
+    def invalid_factory(_stream, **kwargs):
+        if "current_url" in kwargs:
+            raise TypeError("current_url is unsupported")
+        raise TypeError("PDF parser rejected the stream")
+
+    runtime = ResearchToolRuntime(
+        http_client=fake_http,
+        pdf_reader_factory=invalid_factory,
     )
 
     with pytest.raises(ResearchError) as excinfo:

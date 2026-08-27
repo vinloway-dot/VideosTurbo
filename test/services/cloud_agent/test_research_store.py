@@ -246,3 +246,43 @@ def test_legacy_placeholder_zero_cost_migrates_as_unavailable(tmp_path):
     assert loaded is not None
     assert loaded.estimated_cost_usd is None
     assert loaded.evidence_mode == "source_evidence + model_knowledge"
+
+
+def test_legacy_nonzero_cost_migrates_as_available(tmp_path):
+    db_path = tmp_path / "cloud-agent.sqlite3"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE research_drafts (
+                research_draft_id TEXT PRIMARY KEY,
+                script_hash TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                evidence_mode TEXT NOT NULL,
+                source_count INTEGER NOT NULL,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                estimated_cost_usd REAL NOT NULL DEFAULT 0,
+                system_prompt_fingerprint TEXT NOT NULL,
+                source_prompt_fingerprint TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO research_drafts VALUES (
+                'legacy-paid-draft', ?, 'openrouter', 'openai/gpt-5.6-sol-pro',
+                'source_evidence', 0, 100, 20, 120, 1.25,
+                '', '', '2026-08-27T00:00:00+00:00', '2026-08-27T00:00:00+00:00'
+            )
+            """,
+            (sha256_text("legacy paid narration"),),
+        )
+
+    loaded = ResearchDraftStore(db_path).get("legacy-paid-draft")
+
+    assert loaded is not None
+    assert loaded.estimated_cost_usd == 1.25

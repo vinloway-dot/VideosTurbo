@@ -167,6 +167,7 @@ class FakeAdapter:
     def queue_final(
         self,
         *,
+        script: str = "Narration from research.",
         source_ids_used: list[str] | None = None,
         evidence_claims: list[EvidenceClaim] | None = None,
         evidence_quote: str = "Exact source fact appears here.",
@@ -182,7 +183,7 @@ class FakeAdapter:
                 )
             ]
         final_payload = ProviderFinalPayload.model_construct(
-            script="Narration from research.",
+            script=script,
             source_ids_used=["source-1"] if source_ids_used is None else source_ids_used,
             model_knowledge_used=True,
             evidence_claims=evidence_claims,
@@ -587,6 +588,53 @@ def test_claim_sources_must_match_declared_source_ids_used(service, adapter, run
         )
 
     assert captured.value.code == "RESEARCH_RESPONSE_INVALID"
+
+
+@pytest.mark.parametrize(
+    ("script", "custom_system_prompt"),
+    [
+        ("Verified fact (source-1).", "Use a neutral educational tone."),
+        ("Verified fact [1].", "Use a neutral educational tone."),
+        ("Read more at https://example.com/article.", "Use a neutral educational tone."),
+        ("Read more at www.example.com/article.", "Use a neutral educational tone."),
+        ("Read more at https://example.com/article.", "Do not cite sources or include URLs."),
+        ("Verified fact [1].", "Use sources only to verify factual accuracy."),
+    ],
+)
+def test_unrequested_or_negated_citation_forms_are_rejected(
+    service,
+    adapter,
+    script,
+    custom_system_prompt,
+):
+    adapter.queue_final(script=script)
+    request = request_with_one_url().model_copy(
+        update={"custom_system_prompt": custom_system_prompt}
+    )
+
+    with pytest.raises(ResearchError) as captured:
+        service.create_draft(request)
+
+    assert captured.value.code == "RESEARCH_RESPONSE_INVALID"
+
+
+def test_affirmative_citation_request_allows_citations(service, adapter):
+    adapter.queue_final(script="Read more at https://example.com/article [1].")
+    request = request_with_one_url().model_copy(
+        update={"custom_system_prompt": "Include source citations and URLs."}
+    )
+
+    result = service.create_draft(request)
+
+    assert result.script == "Read more at https://example.com/article [1]."
+
+
+def test_ordinary_non_citation_use_of_source_is_allowed(service, adapter):
+    adapter.queue_final(script="A mountain spring is the village water source.")
+
+    result = service.create_draft(request_with_one_url())
+
+    assert result.script == "A mountain spring is the village water source."
 
 
 def test_tool_urls_must_match_supplied_allowlist(service, adapter, runtime):

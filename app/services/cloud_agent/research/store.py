@@ -302,6 +302,7 @@ class ResearchDraftStore:
             row["name"]
             for row in connection.execute("PRAGMA table_info(research_drafts)").fetchall()
         }
+        migrating_legacy_cost = "cost_available" not in columns
         additions = {
             "cost_available": "INTEGER NOT NULL DEFAULT 0",
             "tool_calls": "INTEGER NOT NULL DEFAULT 0",
@@ -314,6 +315,15 @@ class ResearchDraftStore:
                 connection.execute(
                     f"ALTER TABLE research_drafts ADD COLUMN {name} {definition}"
                 )
+        if migrating_legacy_cost:
+            connection.execute(
+                """
+                UPDATE research_drafts
+                SET cost_available = 1
+                WHERE estimated_cost_usd > 0
+                  AND estimated_cost_usd <= 1.7976931348623157e308
+                """
+            )
 
     def save_success(self, draft: SuccessfulResearchDraft) -> PersistedResearchDraft:
         persisted = SuccessfulResearchDraft.model_validate(draft)

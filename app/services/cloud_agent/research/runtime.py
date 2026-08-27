@@ -178,11 +178,12 @@ class ResearchToolRuntime:
         if not response.body.startswith(b"%PDF-"):
             raise ResearchError("PDF_INVALID", "PDF signature is required")
         try:
-            reader = self._pdf_reader_factory(
-                BytesIO(response.body), current_url=response.final_url
-            )
-        except TypeError:
-            reader = self._pdf_reader_factory(BytesIO(response.body))
+            try:
+                reader = self._pdf_reader_factory(
+                    BytesIO(response.body), current_url=response.final_url
+                )
+            except TypeError:
+                reader = self._pdf_reader_factory(BytesIO(response.body))
         except Exception as exc:
             raise ResearchError("PDF_INVALID", str(exc)) from exc
         try:
@@ -303,12 +304,16 @@ class ResearchToolRuntime:
         return (
             "display:none" in normalized_style
             or "visibility:hidden" in normalized_style
-            or re.search(r"(?:^|;)opacity:0(?:\.0+)?(?:;|$)", normalized_style)
+            or re.search(
+                r"(?:^|;)opacity:(?:0(?:\.0+)?|\.0+)(?:!important)?(?:;|$)",
+                normalized_style,
+            )
             is not None
             or (
                 ("position:absolute" in normalized_style or "position:fixed" in normalized_style)
                 and re.search(
-                    r"(?:left|right|top|bottom):-\d{3,}(?:px|em|rem|%)?(?:;|$)",
+                    r"(?:left|right|top|bottom):-\d{3,}"
+                    r"(?:px|em|rem|%|vw|vh|vmin|vmax)?(?:;|$)",
                     normalized_style,
                 )
                 is not None

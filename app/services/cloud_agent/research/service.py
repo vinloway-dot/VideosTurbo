@@ -741,16 +741,53 @@ class ResearchScriptService:
                 "declared source ids did not match evidence claims",
                 accounting=accounting,
             )
-        if re.search(r"https?://", final_payload.script, re.IGNORECASE) and not re.search(
-            r"\b(?:citation|citations|cite|url|urls|reference|references|source|sources)\b",
-            request.custom_system_prompt,
-            re.IGNORECASE,
-        ):
+        if self._narration_has_citation(
+            final_payload.script
+        ) and not self._prompt_requests_citations(request.custom_system_prompt):
             raise ResearchError(
                 "RESEARCH_RESPONSE_INVALID",
                 "narration included an unrequested citation or URL",
                 accounting=accounting,
             )
+
+    def _narration_has_citation(self, value: str) -> bool:
+        narration = str(value or "")
+        return any(
+            re.search(pattern, narration, re.IGNORECASE) is not None
+            for pattern in (
+                r"https?://",
+                r"\bwww\.[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:[/?:#][^\s]*)?",
+                r"\[\s*\d+(?:\s*[-,]\s*\d+)*\s*\]",
+                r"\bsource-[a-z0-9][a-z0-9_-]*\b",
+            )
+        )
+
+    def _prompt_requests_citations(self, value: str) -> bool:
+        prompt = str(value or "").lower()
+        clauses = re.split(r"[.!?;\n]+|\b(?:but|however)\b", prompt)
+        request_patterns = (
+            re.compile(
+                r"\b(?P<action>cite|reference|link\s+to)\b"
+                r"[^.!?;\n]{0,80}?\b(?:sources?|references?)\b"
+            ),
+            re.compile(
+                r"\b(?P<action>include|add|provide|show|display|list)\b"
+                r"[^.!?;\n]{0,80}?\b(?:citations?|urls?|references?|sources?|"
+                r"source\s+links?|links?\s+to\s+sources?)\b"
+            ),
+            re.compile(
+                r"\b(?P<action>use)\b[^.!?;\n]{0,80}?"
+                r"\b(?:citations?|urls?|references?|source\s+links?)\b"
+            ),
+        )
+        negation = re.compile(r"\b(?:do\s+not|don't|never|avoid|omit|without)\b")
+        for clause in clauses:
+            for pattern in request_patterns:
+                for match in pattern.finditer(clause):
+                    prefix = clause[: match.start("action")]
+                    if negation.search(prefix[-40:]) is None:
+                        return True
+        return False
 
     def _normalize_evidence_text(self, value: str) -> str:
         return re.sub(r"\s+", " ", str(value or "")).strip()
