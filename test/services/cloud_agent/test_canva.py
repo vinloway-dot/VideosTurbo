@@ -153,13 +153,11 @@ class FakeCaptionStylePage:
     def get_by_role(self, role, *, name, exact):
         assert role == "button"
         assert exact is True
-        assert name in {"Captions", "Generate captions"}
+        assert name in {"Captions", "Generate captions", "Classic"}
         return _CaptionControl(self, name)
 
     def get_by_text(self, name, *, exact):
-        assert exact is True
-        assert name == "Classic"
-        return _CaptionControl(self, name)
+        raise AssertionError("Classic must be selected through its accessible button role")
 
 
 class FakePreparedCanvaEditorPage(FakeCanvaEditorPage):

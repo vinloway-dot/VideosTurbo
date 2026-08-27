@@ -974,7 +974,7 @@ class CanvaAssemblyClient:
         self._select_video_clip(page, 1)
         page.get_by_role("button", name="Captions", exact=True).click()
         page.get_by_role("button", name="Generate captions", exact=True).click()
-        classic = page.get_by_text("Classic", exact=True)
+        classic = page.get_by_role("button", name="Classic", exact=True)
         classic.wait_for(
             state="visible",
             timeout=int(self.export_timeout_seconds * 1_000),
