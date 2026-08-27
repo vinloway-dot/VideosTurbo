@@ -88,6 +88,14 @@ RESEARCH_INVARIANT_PROMPT = "\n".join(
         "When model knowledge conflicts with source evidence, prefer the source or disclose or omit the conflict.",
         "News, prices, current office holders, and other unstable facts cannot be asserted from model memory alone.",
         "After using tools, return a final JSON evidence envelope.",
+        "Final JSON object example: "
+        '{"script":"complete narration","source_ids_used":["source-1"],'
+        '"model_knowledge_used":false,"evidence_claims":[{"claim":"factual claim",'
+        '"source_id":"source-1","evidence_quote":"exact verbatim quote copied '
+        'from that source","unstable":false}]}',
+        "Replace every example value with the real result and do not omit any key.",
+        "Every evidence_claims item must contain claim, source_id, evidence_quote, "
+        "and unstable; evidence_quote must be copied verbatim from that source.",
         "Every factual source attribution must identify a successful source and exact supporting quote.",
         "Every unstable claim must include a verified source quote.",
     ]

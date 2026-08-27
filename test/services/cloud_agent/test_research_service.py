@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from hashlib import sha256
 from urllib.parse import urlsplit, urlunsplit
@@ -830,6 +831,31 @@ def test_invariant_prompt_contains_deterministic_citation_policy(
     assert persisted.invariant_prompt_fingerprint == sha256(
         invariant.encode("utf-8")
     ).hexdigest()
+
+
+def test_provider_prompt_supplies_complete_final_evidence_envelope(service, adapter):
+    service.create_draft(request_with_one_url())
+
+    invariant = adapter.calls[0].messages[0]["content"]
+    example_line = next(
+        line
+        for line in invariant.splitlines()
+        if line.startswith("Final JSON object example: ")
+    )
+    example = json.loads(example_line.removeprefix("Final JSON object example: "))
+
+    assert set(example) == {
+        "script",
+        "source_ids_used",
+        "model_knowledge_used",
+        "evidence_claims",
+    }
+    assert set(example["evidence_claims"][0]) == {
+        "claim",
+        "source_id",
+        "evidence_quote",
+        "unstable",
+    }
 
 
 def test_success_persists_complete_provenance_contract(service, adapter, store):
