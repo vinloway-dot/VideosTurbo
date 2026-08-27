@@ -410,6 +410,21 @@ def test_link_failure_never_queues_job(tmp_path, monkeypatch):
 def test_standard_draft_does_not_resolve_or_call_research_service(
     tmp_path, monkeypatch
 ):
+    cloud_agent = _cloud_agent_controller()
+    monkeypatch.setattr(
+        cloud_agent,
+        "generate_script",
+        lambda **_kwargs: pytest.fail(
+            "Standard draft with a provided script must not regenerate narration"
+        ),
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "generate_six_clip_plan",
+        lambda video_script, language, target_words: empty_six_clip_plan(
+            target_words=target_words
+        ),
+    )
     client = research_client(
         tmp_path,
         monkeypatch,
