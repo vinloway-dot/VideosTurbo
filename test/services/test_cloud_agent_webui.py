@@ -49,10 +49,10 @@ def test_cloud_agent_ui_is_a_thin_fastapi_client_with_required_controls_and_stat
     source = UI_SOURCE.read_text(encoding="utf-8")
 
     for label in (
-        "Video Subject",
-        "Target Words",
+        "Video subject",
+        "Target words",
         "Language",
-        "Generate Script",
+        "Generate script",
         "Script Editor",
         "View Master Prompt",
         "TTS Provider",
@@ -653,7 +653,7 @@ def test_research_mode_offers_fastapi_only_controls_and_shared_editor_handoff():
         "Standard Script",
         "Research Script",
         "Source URLs",
-        "Generate Research Script",
+        "Generate research script",
         "Sources",
     ):
         assert label in source
