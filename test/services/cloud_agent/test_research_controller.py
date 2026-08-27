@@ -494,6 +494,23 @@ def test_provider_catalog_exposes_selectable_catalog_and_custom_model_handoff(
     assert providers["aihubmix"]["models"] == ["gpt-5.6-sol", "custom"]
 
 
+def test_research_settings_read_normalizes_stale_invalid_default_provider(
+    tmp_path, monkeypatch
+):
+    saved = []
+    client = research_client(tmp_path, monkeypatch)
+    monkeypatch.setattr(config, "save_config", lambda: saved.append(True))
+    monkeypatch.setitem(config.app, "cloud_agent_research_default_provider", "unsupported")
+    response = client.get(
+        "/api/v1/cloud-agent/research/settings"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["provider"] == "openrouter"
+    assert config.app["cloud_agent_research_default_provider"] == "openrouter"
+    assert saved == [True]
+
+
 def test_disabled_research_rejects_generation_without_constructing_service(
     tmp_path, monkeypatch
 ):

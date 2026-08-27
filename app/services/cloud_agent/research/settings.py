@@ -32,6 +32,7 @@ class ResearchProviderMetadata(BaseModel):
 
 
 class ResearchSettingsService:
+    DEFAULT_PROVIDER_ID = "openrouter"
     KEY_NAMES = {
         provider_id: str(metadata["api_key_name"])
         for provider_id, metadata in _PROVIDERS.items()
@@ -39,6 +40,18 @@ class ResearchSettingsService:
 
     def list_providers(self) -> list[ResearchProviderMetadata]:
         return [self.get_provider(provider_id) for provider_id in _PROVIDERS]
+
+    def get_configured_provider_id(self) -> str:
+        key_name = "cloud_agent_research_default_provider"
+        configured = str(config.app.get(key_name, "") or "").strip()
+        if configured in _PROVIDERS:
+            return configured
+
+        fallback = self.DEFAULT_PROVIDER_ID
+        with config.runtime_config_lock():
+            config.app[key_name] = fallback
+            config.save_config()
+        return fallback
 
     def get_provider(self, provider_id: str) -> ResearchProviderMetadata:
         normalized = self._require_provider(provider_id)

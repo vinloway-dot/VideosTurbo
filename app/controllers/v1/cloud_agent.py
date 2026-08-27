@@ -256,13 +256,17 @@ def _research_http_exception(exc: ResearchError) -> HttpException:
     )
 
 
-def _research_settings_data() -> dict:
+def _research_settings_data(
+    service: ResearchSettingsService | None = None,
+) -> dict:
+    resolved_service = service or ResearchSettingsService()
     return {
         "enabled": bool(config.app.get(_RESEARCH_SETTINGS_KEYS["enabled"], False)),
+        "provider": resolved_service.get_configured_provider_id(),
         **{
             name: str(config.app.get(key, "") or "").strip()
             for name, key in _RESEARCH_SETTINGS_KEYS.items()
-            if name != "enabled"
+            if name not in {"enabled", "provider"}
         },
     }
 
@@ -312,7 +316,7 @@ def _update_research_settings(
             body.custom_system_prompt
         )
         config.save_config()
-    return _research_settings_data()
+    return _research_settings_data(service)
 
 
 def _parse_research_api_key(body: object) -> str:
@@ -578,8 +582,8 @@ def get_research_settings(
     request: Request,
     service: ResearchSettingsService = Depends(get_research_settings_service),
 ):
-    del request, service
-    return utils.get_response(200, _research_settings_data())
+    del request
+    return utils.get_response(200, _research_settings_data(service))
 
 
 @router.put("/cloud-agent/research/settings")

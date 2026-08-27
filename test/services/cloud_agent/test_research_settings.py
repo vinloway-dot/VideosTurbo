@@ -66,3 +66,25 @@ def test_provider_catalog_exposes_model_default_and_custom_handoff(monkeypatch):
     assert metadata.models == ["openai/gpt-5.6-sol-pro", "custom"]
     assert metadata.default_model == "openai/gpt-5.6-sol-pro"
     assert metadata.custom_model_id == "custom/openrouter-model"
+
+
+def test_invalid_configured_default_provider_normalizes_to_openrouter(monkeypatch):
+    saved = []
+    monkeypatch.setitem(config.app, "cloud_agent_research_default_provider", "unsupported")
+    monkeypatch.setattr(config, "save_config", lambda: saved.append(True))
+    service = ResearchSettingsService()
+
+    assert service.get_configured_provider_id() == "openrouter"
+    assert config.app["cloud_agent_research_default_provider"] == "openrouter"
+    assert saved == [True]
+
+
+def test_valid_configured_default_provider_is_preserved_without_resave(monkeypatch):
+    saved = []
+    monkeypatch.setitem(config.app, "cloud_agent_research_default_provider", "aihubmix")
+    monkeypatch.setattr(config, "save_config", lambda: saved.append(True))
+    service = ResearchSettingsService()
+
+    assert service.get_configured_provider_id() == "aihubmix"
+    assert config.app["cloud_agent_research_default_provider"] == "aihubmix"
+    assert saved == []
