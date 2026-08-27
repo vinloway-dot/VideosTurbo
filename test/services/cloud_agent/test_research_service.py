@@ -114,8 +114,10 @@ class FakeRuntime:
 @dataclass
 class FakeSettings:
     api_key: SecretStr = field(default_factory=lambda: SecretStr("provider-key"))
+    calls: list[str] = field(default_factory=list)
 
     def get_api_key_for_generation(self, provider_id: str) -> SecretStr:
+        self.calls.append(provider_id)
         assert provider_id in {"openrouter", "aihubmix"}
         return self.api_key
 
@@ -269,12 +271,17 @@ def store(tmp_path):
 
 
 @pytest.fixture
-def service(adapter, runtime, store):
+def settings():
+    return FakeSettings()
+
+
+@pytest.fixture
+def service(adapter, runtime, store, settings):
     from app.services.cloud_agent.research.service import ResearchScriptService
 
     return ResearchScriptService(
         runtime=runtime,
-        settings=FakeSettings(),
+        settings=settings,
         store=store,
         adapters={"openrouter": adapter},
         clip_plan_generator=lambda script, language, target_words: _clip_plan(target_words),
@@ -371,6 +378,20 @@ def test_private_dns_target_is_rejected_before_provider_sees_url(service, runtim
     assert adapter.calls == []
 
 
+def test_private_dns_target_is_rejected_before_api_key_lookup(
+    service,
+    runtime,
+    settings,
+):
+    runtime.reject_preflight("https://private-name.example", code="URL_TARGET_NOT_PUBLIC")
+
+    with pytest.raises(ResearchError) as captured:
+        service.create_draft(request_with_urls(["https://private-name.example"]))
+
+    assert captured.value.code == "URL_TARGET_NOT_PUBLIC"
+    assert settings.calls == []
+
+
 def test_more_than_three_supplied_urls_fail_before_provider_call(service, adapter):
     with pytest.raises(ResearchError) as captured:
         service.create_draft(request_with_urls(["https://a.example", "https://b.example", "https://c.example", "https://d.example"]))
@@ -404,6 +425,65 @@ def test_repeated_model_tool_call_reuses_source_but_consumes_budget(service, ada
 
     assert runtime.executed_urls == ["https://example.com/article"]
     assert result.accounting.tool_calls == 2
+
+
+def test_multi_tool_batch_emits_each_evidence_block_once(service, adapter, runtime):
+    runtime.sources_by_url["https://example.com/article"] = _source(
+        "https://example.com/article",
+        source_id="source-1",
+        content="Shared fact.\n\nUnique first fact.",
+    )
+    runtime.sources_by_url["https://example.com/second"] = _source(
+        "https://example.com/second",
+        source_id="source-2",
+        content="Shared fact.\n\nUnique second fact.",
+    )
+    adapter.rounds = [
+        ProviderResult(
+            tool_calls=(
+                RequestedToolCall("call-1", "fetch_url", {"url": "https://example.com/article"}),
+                RequestedToolCall("call-2", "fetch_url", {"url": "https://example.com/second"}),
+            ),
+            usage={"prompt_tokens": 10, "completion_tokens": 2},
+            cost=0.001,
+        ),
+        ProviderResult(
+            final_payload=ProviderFinalPayload(
+                script="Narration from research.",
+                source_ids_used=["source-1", "source-2"],
+                model_knowledge_used=False,
+                evidence_claims=[
+                    EvidenceClaim(
+                        claim="Verified first fact",
+                        source_id="source-1",
+                        evidence_quote="Unique first fact.",
+                        unstable=False,
+                    ),
+                    EvidenceClaim(
+                        claim="Verified second fact",
+                        source_id="source-2",
+                        evidence_quote="Unique second fact.",
+                        unstable=False,
+                    ),
+                ],
+            ),
+            usage={"prompt_tokens": 20, "completion_tokens": 4},
+            cost=0.002,
+        ),
+    ]
+
+    service.create_draft(
+        request_with_urls(["https://example.com/article", "https://example.com/second"])
+    )
+
+    second_request_messages = adapter.calls[1].messages
+    tool_contents = "\n".join(
+        str(message.get("content", ""))
+        for message in second_request_messages
+        if message.get("role") == "tool"
+    )
+    assert tool_contents.count("Shared fact.") == 1
+    assert "sources=source-1,source-2" in tool_contents
 
 
 def test_evidence_claim_quote_must_exist_in_successful_source(service, adapter):

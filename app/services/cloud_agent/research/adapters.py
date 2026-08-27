@@ -82,9 +82,9 @@ class EvidenceClaim(BaseModel):
 
 class ProviderFinalPayload(BaseModel):
     script: str = Field(min_length=1)
-    source_ids_used: list[str] = Field(min_length=1)
+    source_ids_used: list[str]
     model_knowledge_used: bool
-    evidence_claims: list[EvidenceClaim] = Field(min_length=1)
+    evidence_claims: list[EvidenceClaim]
 
     @field_validator("script")
     @classmethod
@@ -103,8 +103,6 @@ class ProviderFinalPayload(BaseModel):
             if not source_id:
                 raise ValueError("source_ids_used entries must not be blank")
             normalized.append(source_id)
-        if not normalized:
-            raise ValueError("source_ids_used must include at least one source id")
         return normalized
 
 

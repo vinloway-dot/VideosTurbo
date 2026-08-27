@@ -139,9 +139,9 @@ class ResearchScriptService:
 
     def create_draft(self, request: ResearchDraftRequest) -> ResearchDraftResponse:
         self._validate_supplied_url_count(request.source_urls)
+        canonical_urls = self.runtime.preflight_urls(request.source_urls)
         generation = self._require_generation_settings(request)
         adapter = self._require_adapter(generation.provider_id)
-        canonical_urls = self.runtime.preflight_urls(request.source_urls)
         capability = adapter.resolve_capability(generation.model_id, generation.api_key)
         if not capability.supports_tools:
             raise ResearchError(
@@ -399,15 +399,20 @@ class ResearchScriptService:
             )
 
         packet = self.runtime.aggregate(state.sources)
-        state.source_prompt_fingerprint = self._fingerprint(
-            self._format_evidence_packet(packet)
-        )
+        formatted_packet = self._format_evidence_packet(packet)
+        state.source_prompt_fingerprint = self._fingerprint(formatted_packet)
+        packet_call_id = successful_calls[0]
         for call_id in successful_calls:
+            content = (
+                formatted_packet
+                if call_id == packet_call_id
+                else self._format_evidence_packet_cross_reference(packet_call_id)
+            )
             batch_messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": call_id,
-                    "content": self._format_evidence_packet(packet),
+                    "content": content,
                 }
             )
         batch_messages.extend(failed_messages)
@@ -518,6 +523,17 @@ class ResearchScriptService:
                 "Evidence blocks:",
                 *block_lines,
             ]
+        )
+
+    def _format_evidence_packet_cross_reference(self, packet_call_id: str) -> str:
+        return json.dumps(
+            {
+                "ok": True,
+                "evidence_packet": "already_emitted",
+                "tool_call_id": packet_call_id,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
         )
 
     def _persist_valid_final(

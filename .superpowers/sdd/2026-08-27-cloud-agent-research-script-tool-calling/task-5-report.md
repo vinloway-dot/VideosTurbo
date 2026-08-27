@@ -80,3 +80,56 @@ Notes
 - No paid provider calls, browser calls, network calls, Standard Script calls, or CloudJob mutations were used in the Task 5 tests.
 - The repository has a broad `.gitignore` rule for `test_*.py`; `test/services/cloud_agent/test_research_service.py` must be force-added for the commit.
 - Existing untracked `config.toml.backup-*` and `config.toml.save*` files were preserved untouched.
+
+Fix round 1
+-----------
+
+Reviewer findings addressed
+---------------------------
+- P1: Multi-tool batches now emit the aggregated evidence packet only once, on the first successful tool result in the batch. Later successful tool results carry a small cross-reference to the emitted packet, so exact normalized evidence blocks are not repeated while source IDs are retained in the packet.
+- P2: Provider final payload parsing now accepts syntactically valid empty `source_ids_used` and `evidence_claims` arrays. The service remains responsible for raising `SOURCE_EVIDENCE_EMPTY` when the final response uses no successful source evidence, while invalid JSON and blank required fields remain strict.
+- P2: `create_draft()` now performs raw URL count validation and guarded canonical/public URL preflight before reading generation settings, API keys, model capability, or calling the provider.
+
+Fix TDD evidence
+----------------
+RED:
+- Command: `uv run pytest test/services/cloud_agent/test_research_service.py test/services/cloud_agent/test_research_adapters.py -q`
+- Output:
+
+```text
+......F....F..........F..........                                        [100%]
+=================================== FAILURES ===================================
+__________ test_private_dns_target_is_rejected_before_api_key_lookup ___________
+E       AssertionError: assert ['openrouter'] == []
+
+_____________ test_multi_tool_batch_emits_each_evidence_block_once _____________
+E       AssertionError: assert 2 == 1
+
+____ test_final_message_allows_empty_evidence_lists_for_service_validation _____
+E           pydantic_core._pydantic_core.ValidationError: 2 validation errors for ProviderFinalPayload
+...
+FAILED test/services/cloud_agent/test_research_service.py::test_private_dns_target_is_rejected_before_api_key_lookup
+FAILED test/services/cloud_agent/test_research_service.py::test_multi_tool_batch_emits_each_evidence_block_once
+FAILED test/services/cloud_agent/test_research_adapters.py::test_final_message_allows_empty_evidence_lists_for_service_validation
+3 failed, 30 passed in 3.17s
+```
+
+GREEN:
+- Command: `uv run pytest test/services/cloud_agent/test_research_service.py test/services/cloud_agent/test_research_adapters.py -q`
+- Output:
+
+```text
+.................................                                        [100%]
+33 passed in 2.86s
+```
+
+Fix verification
+----------------
+- Command: `uv run pytest test/services/cloud_agent/test_research_service.py test/services/cloud_agent/test_research_runtime.py test/services/cloud_agent/test_research_adapters.py -q && uv run ruff check app/services/cloud_agent/factory.py app/services/cloud_agent/research/service.py app/services/cloud_agent/research/adapters.py test/services/cloud_agent/test_research_service.py test/services/cloud_agent/test_research_adapters.py`
+- Output:
+
+```text
+............................................                             [100%]
+44 passed in 3.11s
+All checks passed!
+```

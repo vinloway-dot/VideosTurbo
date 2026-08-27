@@ -184,6 +184,27 @@ def test_final_message_requires_evidence_envelope():
     assert result.final_payload.script == "Narration"
 
 
+def test_final_message_allows_empty_evidence_lists_for_service_validation():
+    from app.services.cloud_agent.research.adapters import OpenRouterToolCallingAdapter
+
+    payload = {
+        "script": "Narration",
+        "source_ids_used": [],
+        "model_knowledge_used": True,
+        "evidence_claims": [],
+    }
+    client = _FakeClient(
+        completion_response=_completion_response(content=json.dumps(payload))
+    )
+    adapter = OpenRouterToolCallingAdapter(client_factory=_RecordingFactory(client))
+
+    result = adapter.complete(_provider_request())
+
+    assert result.final_payload is not None
+    assert result.final_payload.source_ids_used == []
+    assert result.final_payload.evidence_claims == []
+
+
 def test_invalid_final_message_raises_research_response_invalid():
     from app.services.cloud_agent.research.adapters import OpenRouterToolCallingAdapter
 
