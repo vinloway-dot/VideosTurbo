@@ -11,3 +11,15 @@
 ## Live-operation scope
 
 No OpenRouter or AIHubMix generation, TTS synthesis, Google Flow generation, Canva mutation, browser session, or paid retry was executed. All verification used local tests, fixtures, mocks, and static checks only.
+
+## Remote CI and deployed smoke
+
+- Remote CI run `33096470647`: FAIL on `Python 3.11 tests` and `Python 3.13 tests`; `Windows smoke tests` passed.
+- Remote CI run `33097217417`: PASS on `Python 3.11 tests`, `Python 3.13 tests`, and `Windows smoke tests`.
+- Deployed dependency sync: `uv sync --frozen` -> PASS (`Checked 124 packages in 3ms`)
+- Service status after restarting `videosturbo-api` and `videosturbo-webui`: PASS (`videosturbo-api`, `videosturbo-webui`, and `videosturbo-worker` all reported `active`)
+- Loopback health smoke: `GET /api/v1/cloud-agent/health` -> PASS (`status=200`, `enabled=true`, `worker_online=true`, `storage_writable=true`)
+- Loopback provider catalog smoke: `GET /api/v1/cloud-agent/research/providers` -> PASS (`status=200`, providers `openrouter` and `aihubmix`, configured booleans only, both `false`)
+- Loopback settings smoke: `GET /api/v1/cloud-agent/research/settings` -> PASS (`status=200`, `provider="unsupported"`)
+- Loopback WebUI smoke: `HEAD http://127.0.0.1:8501/` -> PASS (`HTTP/1.1 200 OK`)
+- Loopback browser-port bind smoke: PASS (`127.0.0.1:6080`, `127.0.0.1:5900`, and IPv6 loopback `[::1]:5900` only)
