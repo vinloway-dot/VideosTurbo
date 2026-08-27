@@ -40,6 +40,12 @@ class TestWebuiStartup(unittest.TestCase):
                 if app.exception:
                     raise RuntimeError([str(item.value) for item in app.exception])
 
+                assert app.title[0].value == "Create a video"
+                assert any(
+                    "Research, write, narrate, and produce" in item.value
+                    for item in app.caption
+                )
+
                 import app.config
 
                 project_root = Path({str(ROOT_DIR)!r}).resolve()

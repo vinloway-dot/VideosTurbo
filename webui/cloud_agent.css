@@ -1,0 +1,72 @@
+:root {
+    --vt-bg: #f5f7fb;
+    --vt-surface: #ffffff;
+    --vt-surface-muted: #f8faff;
+    --vt-text: #101b35;
+    --vt-text-muted: #667085;
+    --vt-border: #e3e8f2;
+    --vt-primary: #155eef;
+    --vt-primary-hover: #004eea;
+    --vt-success: #12a150;
+    --vt-danger: #d92d20;
+    --vt-radius: 14px;
+    --vt-shadow: 0 10px 30px rgba(16, 24, 40, 0.055);
+}
+
+header[data-testid="stHeader"],
+div[data-testid="stToolbar"],
+div[data-testid="stDecoration"],
+section[data-testid="stSidebar"] nav[data-testid="stSidebarNav"] {
+    display: none !important;
+}
+
+.stApp { background: var(--vt-bg); color: var(--vt-text); }
+
+div[data-testid="stMainBlockContainer"] {
+    max-width: 1440px;
+    padding: 1.5rem 2rem 2rem;
+}
+
+section[data-testid="stSidebar"] {
+    border-right: 1px solid var(--vt-border);
+    background: var(--vt-surface);
+}
+
+.vt-wordmark { font-size: 1.35rem; font-weight: 800; padding: 1rem 0.25rem 1.5rem; }
+.vt-wordmark span { color: var(--vt-primary); }
+.vt-breadcrumb, .vt-saved { color: var(--vt-text-muted); font-size: 0.82rem; font-weight: 600; }
+.vt-saved span { color: var(--vt-success); }
+.vt-nav-disabled { color: #98a2b3; padding: 0.7rem 0.75rem; cursor: not-allowed; }
+.vt-system-status { margin-top: 40vh; border: 1px solid var(--vt-border); border-radius: 12px; padding: 0.8rem; color: var(--vt-text-muted); }
+.vt-system-status > span { display: inline-block; width: 0.55rem; height: 0.55rem; border-radius: 50%; margin-right: 0.5rem; background: #2bc46d; }
+
+.vt-workflow {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.75rem;
+    margin: 1rem 0;
+    padding: 0.85rem 1rem;
+    border: 1px solid var(--vt-border);
+    border-radius: var(--vt-radius);
+    background: var(--vt-surface);
+}
+
+.vt-workflow__item { display: flex; align-items: center; gap: 0.7rem; color: #667085; }
+.vt-workflow__item > span { display: grid; width: 2rem; height: 2rem; place-items: center; border: 1px solid #d0d5dd; border-radius: 50%; }
+.vt-workflow__item--active { color: var(--vt-primary); }
+.vt-workflow__item--active > span { color: white; border-color: var(--vt-primary); background: var(--vt-primary); }
+.vt-workflow__item--complete > span { color: var(--vt-primary); border-color: #b2ccff; background: #eff4ff; }
+
+div[class*="st-key-cloud_agent_"] button[kind="primary"] {
+    min-height: 2.65rem;
+    border-color: var(--vt-primary);
+    border-radius: 9px;
+    background: var(--vt-primary);
+}
+
+div[class*="st-key-cloud_agent_"] button:focus-visible,
+div[class*="st-key-cloud_agent_"] input:focus-visible,
+div[class*="st-key-cloud_agent_"] textarea:focus-visible {
+    outline: 3px solid rgba(21, 94, 239, 0.24) !important;
+    outline-offset: 2px;
+}

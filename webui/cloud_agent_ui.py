@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from html import escape
+from pathlib import Path
 from typing import Literal
+
+import streamlit as st
 
 
 StageState = Literal["complete", "active", "pending", "error"]
@@ -22,6 +26,54 @@ _CHECKPOINT_RANK = {
     "FINAL_VALIDATED": 4,
     "COMPLETED": 5,
 }
+
+_CSS_PATH = Path(__file__).with_name("cloud_agent.css")
+
+
+def apply_cloud_agent_theme() -> None:
+    st.html(_CSS_PATH)
+
+
+def render_sidebar() -> None:
+    with st.sidebar:
+        st.html('<div class="vt-wordmark"><span>◆</span> VideosTurbo</div>')
+        st.page_link("Main.py", label="Cloud Agent", icon=":material/auto_awesome:")
+        st.page_link(
+            "pages/2_Music_Batch.py",
+            label="Music Batch",
+            icon=":material/music_note:",
+        )
+        st.html(
+            '<div class="vt-nav-disabled" aria-disabled="true">'
+            '<span class="material-symbols-rounded">folder</span> Projects'
+            '</div>'
+            '<div class="vt-nav-disabled" aria-disabled="true">'
+            '<span class="material-symbols-rounded">settings</span> Settings'
+            '</div>'
+            '<div class="vt-system-status">'
+            '<span aria-hidden="true"></span> All systems operational'
+            '</div>'
+        )
+
+
+def render_page_header(*, saved: bool) -> None:
+    st.html('<div class="vt-breadcrumb">Workspace / Cloud Agent</div>')
+    st.title("Create a video")
+    st.caption("Research, write, narrate, and produce — all in one flow.")
+    if saved:
+        st.html('<div class="vt-saved"><span>✓</span> Saved</div>')
+
+
+def render_workflow_rail(active_step: int) -> None:
+    labels = ("Script & Research", "Voice", "Produce")
+    items = []
+    for index, label in enumerate(labels, start=1):
+        state = "active" if index == active_step else "complete" if index < active_step else "pending"
+        items.append(
+            f'<div class="vt-workflow__item vt-workflow__item--{state}">'
+            f'<span>{index}</span><strong>{escape(label)}</strong></div>'
+        )
+    st.html(f'<div class="vt-workflow">{"".join(items)}</div>')
 
 
 def derive_workflow_step(

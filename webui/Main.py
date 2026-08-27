@@ -12,7 +12,7 @@ if root_dir in sys.path:
     sys.path.remove(root_dir)
 sys.path.insert(0, root_dir)
 
-from webui import cloud_agent
+from webui import cloud_agent, cloud_agent_ui
 
 
 st.set_page_config(
@@ -25,7 +25,11 @@ st.set_page_config(
 
 def _render_application():
     """Render the retained Cloud Agent entry point."""
-    st.title("VideosTurbo")
+    cloud_agent_ui.apply_cloud_agent_theme()
+    cloud_agent_ui.render_sidebar()
+    cloud_agent_ui.render_page_header(
+        saved=bool(st.session_state.get("cloud_agent_draft_script"))
+    )
     cloud_agent.render_cloud_agent_panel()
 
 
