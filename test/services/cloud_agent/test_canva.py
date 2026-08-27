@@ -278,6 +278,13 @@ class _AudioPositionSlider:
         return 1
 
     def get_attribute(self, name):
+        if self.page.pending_audio_position_update:
+            if self.page.audio_position_reads_after_drag:
+                self.page.audio_position_text = "0 seconds"
+                self.page.audio_position_raw = 0
+                self.page.pending_audio_position_update = False
+            else:
+                self.page.audio_position_reads_after_drag += 1
         if self.audio_start:
             if name == "aria-valuetext":
                 return self.page.audio_position_text
@@ -322,8 +329,7 @@ class _AudioPositionMouse:
 
     def up(self):
         assert self.is_down is True
-        self.page.audio_position_text = "0 seconds"
-        self.page.audio_position_raw = 0
+        self.page.pending_audio_position_update = True
 
 
 class FakeCurrentCanvaAudioTimelinePage:
@@ -332,6 +338,8 @@ class FakeCurrentCanvaAudioTimelinePage:
     def __init__(self):
         self.audio_position_text = "9.1 seconds"
         self.audio_position_raw = 9_102_000
+        self.pending_audio_position_update = False
+        self.audio_position_reads_after_drag = 0
         self.audio_box = {"x": 300.0, "y": 20.0, "width": 20.0, "height": 28.0}
         self.zero_box = {"x": 100.0, "y": 20.0, "width": 20.0, "height": 64.0}
         self.mouse = _AudioPositionMouse(self)
@@ -1224,8 +1232,8 @@ def test_canva_assembly_uploads_orders_and_exports_adaptive_six_clip_job(tmp_pat
         ("set_speed", 0.95),
         ("verify_speed", 0.95),
         ("add_uploaded_audio", "voice.mp3"),
-        ("mute_source_audio",),
         ("narration_at_zero",),
+        ("mute_source_audio",),
         ("bound_final_end", 63.25),
         ("verify_timeline_end", 63.25, 1.0),
         ("auto_captions",),

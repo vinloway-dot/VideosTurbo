@@ -159,8 +159,8 @@ class CanvaAssemblyClient:
             for index in range(1, 7):
                 self._set_and_verify_playback(page, index, speed)
         self._add_uploaded_audio(page, audio_path.name)
-        self._mute_source_audio(page)
         self._position_narration_at_zero(page)
+        self._mute_source_audio(page)
         self._bound_final_visual_end(page, target_seconds)
         self._verify_timeline_end(page, target_seconds)
         self._generate_auto_captions(page)
@@ -876,17 +876,30 @@ class CanvaAssemblyClient:
                     page.mouse.move(zero_x, source_y, steps=12)
                     page.mouse.up()
 
-                accessible_position = str(
-                    narration_position.get_attribute("aria-valuetext") or ""
-                ).strip().lower()
-                narration_start = page.locator(self._VIDEO_START_EDGE).nth(6)
-                if accessible_position in {"0 second", "0 seconds"} and str(
-                    narration_start.get_attribute("aria-valuetext") or ""
-                ).strip().lower() in {"0 second", "0 seconds"}:
-                    return
-                raise CanvaUIVerificationError(
-                    "Canva narration cannot be verified at timeline time 0"
-                )
+                deadline = time.monotonic() + min(self.export_timeout_seconds, 10.0)
+                while True:
+                    accessible_position = str(
+                        narration_position.get_attribute("aria-valuetext") or ""
+                    ).strip().lower()
+                    current_starts = page.locator(self._VIDEO_START_EDGE)
+                    narration_start = (
+                        current_starts.nth(6) if current_starts.count() >= 7 else None
+                    )
+                    narration_start_position = str(
+                        narration_start.get_attribute("aria-valuetext")
+                        if narration_start is not None
+                        else ""
+                    ).strip().lower()
+                    if (
+                        accessible_position in {"0 second", "0 seconds"}
+                        and narration_start_position in {"0 second", "0 seconds"}
+                    ):
+                        return
+                    if time.monotonic() >= deadline:
+                        raise CanvaUIVerificationError(
+                            "Canva narration cannot be verified at timeline time 0"
+                        )
+                    time.sleep(self.poll_seconds)
 
         narration_start = starts.nth(6)
         accessible_position = str(
