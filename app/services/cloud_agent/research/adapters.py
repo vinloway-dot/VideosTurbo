@@ -74,7 +74,10 @@ class EvidenceClaim(BaseModel):
     @field_validator("claim", "source_id", "evidence_quote")
     @classmethod
     def _strip_text(cls, value: str) -> str:
-        return str(value or "").strip()
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("value must not be blank")
+        return normalized
 
 
 class ProviderFinalPayload(BaseModel):
@@ -86,12 +89,23 @@ class ProviderFinalPayload(BaseModel):
     @field_validator("script")
     @classmethod
     def _strip_script(cls, value: str) -> str:
-        return str(value or "").strip()
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("script must not be blank")
+        return normalized
 
     @field_validator("source_ids_used")
     @classmethod
     def _normalize_source_ids(cls, value: list[str]) -> list[str]:
-        return [str(item or "").strip() for item in value if str(item or "").strip()]
+        normalized: list[str] = []
+        for item in value:
+            source_id = str(item or "").strip()
+            if not source_id:
+                raise ValueError("source_ids_used entries must not be blank")
+            normalized.append(source_id)
+        if not normalized:
+            raise ValueError("source_ids_used must include at least one source id")
+        return normalized
 
 
 @dataclass(frozen=True)

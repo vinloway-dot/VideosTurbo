@@ -196,6 +196,63 @@ def test_invalid_final_message_raises_research_response_invalid():
     assert captured.value.code == "RESEARCH_RESPONSE_INVALID"
 
 
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("script", "   "),
+        ("source_ids_used", ["source-1", "   "]),
+        ("source_ids_used", ["   "]),
+        (
+            "evidence_claims",
+            [
+                {
+                    "claim": "   ",
+                    "source_id": "source-1",
+                    "evidence_quote": "exact words from source",
+                    "unstable": False,
+                }
+            ],
+        ),
+        (
+            "evidence_claims",
+            [
+                {
+                    "claim": "Verified fact",
+                    "source_id": "   ",
+                    "evidence_quote": "exact words from source",
+                    "unstable": False,
+                }
+            ],
+        ),
+        (
+            "evidence_claims",
+            [
+                {
+                    "claim": "Verified fact",
+                    "source_id": "source-1",
+                    "evidence_quote": "   ",
+                    "unstable": False,
+                }
+            ],
+        ),
+    ],
+)
+def test_final_message_rejects_whitespace_only_required_fields(field_name, field_value):
+    from app.services.cloud_agent.research.adapters import OpenRouterToolCallingAdapter
+
+    payload = json.loads(_final_payload_json())
+    payload[field_name] = field_value
+    client = _FakeClient(
+        completion_response=_completion_response(content=json.dumps(payload))
+    )
+    adapter = OpenRouterToolCallingAdapter(client_factory=_RecordingFactory(client))
+
+    with pytest.raises(ResearchError) as captured:
+        adapter.complete(_provider_request())
+
+    assert captured.value.code == "RESEARCH_RESPONSE_INVALID"
+
+
 def test_unknown_custom_model_fails_before_completion():
     from app.services.cloud_agent.research.adapters import OpenRouterToolCallingAdapter
 

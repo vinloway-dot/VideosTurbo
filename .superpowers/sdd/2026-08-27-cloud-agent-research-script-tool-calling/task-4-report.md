@@ -117,3 +117,99 @@ Notes
 -----
 - Custom-model capability parsing is intentionally strict and fail-closed. If a provider changes its metadata schema, unknown models will surface `PROVIDER_TOOL_CALLING_UNSUPPORTED` or `PROVIDER_MODEL_UNSUPPORTED` until the allowed metadata keys are extended deliberately.
 - Existing untracked `config.toml.backup-*` and `config.toml.save*` files were preserved untouched.
+
+Fix round 1
+-----------
+
+Reviewer finding addressed
+--------------------------
+- IMPORTANT: final evidence-envelope validation now rejects fields that become blank only after trimming, including `script`, every `source_ids_used` entry, and `EvidenceClaim.claim` / `source_id` / `evidence_quote`.
+
+Fix TDD evidence
+----------------
+RED:
+- Command: `uv run pytest test/services/cloud_agent/test_research_adapters.py -q`
+- Output:
+
+```text
+....FFFFF...                                                             [100%]
+=================================== FAILURES ===================================
+____ test_final_message_rejects_whitespace_only_required_fields[script-   ] ____
+
+field_name = 'script', field_value = '   '
+
+    @pytest.mark.parametrize(
+        ("field_name", "field_value"),
+        [
+            ("script", "   "),
+            ("source_ids_used", ["source-1", "   "]),
+            ("source_ids_used", ["   "]),
+            (
+                "evidence_claims",
+                [
+                    {
+                        "claim": "   ",
+                        "source_id": "source-1",
+                        "evidence_quote": "exact words from source",
+                        "unstable": False,
+                    }
+                ],
+            ),
+            (
+                "evidence_claims",
+                [
+                    {
+                        "claim": "Verified fact",
+                        "source_id": "source-1",
+                        "evidence_quote": "   ",
+                        "unstable": False,
+                    }
+                ],
+            ),
+        ],
+    )
+    def test_final_message_rejects_whitespace_only_required_fields(field_name, field_value):
+        from app.services.cloud_agent.research.adapters import OpenRouterToolCallingAdapter
+
+        payload = json.loads(_final_payload_json())
+        payload[field_name] = field_value
+        client = _FakeClient(
+            completion_response=_completion_response(content=json.dumps(payload))
+        )
+        adapter = OpenRouterToolCallingAdapter(client_factory=_RecordingFactory(client))
+
+>       with pytest.raises(ResearchError) as captured:
+E       Failed: DID NOT RAISE ResearchError
+
+test/services/cloud_agent/test_research_adapters.py:239: Failed
+_ test_final_message_rejects_whitespace_only_required_fields[source_ids_used-field_value1] _
+
+field_name = 'source_ids_used', field_value = ['source-1', '   ']
+
+...
+
+_ test_final_message_rejects_whitespace_only_required_fields[evidence_claims-field_value4] _
+
+field_name = 'evidence_claims'
+field_value = [{'claim': 'Verified fact', 'source_id': 'source-1', 'evidence_quote': '   ', 'unstable': False}]
+
+...
+
+=========================== short test summary info ============================
+FAILED test/services/cloud_agent/test_research_adapters.py::test_final_message_rejects_whitespace_only_required_fields[script-   ]
+FAILED test/services/cloud_agent/test_research_adapters.py::test_final_message_rejects_whitespace_only_required_fields[source_ids_used-field_value1]
+FAILED test/services/cloud_agent/test_research_adapters.py::test_final_message_rejects_whitespace_only_required_fields[source_ids_used-field_value2]
+FAILED test/services/cloud_agent/test_research_adapters.py::test_final_message_rejects_whitespace_only_required_fields[evidence_claims-field_value3]
+FAILED test/services/cloud_agent/test_research_adapters.py::test_final_message_rejects_whitespace_only_required_fields[evidence_claims-field_value4]
+5 failed, 7 passed in 1.36s
+```
+
+GREEN / verification:
+- Command: `uv run pytest test/services/cloud_agent/test_research_adapters.py -q && uv run ruff check app/services/cloud_agent/research/adapters.py test/services/cloud_agent/test_research_adapters.py`
+- Output:
+
+```text
+.............                                                            [100%]
+13 passed in 1.33s
+All checks passed!
+```
