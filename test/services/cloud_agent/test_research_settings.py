@@ -1,4 +1,5 @@
 import pytest
+from contextlib import contextmanager
 
 from app.config import config
 from app.services.cloud_agent import factory
@@ -87,4 +88,40 @@ def test_valid_configured_default_provider_is_preserved_without_resave(monkeypat
 
     assert service.get_configured_provider_id() == "aihubmix"
     assert config.app["cloud_agent_research_default_provider"] == "aihubmix"
+    assert saved == []
+
+
+def test_concurrent_valid_provider_update_wins_over_stale_heal(monkeypatch):
+    saved = []
+    monkeypatch.setitem(config.app, "cloud_agent_research_default_provider", "unsupported")
+    monkeypatch.setattr(config, "save_config", lambda: saved.append(True))
+
+    @contextmanager
+    def race_lock():
+        config.app["cloud_agent_research_default_provider"] = "aihubmix"
+        yield
+
+    monkeypatch.setattr(config, "runtime_config_lock", lambda: race_lock())
+    service = ResearchSettingsService()
+
+    assert service.get_configured_provider_id() == "aihubmix"
+    assert config.app["cloud_agent_research_default_provider"] == "aihubmix"
+    assert saved == []
+
+
+def test_concurrent_heal_does_not_redundantly_resave(monkeypatch):
+    saved = []
+    monkeypatch.setitem(config.app, "cloud_agent_research_default_provider", "unsupported")
+    monkeypatch.setattr(config, "save_config", lambda: saved.append(True))
+
+    @contextmanager
+    def race_lock():
+        config.app["cloud_agent_research_default_provider"] = "openrouter"
+        yield
+
+    monkeypatch.setattr(config, "runtime_config_lock", lambda: race_lock())
+    service = ResearchSettingsService()
+
+    assert service.get_configured_provider_id() == "openrouter"
+    assert config.app["cloud_agent_research_default_provider"] == "openrouter"
     assert saved == []

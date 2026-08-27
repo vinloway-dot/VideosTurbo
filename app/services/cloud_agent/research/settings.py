@@ -43,15 +43,17 @@ class ResearchSettingsService:
 
     def get_configured_provider_id(self) -> str:
         key_name = "cloud_agent_research_default_provider"
-        configured = str(config.app.get(key_name, "") or "").strip()
-        if configured in _PROVIDERS:
-            return configured
-
-        fallback = self.DEFAULT_PROVIDER_ID
         with config.runtime_config_lock():
+            configured = str(config.app.get(key_name, "") or "").strip()
+            if configured in _PROVIDERS:
+                return configured
+
+            fallback = self.DEFAULT_PROVIDER_ID
+            if configured == fallback:
+                return fallback
             config.app[key_name] = fallback
             config.save_config()
-        return fallback
+            return fallback
 
     def get_provider(self, provider_id: str) -> ResearchProviderMetadata:
         normalized = self._require_provider(provider_id)
