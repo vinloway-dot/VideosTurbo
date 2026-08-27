@@ -124,3 +124,61 @@ Fix round 1 deploy smoke
 - `ss -ltn | awk '$4 ~ /:(5900|6080)$/ {print $4}'`
   - Result: PASS (`127.0.0.1:6080`, `127.0.0.1:5900`, `[::1]:5900`)
   - Note: `[::1]:5900` is IPv6 loopback only and remained within the task's security intent; no VNC configuration changes were made.
+
+Fix round 2
+-----------
+
+Reviewer finding addressed
+--------------------------
+- `get_configured_provider_id()` read the stored provider before taking `runtime_config_lock()`, so a stale `unsupported` read could later overwrite a concurrent valid `aihubmix` update with `openrouter`, and concurrent healers could redundant-save.
+
+Root cause
+----------
+- The previous helper made its read/validate decision outside the lock, then unconditionally wrote the fallback under the lock based on stale pre-lock state.
+- That left a race window between the stale read and the fallback write.
+
+Fix
+---
+- Moved the full read/validate/write decision for `cloud_agent_research_default_provider` inside `runtime_config_lock()`.
+- The helper now:
+  - returns valid `openrouter` or `aihubmix` values directly under the lock
+  - heals invalid or blank values to `openrouter` under the lock
+  - avoids redundant `save_config()` calls when another concurrent actor has already healed the value before the lock is acquired
+- Added deterministic concurrency regressions that simulate:
+  - a valid concurrent `aihubmix` update winning before the getter acquires the lock
+  - another concurrent healer already writing `openrouter` before the getter acquires the lock
+
+Fix round 2 commit and CI
+-------------------------
+- Commit `bc09a69` — `fix: atomically heal research provider defaults`
+- Draft PR `#4` CI run `33099347766` passed on all three jobs for commit `bc09a69`.
+
+Fix round 2 verification evidence
+---------------------------------
+- `uv run --no-sync pytest -q test/services/cloud_agent/test_research_settings.py -k 'configured_default_provider or concurrent'`
+  - Result: PASS (`4 passed, 4 deselected in 2.46s`)
+- `uv run --no-sync pytest -q test/services/cloud_agent/test_research_contracts.py test/services/cloud_agent/test_research_settings.py test/services/cloud_agent/test_research_store.py test/services/cloud_agent/test_research_network.py test/services/cloud_agent/test_research_runtime.py test/services/cloud_agent/test_research_adapters.py test/services/cloud_agent/test_research_service.py test/services/cloud_agent/test_research_controller.py test/services/test_cloud_agent_controller.py test/services/test_cloud_agent_webui.py`
+  - Result: PASS (`203 passed, 11 warnings in 9.11s`)
+- `uv run --no-sync pytest -q test/services/cloud_agent test/services/test_cloud_agent_controller.py test/services/test_cloud_agent_webui.py test/services/test_llm.py test/services/test_six_clip_plan.py`
+  - Result: PASS (`674 passed, 1 skipped, 11 warnings in 17.64s`)
+- `uv run ruff check app webui test`
+  - Result: PASS (`All checks passed!`)
+- `uv lock --check`
+  - Result: PASS (`Resolved 130 packages in 2ms`)
+
+Fix round 2 deploy smoke
+------------------------
+- Restarted only `videosturbo-api` and `videosturbo-webui`.
+- `systemctl is-active videosturbo-api videosturbo-webui videosturbo-worker`
+  - Result: PASS (`active`, `active`, `active`)
+- `curl -fsS http://127.0.0.1:8080/api/v1/cloud-agent/research/settings | jq '{status, provider: .data.provider}'`
+  - Result: PASS (`status=200`, `provider="openrouter"`)
+- `curl -fsS http://127.0.0.1:8080/api/v1/cloud-agent/research/providers | jq '{status, providers: [.data[] | {id, api_key_configured}]}'`
+  - Result: PASS (`status=200`, `openrouter=false`, `aihubmix=false`)
+- `curl -fsS http://127.0.0.1:8080/api/v1/cloud-agent/health | jq '{status, enabled: .data.enabled, worker_online: .data.worker_online, storage_writable: .data.storage_writable}'`
+  - Result: PASS (`status=200`, `enabled=true`, `worker_online=true`, `storage_writable=true`)
+- `curl -fsSI http://127.0.0.1:8501/ | head -n 1`
+  - Result: PASS (`HTTP/1.1 200 OK`)
+- `ss -ltn | awk '$4 ~ /:(5900|6080)$/ {print $4}'`
+  - Result: PASS (`127.0.0.1:6080`, `127.0.0.1:5900`, `[::1]:5900`)
+  - Note: `[::1]:5900` remained accepted as safe IPv6 loopback within the task's security intent; no VNC configuration changes were made.
