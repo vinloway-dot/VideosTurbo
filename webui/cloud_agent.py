@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import requests
 import streamlit as st
 
+from webui import cloud_agent_ui
+
 
 API_PREFIX = "http://127.0.0.1:8080/api/v1/cloud-agent/"
 API_TIMEOUT_SECONDS = 15
@@ -360,21 +362,6 @@ def _render_research_accounting(accounting):
     )
 
 
-def _render_research_sources(sources):
-    if not sources:
-        return
-    st.caption("Sources")
-    for source in sources:
-        title = str(source.get("title") or source.get("url") or "Untitled source")
-        url = str(source.get("url") or "").strip()
-        if hasattr(st, "markdown") and url:
-            st.markdown(f"- [{title}]({url})")
-        elif url:
-            st.caption(f"{title}: {url}")
-        else:
-            st.caption(title)
-
-
 def _fallback_tts_catalog():
     return [
         {"id": value, "label": label}
@@ -719,6 +706,66 @@ def _render_video_brief(
         )
 
 
+def _refresh_script_editor(*, subject, language, words, custom_system_prompt):
+    script_for_refresh = str(st.session_state.get("cloud_agent_script", ""))
+    if not script_for_refresh.strip():
+        st.error("Script Editor is required before refreshing the draft.")
+        return
+    try:
+        _store_refreshed_draft(
+            _prepare_draft(
+                subject=subject,
+                language=language,
+                target_words=words,
+                script=script_for_refresh,
+                custom_system_prompt=custom_system_prompt,
+            )
+        )
+        st.rerun()
+    except requests.RequestException as exc:
+        st.error(_api_error_message(exc))
+
+
+def _render_script_editor(*, brief, ui_state):
+    with st.container(key="cloud_agent_script_card", border=True):
+        title_row = st.columns([1, 0.24], vertical_alignment="center")
+        title_row[0].subheader("Script editor")
+        if title_row[1].button(
+            "Regenerate",
+            key="cloud_agent_refresh_draft",
+            icon=":material/refresh:",
+            width="stretch",
+        ):
+            _refresh_script_editor(
+                subject=brief.subject,
+                language=brief.language,
+                words=brief.words,
+                custom_system_prompt=brief.custom_system_prompt,
+            )
+        if brief.script_mode == "Research Script":
+            summary = cloud_agent_ui.research_summary(
+                research_draft_id=ui_state.get("cloud_agent_research_draft_id"),
+                sources=ui_state.get("cloud_agent_research_sources", []),
+                accounting=ui_state.get("cloud_agent_research_accounting", {}),
+            )
+            cloud_agent_ui.render_research_summary(summary)
+        script = st.text_area(
+            "Script",
+            key="cloud_agent_script",
+            height=190,
+            label_visibility="collapsed",
+        )
+        with st.expander("View master prompt", expanded=False):
+            master_prompt = st.text_area(
+                "Master prompt",
+                key="cloud_agent_master_prompt",
+                disabled=True,
+                label_visibility="collapsed",
+            )
+        st.caption(f"{len(script.split())} words")
+        return script, master_prompt
+
+
 def render_cloud_agent_panel():
     ui_state = getattr(st, "session_state", {})
     defaults = {
@@ -765,33 +812,8 @@ def render_cloud_agent_panel():
     subject = brief.subject
     words = brief.words
     language = brief.language
-    script_mode = brief.script_mode
     custom_system_prompt = brief.custom_system_prompt
-    script = st.text_area("Script Editor", key="cloud_agent_script")
-    master_prompt = st.text_area(
-        "View Master Prompt", key="cloud_agent_master_prompt", disabled=True
-    )
-    if script_mode == "Research Script":
-        _render_research_accounting(ui_state.get("cloud_agent_research_accounting", {}))
-        _render_research_sources(ui_state.get("cloud_agent_research_sources", []))
-    if st.button("Refresh Draft", key="cloud_agent_refresh_draft"):
-        script_for_refresh = str(st.session_state.get("cloud_agent_script", ""))
-        if not script_for_refresh.strip():
-            st.error("Script Editor is required before refreshing the draft.")
-        else:
-            try:
-                _store_refreshed_draft(
-                    _prepare_draft(
-                        subject=subject,
-                        language=language,
-                        target_words=words,
-                        script=script_for_refresh,
-                        custom_system_prompt=custom_system_prompt,
-                    )
-                )
-                st.rerun()
-            except requests.RequestException as exc:
-                st.error(_api_error_message(exc))
+    script, master_prompt = _render_script_editor(brief=brief, ui_state=ui_state)
     provider_catalog = _fallback_tts_catalog()
     if hasattr(st, "runtime"):
         try:

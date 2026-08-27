@@ -54,7 +54,7 @@ def test_cloud_agent_ui_is_a_thin_fastapi_client_with_required_controls_and_stat
         "Language",
         "Generate script",
         "Script Editor",
-        "View Master Prompt",
+        "View master prompt",
         "TTS Provider",
         "Voice",
         "Speed",
@@ -248,6 +248,9 @@ def test_cloud_agent_language_selector_formats_the_auto_empty_value(monkeypatch)
         def __init__(self, parent):
             self.parent = parent
 
+        def subheader(self, *_args, **_kwargs):
+            return None
+
         def button(self, *_args, **_kwargs):
             return False
 
@@ -324,6 +327,9 @@ def test_cloud_agent_language_selector_formats_the_auto_empty_value(monkeypatch)
 
 def test_cloud_agent_custom_system_prompt_is_hidden_by_default(monkeypatch):
     class Column:
+        def subheader(self, *_args, **_kwargs):
+            return None
+
         def button(self, *_args, **_kwargs):
             return False
 
@@ -454,7 +460,10 @@ def test_canva_check_timeout_is_shown_as_a_safe_webui_error(monkeypatch):
         def __init__(self, pressed_key=""):
             self.pressed_key = pressed_key
 
-        def button(self, _label, *, key):
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def button(self, _label, *, key, **_kwargs):
             return key == self.pressed_key
 
         def link_button(self, *_args, **_kwargs):
@@ -488,8 +497,11 @@ def test_canva_check_timeout_is_shown_as_a_safe_webui_error(monkeypatch):
         def button(self, *_args, **_kwargs):
             return False
 
-        def columns(self, _count):
+        def columns(self, _count, **_kwargs):
             return [Column(), Column("canva-check"), Column(), Column()]
+
+        def container(self, **_kwargs):
+            return nullcontext()
 
         def json(self, *_args, **_kwargs):
             raise AssertionError("Canva timeout must not render a success result")
@@ -654,7 +666,7 @@ def test_research_mode_offers_fastapi_only_controls_and_shared_editor_handoff():
         "Research Script",
         "Source URLs",
         "Generate research script",
-        "Sources",
+        "cloud_agent_research_sources",
     ):
         assert label in source
     assert "sqlite3" not in source.lower()
@@ -917,6 +929,9 @@ def test_research_failure_never_stores_draft(monkeypatch):
             }
 
     class Column:
+        def subheader(self, *_args, **_kwargs):
+            return None
+
         def button(self, *_args, **_kwargs):
             return False
 
@@ -946,6 +961,7 @@ def test_research_failure_never_stores_draft(monkeypatch):
             self.captions = []
             self.radios = []
             self.checkboxes = []
+            self.text_area_calls = []
 
         def subheader(self, *_args, **_kwargs):
             return None
@@ -954,6 +970,7 @@ def test_research_failure_never_stores_draft(monkeypatch):
             return self.session_state.get(kwargs.get("key", ""), kwargs.get("value", ""))
 
         def text_area(self, label, **kwargs):
+            self.text_area_calls.append((label, kwargs))
             if label == "Video subject":
                 return "Research-backed draft"
             if label == "Source URLs":
@@ -1044,6 +1061,14 @@ def test_research_failure_never_stores_draft(monkeypatch):
         {"key": "cloud_agent_research_allow_citations", "value": False},
     ) in fake_streamlit.checkboxes
     assert prepared["allow_citations"] is False
+    assert (
+        "Script",
+        {
+            "key": "cloud_agent_script",
+            "height": 190,
+            "label_visibility": "collapsed",
+        },
+    ) in fake_streamlit.text_area_calls
 
 
 def test_start_button_forwards_stored_research_draft_id(monkeypatch):
@@ -1053,7 +1078,10 @@ def test_start_button_forwards_stored_research_draft_id(monkeypatch):
         def __init__(self, pressed_key=""):
             self.pressed_key = pressed_key
 
-        def button(self, _label, *, key):
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def button(self, _label, *, key, **_kwargs):
             return key == self.pressed_key
 
         def link_button(self, *_args, **_kwargs):
@@ -1098,8 +1126,11 @@ def test_start_button_forwards_stored_research_draft_id(monkeypatch):
         def button(self, *_args, **_kwargs):
             return False
 
-        def columns(self, _count):
+        def columns(self, _count, **_kwargs):
             return [Column(), Column(), Column("cloud_agent_start"), Column()]
+
+        def container(self, **_kwargs):
+            return nullcontext()
 
         def empty(self):
             return nullcontext()
@@ -1136,6 +1167,9 @@ def test_start_button_forwards_stored_research_draft_id(monkeypatch):
 
 def test_standard_mode_hides_research_only_controls(monkeypatch):
     class Column:
+        def subheader(self, *_args, **_kwargs):
+            return None
+
         def button(self, *_args, **_kwargs):
             return False
 

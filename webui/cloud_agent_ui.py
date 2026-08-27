@@ -18,6 +18,51 @@ class StageView:
     state: StageState
 
 
+@dataclass(frozen=True)
+class ResearchSummary:
+    status: str
+    source_count: int
+    source_links: tuple[tuple[str, str], ...]
+    provider_rounds: int | None
+    tool_calls: int | None
+
+
+def research_summary(*, research_draft_id, sources, accounting) -> ResearchSummary:
+    safe_links = tuple(
+        (
+            str(source.get("title") or source.get("url") or "Untitled source"),
+            str(source.get("url") or ""),
+        )
+        for source in list(sources or [])
+        if str(source.get("url") or "").startswith(("http://", "https://"))
+    )
+    safe_accounting = dict(accounting or {})
+    return ResearchSummary(
+        status="Research complete" if str(research_draft_id or "").strip() else "",
+        source_count=len(safe_links),
+        source_links=safe_links,
+        provider_rounds=safe_accounting.get("provider_rounds"),
+        tool_calls=safe_accounting.get("tool_calls"),
+    )
+
+
+def render_research_summary(summary: ResearchSummary) -> None:
+    if not summary.status:
+        return
+    st.caption(f"{summary.status} · {summary.source_count} sources")
+    for title, url in summary.source_links:
+        st.link_button(title, url, width="content")
+    with st.expander("Research details", expanded=False):
+        st.caption(
+            "Provider rounds: "
+            f"{summary.provider_rounds if summary.provider_rounds is not None else 'unavailable'}"
+        )
+        st.caption(
+            "Tool calls: "
+            f"{summary.tool_calls if summary.tool_calls is not None else 'unavailable'}"
+        )
+
+
 _CHECKPOINT_RANK = {
     "NONE": 0,
     "PREFLIGHT_PASSED": 1,

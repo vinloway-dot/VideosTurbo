@@ -87,3 +87,24 @@ def test_failed_job_marks_only_the_current_presentation_stage_as_error():
         "error",
         "pending",
     ]
+
+
+def test_research_summary_never_contains_raw_source_body_or_secret_fields():
+    summary = cloud_agent_ui.research_summary(
+        research_draft_id="draft-1",
+        sources=[
+            {
+                "title": "Rice guide",
+                "url": "https://example.com/rice",
+                "content_hash": "a" * 64,
+                "body": "must not render",
+                "api_key": "must not render",
+            }
+        ],
+        accounting={"provider_rounds": 2, "tool_calls": 1},
+    )
+
+    assert summary.status == "Research complete"
+    assert summary.source_count == 1
+    assert summary.source_links == (("Rice guide", "https://example.com/rice"),)
+    assert "must not render" not in repr(summary)
