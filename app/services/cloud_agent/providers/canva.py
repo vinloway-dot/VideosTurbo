@@ -543,13 +543,15 @@ class CanvaAssemblyClient:
         if hasattr(page, "clear_video_timeline"):
             page.clear_video_timeline()
             return
-        starts = page.locator(self._VIDEO_START_EDGE)
-        while starts.count() > 0:
+        while True:
+            starts = page.locator(self._VIDEO_START_EDGE)
+            if starts.count() == 0:
+                return
             before = starts.count()
             starts.nth(0).locator("xpath=..").click()
             page.keyboard.press("Delete")
             deadline = time.monotonic() + self.export_timeout_seconds
-            while starts.count() >= before:
+            while page.locator(self._VIDEO_START_EDGE).count() >= before:
                 if time.monotonic() >= deadline:
                     raise CanvaUIVerificationError("Canva video timeline cannot be cleared")
                 time.sleep(self.poll_seconds)
@@ -587,7 +589,7 @@ class CanvaAssemblyClient:
         if hasattr(page, "upload_media"):
             page.upload_media(paths)
             return
-        page.get_by_role("tab", name="Uploads", exact=True).click()
+        self._activate_uploads(page)
         video_paths = [
             path for path in paths if path.suffix.lower() in {".mp4", ".mov", ".webm"}
         ]

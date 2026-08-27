@@ -176,6 +176,64 @@ class _TimelineStarts:
         return self.page.timeline_count
 
 
+class _TimelineDeleteHandle:
+    def __init__(self, page):
+        self.page = page
+
+    def locator(self, selector):
+        assert selector == "xpath=.."
+        return self
+
+    def click(self):
+        self.page.selected = True
+
+
+class _StaleTimelineStarts:
+    """Models Canva retaining the old locator after its timeline node unmounts."""
+
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return 1
+
+    def nth(self, index):
+        assert index == 0
+        return _TimelineDeleteHandle(self.page)
+
+
+class _FreshTimelineStarts:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return self.page.timeline_count
+
+    def nth(self, index):
+        assert index == 0
+        return _TimelineDeleteHandle(self.page)
+
+
+class FakeUnmountingTimelinePage:
+    def __init__(self):
+        self.timeline_count = 1
+        self.locator_calls = 0
+        self.selected = False
+        self.keyboard = self
+
+    def locator(self, selector):
+        assert selector == canva.CanvaAssemblyClient._VIDEO_START_EDGE
+        self.locator_calls += 1
+        if self.locator_calls == 1:
+            return _StaleTimelineStarts(self)
+        return _FreshTimelineStarts(self)
+
+    def press(self, key):
+        assert key == "Delete"
+        assert self.selected is True
+        self.timeline_count = 0
+
+
 class _NarrationStartSlider:
     def __init__(self, raw_value, text):
         self.raw_value = raw_value
@@ -671,6 +729,17 @@ class FakeSequentialUploadPage:
             ("tab", "Uploads", True),
         }
         return _ClickOnly()
+
+    def locator(self, selector):
+        assert selector == 'input[type="file"]'
+        return self.upload_input
+
+
+class FakeCurrentSidebarUploadPage:
+    """Current Canva sidebar exposes Uploads through Add elements, not a tab role."""
+
+    def __init__(self):
+        self.upload_input = _SequentialUploadInput()
 
     def locator(self, selector):
         assert selector == 'input[type="file"]'
@@ -1258,6 +1327,19 @@ def test_canva_post_final_cleanup_clears_timeline_before_deleting_managed_upload
     assert page.timeline_video_count == 0
 
 
+def test_canva_timeline_cleanup_requeries_after_canva_unmounts_deleted_scene():
+    """Catches waiting on a stale trim-edge locator after a successful Delete."""
+    page = FakeUnmountingTimelinePage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.0
+    client.poll_seconds = 0.0
+
+    client._clear_video_timeline(page)
+
+    assert page.timeline_count == 0
+    assert page.locator_calls >= 2
+
+
 def test_canva_clean_uploaded_videos_accepts_missing_videos_tab_as_verified_zero_state():
     """Catches treating Canva's absent Videos tab as an error after a successful cleanup."""
     client, _ = _assembly_client(FakeCanvaEditorPage())
@@ -1651,6 +1733,25 @@ def test_canva_uploads_video_batch_then_canonical_audio_and_verifies_each_set(
     assert verified == [
         tuple(path.name for path in clips),
         (audio.name,),
+    ]
+
+
+def test_canva_upload_uses_current_sidebar_activation_before_file_input(tmp_path, monkeypatch):
+    """Catches the current Canva editor where Uploads is no longer a role=tab."""
+    page = FakeCurrentSidebarUploadPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    clips, audio, _ = _media(tmp_path)
+    activations = []
+    monkeypatch.setattr(client, "_activate_uploads", lambda _page: activations.append(True))
+    monkeypatch.setattr(client, "_upload_inventory", lambda _page, _audio: (0, 0))
+    monkeypatch.setattr(client, "_wait_for_upload_completion", lambda *_args, **_kwargs: None)
+
+    client._upload_media(page, [*clips, audio])
+
+    assert activations == [True]
+    assert page.upload_input.submissions == [
+        tuple(str(path) for path in clips),
+        (str(audio),),
     ]
 
 
