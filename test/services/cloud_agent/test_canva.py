@@ -1330,10 +1330,10 @@ def test_canva_auto_captions_selects_classic_style_after_generation():
     assert page.actions == [
         ("select_clip", 1),
         ("caption_control", "Captions"),
+        ("caption_control", "Classic"),
         ("caption_control", "caption_audio_scope"),
         ("caption_control", "All audio"),
         ("caption_control", "Generate captions"),
-        ("caption_control", "Classic"),
     ]
 
 
