@@ -80,6 +80,13 @@ _PRODUCTION_STAGE_LABELS = {
     "export": "Export",
 }
 
+_PRODUCTION_STATE_PRESENTATION = {
+    "complete": ("Complete", "✓"),
+    "active": ("In progress", "▶"),
+    "pending": ("Pending", "○"),
+    "error": ("Error", "!"),
+}
+
 _CSS_PATH = Path(__file__).with_name("cloud_agent.css")
 
 
@@ -102,10 +109,10 @@ def render_sidebar() -> None:
         )
         st.html(
             '<div class="vt-nav-disabled" aria-disabled="true">'
-            '<span class="material-symbols-rounded">folder</span> Projects'
+            '<span class="vt-nav-icon" aria-hidden="true">▦</span> Projects'
             '</div>'
             '<div class="vt-nav-disabled" aria-disabled="true">'
-            '<span class="material-symbols-rounded">settings</span> Settings'
+            '<span class="vt-nav-icon" aria-hidden="true">⚙</span> Settings'
             '</div>'
             '<div class="vt-system-status">'
             '<span aria-hidden="true"></span> All systems operational'
@@ -127,14 +134,39 @@ def render_page_header(*, saved: bool) -> None:
 
 def render_workflow_rail(active_step: int) -> None:
     labels = ("Script & Research", "Voice", "Produce")
+    state_labels = {
+        "complete": "Complete",
+        "active": "Current",
+        "pending": "Upcoming",
+    }
     items = []
     for index, label in enumerate(labels, start=1):
-        state = "active" if index == active_step else "complete" if index < active_step else "pending"
-        items.append(
-            f'<div class="vt-workflow__item vt-workflow__item--{state}">'
-            f'<span>{index}</span><strong>{escape(label)}</strong></div>'
+        state = (
+            "active"
+            if index == active_step
+            else "complete"
+            if index < active_step
+            else "pending"
         )
-    st.html(f'<div class="vt-workflow">{"".join(items)}</div>')
+        state_label = state_labels[state]
+        current = ' aria-current="step"' if state == "active" else ""
+        items.append(
+            '<div role="listitem" '
+            f'class="vt-workflow__item vt-workflow__item--{state}" '
+            f'aria-label="{escape(label)}: {state_label}"{current}>'
+            f'<span class="vt-workflow__number" aria-hidden="true">{index}</span>'
+            f'<strong>{escape(label)}</strong>'
+            f'<span class="vt-workflow__state">{state_label}</span></div>'
+        )
+    workflow_label = (
+        "Video creation workflow, complete"
+        if active_step > len(labels)
+        else "Video creation workflow"
+    )
+    st.html(
+        f'<div class="vt-workflow" role="list" aria-label="{workflow_label}">'
+        f'{"".join(items)}</div>'
+    )
 
 
 def derive_workflow_step(
@@ -142,9 +174,16 @@ def derive_workflow_step(
     prepared_voice_ready: bool,
     job: dict | None,
 ) -> int:
+    snapshot = dict(job or {})
+    status = str(snapshot.get("status") or "").upper()
+    checkpoint = str(snapshot.get("checkpoint") or "").upper()
+    if status == "COMPLETED" or checkpoint == "COMPLETED":
+        return 4
+    if str(snapshot.get("id") or "").strip():
+        return 3
     if not script_ready:
         return 1
-    if not prepared_voice_ready and not (job or {}).get("id"):
+    if not prepared_voice_ready:
         return 2
     return 3
 
@@ -156,9 +195,13 @@ def build_production_stages(
     job: dict | None,
 ) -> tuple[StageView, ...]:
     snapshot = dict(job or {})
-    checkpoint_rank = _CHECKPOINT_RANK.get(str(snapshot.get("checkpoint") or "NONE"), 0)
+    status = str(snapshot.get("status") or "").upper()
+    checkpoint = str(snapshot.get("checkpoint") or "NONE").upper()
+    job_exists = bool(str(snapshot.get("id") or "").strip())
+    job_complete = status == "COMPLETED" or checkpoint == "COMPLETED"
+    checkpoint_rank = 5 if job_complete else _CHECKPOINT_RANK.get(checkpoint, 0)
     complete = {
-        "script": bool(script_ready),
+        "script": bool(script_ready or job_exists or checkpoint_rank >= 1),
         "voice": bool(prepared_voice_ready or checkpoint_rank >= 2),
         "flow": checkpoint_rank >= 3,
         "canva": checkpoint_rank >= 4,
@@ -166,7 +209,7 @@ def build_production_stages(
     }
     order = ("script", "voice", "flow", "canva", "export")
     active = next((key for key in order if not complete[key]), "export")
-    if snapshot.get("status") == "FAILED":
+    if status == "FAILED":
         current = str(snapshot.get("current_step") or "")
         active = (
             "canva" if "canva" in current
@@ -181,7 +224,7 @@ def build_production_stages(
             label=_PRODUCTION_STAGE_LABELS[key],
             state=(
                 "complete" if complete[key]
-                else "error" if key == active and snapshot.get("status") == "FAILED"
+                else "error" if key == active and status == "FAILED"
                 else "active" if key == active
                 else "pending"
             ),
@@ -199,10 +242,19 @@ def render_production_status(stages: tuple[StageView, ...], job: dict | None) ->
         label = _PRODUCTION_STAGE_LABELS.get(stage.key)
         if label is None:
             continue
-        state = stage.state if stage.state in {"complete", "active", "pending", "error"} else "pending"
+        state = (
+            stage.state
+            if stage.state in {"complete", "active", "pending", "error"}
+            else "pending"
+        )
+        state_label, indicator = _PRODUCTION_STATE_PRESENTATION[state]
+        current = ' aria-current="step"' if state in {"active", "error"} else ""
         items.append(
-            f'<li class="vt-production-status__stage vt-production-status__stage--{state}">'
-            f'<span aria-hidden="true"></span><strong>{label}</strong></li>'
+            f'<li class="vt-production-status__stage vt-production-status__stage--{state}" '
+            f'aria-label="{label}: {state_label}"{current}>'
+            '<span class="vt-production-status__indicator" aria-hidden="true">'
+            f"{indicator}</span><strong>{label}</strong>"
+            f'<span class="vt-production-status__state">{state_label}</span></li>'
         )
     st.html(
         '<section class="vt-production-status" aria-label="Production status">'

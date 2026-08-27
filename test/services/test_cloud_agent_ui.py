@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from html import unescape
 from pathlib import Path
 
@@ -109,11 +110,86 @@ def test_cloud_agent_workspace_columns_stack_at_tablet_widths():
     assert mobile_boxes[1]["y"] > mobile_boxes[0]["y"]
 
 
+def test_mobile_sidebar_expand_control_remains_visible_and_reachable():
+    css = Path("webui/cloud_agent.css").read_text(encoding="utf-8")
+    markup = f"""
+        <style>{css}</style>
+        <header data-testid="stHeader">
+          <div data-testid="stToolbar">
+            <button data-testid="stExpandSidebarButton" type="button">☰</button>
+          </div>
+          <div data-testid="stDecoration">Decoration</div>
+        </header>
+    """
+
+    sizes = []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path="/usr/bin/google-chrome", headless=True
+        )
+        page = browser.new_page(viewport={"width": 759, "height": 600})
+        page.set_content(markup)
+        control = page.locator('[data-testid="stExpandSidebarButton"]')
+        for width in (759, 360):
+            page.set_viewport_size({"width": width, "height": 600})
+            sizes.append(
+                control.evaluate(
+                    """element => {
+                        const rect = element.getBoundingClientRect();
+                        return {width: rect.width, height: rect.height};
+                    }"""
+                )
+            )
+        browser.close()
+
+    assert all(
+        box["width"] > 0 and box["height"] > 0 for box in sizes
+    )
+
+
 def test_workflow_step_advances_only_from_accepted_local_artifacts():
     assert derive_workflow_step(False, False, None) == 1
     assert derive_workflow_step(True, False, None) == 2
     assert derive_workflow_step(True, True, None) == 3
     assert derive_workflow_step(True, False, {"id": "job-1"}) == 3
+
+
+def test_fresh_completed_job_completes_workflow_and_all_production_stages():
+    job = {
+        "id": "job-complete",
+        "status": "COMPLETED",
+        "checkpoint": "COMPLETED",
+        "current_step": "completed",
+    }
+
+    assert derive_workflow_step(False, False, job) == 4
+    assert [
+        stage.state
+        for stage in build_production_stages(
+            script_ready=False,
+            prepared_voice_ready=False,
+            job=job,
+        )
+    ] == ["complete"] * 5
+
+
+def test_completed_job_remains_complete_with_a_local_script():
+    job = {
+        "id": "job-complete",
+        "status": "COMPLETED",
+        "checkpoint": "FINAL_VALIDATED",
+        "current_step": "completed",
+    }
+
+    assert derive_workflow_step(True, False, job) == 4
+    assert [
+        stage.state
+        for stage in build_production_stages(
+            script_ready=True,
+            prepared_voice_ready=False,
+            job=job,
+        )
+    ] == ["complete"] * 5
 
 
 def test_production_stages_map_existing_checkpoint_without_new_backend_states():
@@ -179,6 +255,77 @@ def test_production_status_renders_five_fixed_safe_stages(monkeypatch):
     body = " ".join(fake.html_bodies)
     assert all(label in body for label in ("Script", "Voice", "Flow", "Canva", "Export"))
     assert "job-123" in body
+
+
+def test_workflow_and_production_states_have_non_color_semantics(monkeypatch):
+    fake = ShellStreamlit()
+    monkeypatch.setattr(cloud_agent_ui, "st", fake)
+
+    cloud_agent_ui.render_workflow_rail(2)
+    cloud_agent_ui.render_production_status(
+        (
+            cloud_agent_ui.StageView("script", "Script", "complete"),
+            cloud_agent_ui.StageView("voice", "Voice", "active"),
+            cloud_agent_ui.StageView("flow", "Flow", "pending"),
+            cloud_agent_ui.StageView("canva", "Canva", "pending"),
+            cloud_agent_ui.StageView("export", "Export", "pending"),
+        ),
+        {"id": "job-123", "status": "TTS_GENERATING"},
+    )
+    cloud_agent_ui.render_production_status(
+        (
+            cloud_agent_ui.StageView("script", "Script", "complete"),
+            cloud_agent_ui.StageView("voice", "Voice", "complete"),
+            cloud_agent_ui.StageView("flow", "Flow", "error"),
+            cloud_agent_ui.StageView("canva", "Canva", "pending"),
+            cloud_agent_ui.StageView("export", "Export", "pending"),
+        ),
+        {"id": "job-123", "status": "FAILED"},
+    )
+
+    workflow, production, failed_production = fake.html_bodies
+    assert 'role="list"' in workflow
+    assert workflow.count('aria-current="step"') == 1
+    assert all(state in workflow for state in ("Complete", "Current", "Upcoming"))
+    assert all(
+        label in production
+        for label in (
+            'aria-label="Script: Complete"',
+            'aria-label="Voice: In progress"',
+            'aria-label="Flow: Pending"',
+            'aria-label="Canva: Pending"',
+        )
+    )
+    assert production.count('aria-current="step"') == 1
+    assert all(indicator in production for indicator in (">✓<", ">▶<", ">○<"))
+    assert 'aria-label="Flow: Error"' in failed_production
+    assert failed_production.count('aria-current="step"') == 1
+    assert ">!<" in failed_production
+
+
+def test_sidebar_disabled_items_use_local_symbols_instead_of_font_ligatures(
+    monkeypatch,
+):
+    class SidebarStreamlit:
+        def __init__(self):
+            self.sidebar = nullcontext()
+            self.html_bodies = []
+
+        def html(self, body):
+            self.html_bodies.append(str(body))
+
+        def page_link(self, *_args, **_kwargs):
+            return None
+
+    fake = SidebarStreamlit()
+    monkeypatch.setattr(cloud_agent_ui, "st", fake)
+
+    cloud_agent_ui.render_sidebar()
+
+    body = " ".join(fake.html_bodies)
+    assert "Projects" in body and "Settings" in body
+    assert "material-symbols" not in body
+    assert ">folder<" not in body and ">settings<" not in body
 
 
 def test_research_summary_never_contains_raw_source_body_or_secret_fields():

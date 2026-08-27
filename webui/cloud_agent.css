@@ -13,8 +13,28 @@
     --vt-shadow: 0 10px 30px rgba(16, 24, 40, 0.055);
 }
 
-header[data-testid="stHeader"],
-div[data-testid="stToolbar"],
+header[data-testid="stHeader"] {
+    display: block !important;
+    background: transparent;
+    pointer-events: none;
+}
+
+div[data-testid="stToolbar"] {
+    display: flex !important;
+    pointer-events: none;
+}
+
+header[data-testid="stHeader"] [data-testid="stExpandSidebarButton"] {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    border: 1px solid var(--vt-border);
+    border-radius: 9px;
+    background: var(--vt-surface);
+    box-shadow: var(--vt-shadow);
+    pointer-events: auto;
+}
+
+div[data-testid="stHeaderActionElements"],
 div[data-testid="stDecoration"],
 section[data-testid="stSidebar"] [data-testid="stSidebarNav"] {
     display: none !important;
@@ -40,6 +60,7 @@ section[data-testid="stSidebar"] {
 .vt-saved span { color: var(--vt-success); }
 .vt-header-meta { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .vt-nav-disabled { color: #98a2b3; padding: 0.7rem 0.75rem; cursor: not-allowed; }
+.vt-nav-icon { display: inline-block; width: 1.25rem; margin-right: 0.25rem; text-align: center; }
 .vt-system-status { margin-top: 40vh; border: 1px solid var(--vt-border); border-radius: 12px; padding: 0.8rem; color: var(--vt-text-muted); }
 .vt-system-status > span { display: inline-block; width: 0.55rem; height: 0.55rem; border-radius: 50%; margin-right: 0.5rem; background: #2bc46d; }
 
@@ -55,10 +76,11 @@ section[data-testid="stSidebar"] {
 }
 
 .vt-workflow__item { display: flex; align-items: center; gap: 0.7rem; color: #667085; }
-.vt-workflow__item > span { display: grid; width: 2rem; height: 2rem; place-items: center; border: 1px solid #d0d5dd; border-radius: 50%; }
+.vt-workflow__number { display: grid; width: 2rem; height: 2rem; flex: 0 0 2rem; place-items: center; border: 1px solid #d0d5dd; border-radius: 50%; }
+.vt-workflow__state { margin-left: auto; font-size: 0.72rem; font-weight: 700; }
 .vt-workflow__item--active { color: var(--vt-primary); }
-.vt-workflow__item--active > span { color: white; border-color: var(--vt-primary); background: var(--vt-primary); }
-.vt-workflow__item--complete > span { color: var(--vt-primary); border-color: #b2ccff; background: #eff4ff; }
+.vt-workflow__item--active > .vt-workflow__number { color: white; border-color: var(--vt-primary); background: var(--vt-primary); }
+.vt-workflow__item--complete > .vt-workflow__number { color: var(--vt-primary); border-color: #b2ccff; background: #eff4ff; }
 
 div[class*="st-key-cloud_agent_"] button[kind="primary"] {
     min-height: 2.65rem;
@@ -189,12 +211,17 @@ div.st-key-cloud_agent_generation_setup_card [data-testid="stExpander"] {
     text-align: center;
 }
 
-.vt-production-status__stage > span {
-    width: 0.55rem;
-    height: 0.55rem;
-    border-radius: 50%;
-    background: #d0d5dd;
+.vt-production-status__indicator {
+    display: inline-grid;
+    width: 1rem;
+    height: 1rem;
+    place-items: center;
+    color: currentColor;
+    font-weight: 800;
+    line-height: 1;
 }
+
+.vt-production-status__state { font-size: 0.7rem; font-weight: 700; }
 
 .vt-production-status__stage--complete {
     color: var(--vt-success);
@@ -202,23 +229,17 @@ div.st-key-cloud_agent_generation_setup_card [data-testid="stExpander"] {
     background: #ecfdf3;
 }
 
-.vt-production-status__stage--complete > span { background: var(--vt-success); }
-
 .vt-production-status__stage--active {
     color: var(--vt-primary);
     border-color: #b2ccff;
     background: #eff4ff;
 }
 
-.vt-production-status__stage--active > span { background: var(--vt-primary); }
-
 .vt-production-status__stage--error {
     color: var(--vt-danger);
     border-color: #fecdca;
     background: #fef3f2;
 }
-
-.vt-production-status__stage--error > span { background: var(--vt-danger); }
 
 @media (max-width: 760px) {
     .vt-production-status__stages { grid-template-columns: 1fr; }

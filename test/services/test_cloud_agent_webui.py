@@ -568,6 +568,8 @@ def test_successful_start_stores_job_for_production_status(monkeypatch):
 
 
 def test_pause_refreshes_snapshot_without_mutating_the_lookup_widget(monkeypatch):
+    rendered_statuses = []
+
     class WidgetSessionState(dict):
         def __init__(self):
             super().__init__({"cloud_agent_job_lookup_id": "job-123"})
@@ -642,7 +644,9 @@ def test_pause_refreshes_snapshot_without_mutating_the_lookup_widget(monkeypatch
         cloud_agent.cloud_agent_ui, "render_workflow_rail", lambda *_args: None
     )
     monkeypatch.setattr(
-        cloud_agent.cloud_agent_ui, "render_production_status", lambda *_args: None
+        cloud_agent.cloud_agent_ui,
+        "render_production_status",
+        lambda stages, job: rendered_statuses.append((stages, job)),
     )
     monkeypatch.setattr(
         cloud_agent,
@@ -662,6 +666,7 @@ def test_pause_refreshes_snapshot_without_mutating_the_lookup_widget(monkeypatch
 
     assert fake_streamlit.session_state["cloud_agent_job_id"] == "job-123"
     assert fake_streamlit.session_state["cloud_agent_job_snapshot"]["status"] == "PAUSED"
+    assert rendered_statuses[-1][1]["status"] == "PAUSED"
 
 
 def test_job_snapshot_allow_lists_the_production_status_fields(monkeypatch):
@@ -1344,6 +1349,7 @@ def test_research_failure_never_stores_draft(monkeypatch):
 
 def test_start_button_forwards_stored_research_draft_id(monkeypatch):
     recorded = {}
+    rendered_statuses = []
 
     class Column:
         def __init__(self, pressed_key=""):
@@ -1426,7 +1432,13 @@ def test_start_button_forwards_stored_research_draft_id(monkeypatch):
 
     def start_job(**kwargs):
         recorded.update(kwargs)
-        return {"id": "job-123"}
+        return {
+            "id": "job-123",
+            "status": "QUEUED",
+            "checkpoint": "NONE",
+            "current_step": "queued",
+            "progress": 0,
+        }
 
     fake_streamlit = Streamlit()
     monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
@@ -1436,10 +1448,16 @@ def test_start_button_forwards_stored_research_draft_id(monkeypatch):
         "_render_video_brief",
         lambda **_kwargs: cloud_agent._BriefSelection("Research start", 130, "", "Standard Script", ""),
     )
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_ui,
+        "render_production_status",
+        lambda stages, job: rendered_statuses.append((stages, job)),
+    )
 
     cloud_agent.render_cloud_agent_panel()
 
     assert recorded["research_draft_id"] == "draft-1"
+    assert rendered_statuses[-1][1]["status"] == "QUEUED"
 
 
 def test_standard_mode_hides_research_only_controls(monkeypatch):

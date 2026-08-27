@@ -1270,13 +1270,7 @@ def render_cloud_agent_panel():
     )
     job_snapshot = dict(ui_state.get("cloud_agent_job_snapshot") or {})
 
-    cloud_agent_ui.render_workflow_rail(
-        cloud_agent_ui.derive_workflow_step(
-            script_ready,
-            prepared_voice_ready,
-            job_snapshot,
-        )
-    )
+    workflow_slot = st.container(key="cloud_agent_workflow_slot")
     with st.container(key="cloud_agent_workspace"):
         workspace = st.columns([1.85, 1], gap="large", vertical_alignment="top")
         with workspace[0]:
@@ -1300,21 +1294,16 @@ def render_cloud_agent_panel():
                 research_provider=brief.research_provider,
                 research_model=brief.research_model,
             )
-            _render_start_action(
+            started_job = _render_start_action(
                 brief=brief,
                 script=script,
                 master_prompt=master_prompt,
                 generation=generation,
                 ui_state=ui_state,
             )
-    cloud_agent_ui.render_production_status(
-        cloud_agent_ui.build_production_stages(
-            script_ready=script_ready,
-            prepared_voice_ready=prepared_voice_ready,
-            job=job_snapshot,
-        ),
-        job_snapshot,
-    )
+            if started_job is not None:
+                job_snapshot = dict(ui_state.get("cloud_agent_job_snapshot") or {})
+    production_status_slot = st.container(key="cloud_agent_production_status_slot")
     with st.expander("Job controls", expanded=False):
         readiness_controls = st.columns(2)
         for service, column in (
@@ -1351,6 +1340,7 @@ def render_cloud_agent_panel():
                 try:
                     job = _api("POST", f"jobs/{job_id}/{action.lower()}")
                     _store_job_snapshot(job)
+                    job_snapshot = dict(ui_state.get("cloud_agent_job_snapshot") or {})
                     if action == "Retry":
                         st.caption(
                             "Flow failed before generation. Existing narration will be reused."
@@ -1363,10 +1353,28 @@ def render_cloud_agent_panel():
             try:
                 job = _api("GET", f"jobs/{job_id.strip()}")
                 _store_job_snapshot(job)
+                job_snapshot = dict(ui_state.get("cloud_agent_job_snapshot") or {})
                 if message := _job_error_message(job):
                     st.error(message)
             except requests.RequestException as exc:
                 st.error(_api_error_message(exc))
         st.caption(
             "Narration Too Long: shorten script; reduce Target Words; increase Voice Rate"
+        )
+    with workflow_slot:
+        cloud_agent_ui.render_workflow_rail(
+            cloud_agent_ui.derive_workflow_step(
+                script_ready,
+                prepared_voice_ready,
+                job_snapshot,
+            )
+        )
+    with production_status_slot:
+        cloud_agent_ui.render_production_status(
+            cloud_agent_ui.build_production_stages(
+                script_ready=script_ready,
+                prepared_voice_ready=prepared_voice_ready,
+                job=job_snapshot,
+            ),
+            job_snapshot,
         )
