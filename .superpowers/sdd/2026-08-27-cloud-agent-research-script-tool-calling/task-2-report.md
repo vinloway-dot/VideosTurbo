@@ -100,3 +100,91 @@ Notes
 -----
 - Preserved the existing untracked `config.toml.backup-*` and `config.toml.save*` artifacts.
 - No additional concerns at handoff.
+
+Round 1 fixes
+-------------
+
+Reviewer findings addressed
+---------------------------
+- HIGH: Persisted research source provenance now sanitizes public URLs before storage/serialization so presigned query tokens, fragments, and embedded credentials are not durably stored or returned.
+- MEDIUM: `SuccessfulResearchDraft.script_hash` now requires a canonical lowercase SHA-256 hex digest instead of any arbitrary 64-character string.
+
+Fix TDD evidence
+----------------
+RED:
+- Command: `uv run pytest test/services/cloud_agent/test_research_store.py -q`
+- Output:
+
+```text
+.F.F..                                                                   [100%]
+=================================== FAILURES ===================================
+____ test_store_sanitizes_persisted_source_urls_before_returning_or_storing ____
+
+tmp_path = PosixPath('/tmp/pytest-of-linuxuser/pytest-439/test_store_sanitizes_persisted0')
+
+    def test_store_sanitizes_persisted_source_urls_before_returning_or_storing(tmp_path):
+        store = ResearchDraftStore(tmp_path / "cloud-agent.sqlite3")
+        saved = store.save_success(
+            make_successful_draft().model_copy(
+                update={
+                    "sources": [
+                        ResearchSourceDraft(
+                            url=(
+                                "https://example.com/article/path"
+                                "?X-Amz-Signature=secret-signature&token=secret-token"
+                                "#private-fragment"
+                            ),
+                            title="Signed source",
+                            body="source body",
+                        )
+                    ]
+                }
+            )
+        )
+
+        loaded = store.get(saved.research_draft_id)
+
+        assert loaded is not None
+>       assert loaded.sources[0].url == "https://example.com/article/path"
+E       AssertionError: assert 'https://exam...vate-fragment' == 'https://exam.../article/path'
+E
+E         - https://example.com/article/path
+E         + https://example.com/article/path?X-Amz-Signature=secret-signature&token=secret-token#private-fragment
+
+test/services/cloud_agent/test_research_store.py:82: AssertionError
+___________ test_successful_draft_rejects_non_canonical_script_hash ____________
+
+    def test_successful_draft_rejects_non_canonical_script_hash():
+>       with pytest.raises(ValueError, match="canonical lowercase SHA-256"):
+E       Failed: DID NOT RAISE ValueError
+
+test/services/cloud_agent/test_research_store.py:104: Failed
+=========================== short test summary info ============================
+FAILED test/services/cloud_agent/test_research_store.py::test_store_sanitizes_persisted_source_urls_before_returning_or_storing
+FAILED test/services/cloud_agent/test_research_store.py::test_successful_draft_rejects_non_canonical_script_hash
+2 failed, 4 passed in 2.41s
+```
+
+GREEN / verification:
+- Command: `uv run pytest test/services/cloud_agent/test_research_store.py -q`
+- Output:
+
+```text
+......                                                                   [100%]
+6 passed in 2.35s
+```
+
+- Command: `uv run pytest test/services/cloud_agent/test_research_settings.py test/services/cloud_agent/test_research_store.py -q`
+- Output:
+
+```text
+.........                                                                [100%]
+9 passed in 2.38s
+```
+
+- Command: `uv run ruff check app/services/cloud_agent/factory.py app/services/cloud_agent/research test/services/cloud_agent/test_research_settings.py test/services/cloud_agent/test_research_store.py`
+- Output:
+
+```text
+All checks passed!
+```

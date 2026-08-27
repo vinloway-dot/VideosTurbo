@@ -1,14 +1,19 @@
 import hmac
+import re
 import sqlite3
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.services.cloud_agent.research.errors import ResearchError
 from app.services.cloud_agent.research.models import ResearchUsageAccounting
+
+
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def utc_now() -> str:
@@ -19,16 +24,39 @@ def sha256_text(value: str) -> str:
     return sha256(str(value or "").strip().encode("utf-8")).hexdigest()
 
 
+def _safe_public_url(value: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+
+    try:
+        parsed = urlsplit(normalized)
+    except ValueError:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return ""
+
+    netloc = parsed.hostname.lower()
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
 class ResearchSourceDraft(BaseModel):
     url: str
     title: str = ""
     body: str = Field(default="", exclude=True)
     source_hash: str = Field(default="", max_length=64)
 
-    @field_validator("url", "title", "body", "source_hash")
+    @field_validator("title", "body", "source_hash")
     @classmethod
     def _strip_text(cls, value: str) -> str:
         return str(value or "").strip()
+
+    @field_validator("url")
+    @classmethod
+    def _sanitize_url(cls, value: str) -> str:
+        return _safe_public_url(value)
 
     @model_validator(mode="after")
     def _derive_source_hash(self):
@@ -67,8 +95,8 @@ class SuccessfulResearchDraft(BaseModel):
     def _validate_usage_provider_and_hash(self):
         if self.usage.provider != self.provider or self.usage.model != self.model:
             raise ValueError("usage provider/model must match the persisted draft")
-        if len(self.script_hash) != 64:
-            raise ValueError("script_hash must be a SHA-256 hex digest")
+        if not _SHA256_HEX_RE.fullmatch(self.script_hash):
+            raise ValueError("script_hash must be a canonical lowercase SHA-256 hex digest")
         return self
 
 
