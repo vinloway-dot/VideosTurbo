@@ -766,26 +766,41 @@ class ResearchScriptService:
         prompt = str(value or "").lower()
         clauses = re.split(r"[.!?;\n]+|\b(?:but|however)\b", prompt)
         request_patterns = (
+            re.compile(r"\b(?P<action>cite)\b"),
             re.compile(
-                r"\b(?P<action>cite|reference|link\s+to)\b"
-                r"[^.!?;\n]{0,80}?\b(?:sources?|references?)\b"
+                r"\b(?P<action>reference|link\s+to)\b"
+                r"[^.!?;\n]{0,80}?\b(?:sources?|claims?|facts?|urls?)\b"
             ),
             re.compile(
                 r"\b(?P<action>include|add|provide|show|display|list)\b"
-                r"[^.!?;\n]{0,80}?\b(?:citations?|urls?|references?|sources?|"
-                r"source\s+links?|links?\s+to\s+sources?)\b"
+                r"[^.!?;\n]{0,80}?\b(?:citations?|urls?|references|sources|"
+                r"source\s+(?:citations?|links?)|reference\s+(?:links?|list|section)|"
+                r"links?\s+to\s+sources?)\b"
             ),
             re.compile(
                 r"\b(?P<action>use)\b[^.!?;\n]{0,80}?"
-                r"\b(?:citations?|urls?|references?|source\s+links?)\b"
+                r"\b(?:citations?|urls?|references|source\s+(?:citations?|links?)|"
+                r"reference\s+(?:links?|list|section))\b"
             ),
         )
-        negation = re.compile(r"\b(?:do\s+not|don't|never|avoid|omit|without)\b")
+        negation = re.compile(
+            r"(?:\b(?:do\s+not|don't|never|need\s+not|no\s+need\s+to|"
+            r"not\s+(?:necessary|required)\s+to|under\s+no\s+circumstances|"
+            r"(?:should|must|may|can|could|would|will)\s+not)\b"
+            r"(?:\s+\w+){0,2}\s*)$"
+        )
+        shared_negation = re.compile(
+            r"\b(?:do\s+not|don't|never|need\s+not|no\s+need\s+to|"
+            r"under\s+no\s+circumstances)\b[^.!?;\n]{0,60}\bor\s*$"
+        )
         for clause in clauses:
             for pattern in request_patterns:
                 for match in pattern.finditer(clause):
                     prefix = clause[: match.start("action")]
-                    if negation.search(prefix[-40:]) is None:
+                    if (
+                        negation.search(prefix[-80:]) is None
+                        and shared_negation.search(prefix[-80:]) is None
+                    ):
                         return True
         return False
 

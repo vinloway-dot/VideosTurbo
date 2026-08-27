@@ -144,3 +144,58 @@ failures or errors.
 - No configuration file or dependency lock changed.
 - The protected untracked `config.toml.backup-*` and `config.toml.save*` files were
   left unmodified and excluded from staging.
+
+## Fix round 1: citation authorization grammar
+
+### Review finding
+
+The first matcher still authorized citations from three common negation forms and
+from ordinary `source`/`reference` noun phrases. It also required `cite` to be
+followed by `source` or `reference`, rejecting the clear affirmative instruction
+`Cite factual claims.`
+
+The corrected matcher now treats `cite` itself as an affirmative action, restricts
+generic verbs to citation-specific targets, and recognizes direct `no need to`,
+`need not`, `under no circumstances`, and shared `or`-scoped negation forms.
+
+### RED evidence
+
+```text
+$ uv run pytest test/services/cloud_agent/test_research_service.py::test_unrequested_or_negated_citation_forms_are_rejected test/services/cloud_agent/test_research_service.py::test_affirmative_citation_request_allows_citations test/services/cloud_agent/test_research_service.py::test_cite_factual_claims_authorizes_citations test/services/cloud_agent/test_research_service.py::test_ordinary_non_citation_use_of_source_is_allowed -q
+6 failed, 8 passed in 2.22s
+```
+
+The six intended failures covered `No need to include citations`, `You need not
+include citations`, `Under no circumstances include citations`, `Include a reference
+implementation`, `Display the source language accurately`, and the rejected
+affirmative `Cite factual claims.` control.
+
+The first minimal grammar change exposed two existing-control regressions before the
+fix was accepted:
+
+```text
+2 failed, 12 passed in 2.16s
+```
+
+Those failures were the shared `Do not cite sources or include URLs` negation and the
+ordinary `Use sources only to verify factual accuracy` prompt. The matcher was narrowed
+before proceeding.
+
+### GREEN evidence
+
+```text
+$ uv run pytest test/services/cloud_agent/test_research_service.py::test_unrequested_or_negated_citation_forms_are_rejected test/services/cloud_agent/test_research_service.py::test_affirmative_citation_request_allows_citations test/services/cloud_agent/test_research_service.py::test_cite_factual_claims_authorizes_citations test/services/cloud_agent/test_research_service.py::test_ordinary_non_citation_use_of_source_is_allowed -q
+14 passed in 1.92s
+
+$ uv run pytest test/services/cloud_agent/test_research_service.py -q
+41 passed in 3.04s
+
+$ uv run pytest test/services/cloud_agent/test_research_contracts.py test/services/cloud_agent/test_research_settings.py test/services/cloud_agent/test_research_store.py test/services/cloud_agent/test_research_network.py test/services/cloud_agent/test_research_runtime.py test/services/cloud_agent/test_research_adapters.py test/services/cloud_agent/test_research_service.py test/services/cloud_agent/test_research_controller.py test/services/test_cloud_agent_controller.py test/services/test_cloud_agent_webui.py -q
+204 passed, 11 warnings in 26.31s
+
+$ uv run ruff check app webui test
+All checks passed!
+```
+
+All review-round checks remained local and non-paid. The protected configuration
+backups remained unmodified and unstaged.

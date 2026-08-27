@@ -599,6 +599,11 @@ def test_claim_sources_must_match_declared_source_ids_used(service, adapter, run
         ("Read more at www.example.com/article.", "Use a neutral educational tone."),
         ("Read more at https://example.com/article.", "Do not cite sources or include URLs."),
         ("Verified fact [1].", "Use sources only to verify factual accuracy."),
+        ("Verified fact [1].", "No need to include citations."),
+        ("Verified fact [1].", "You need not include citations."),
+        ("Verified fact [1].", "Under no circumstances include citations."),
+        ("Verified fact [1].", "Include a reference implementation."),
+        ("Verified fact [1].", "Display the source language accurately."),
     ],
 )
 def test_unrequested_or_negated_citation_forms_are_rejected(
@@ -627,6 +632,17 @@ def test_affirmative_citation_request_allows_citations(service, adapter):
     result = service.create_draft(request)
 
     assert result.script == "Read more at https://example.com/article [1]."
+
+
+def test_cite_factual_claims_authorizes_citations(service, adapter):
+    adapter.queue_final(script="Verified fact [1].")
+    request = request_with_one_url().model_copy(
+        update={"custom_system_prompt": "Cite factual claims."}
+    )
+
+    result = service.create_draft(request)
+
+    assert result.script == "Verified fact [1]."
 
 
 def test_ordinary_non_citation_use_of_source_is_allowed(service, adapter):
