@@ -96,6 +96,121 @@ Focused verification
 All checks passed!
 ```
 
+Round 2 fixes
+-------------
+
+Reviewer findings addressed
+---------------------------
+- IMPORTANT: Research source URL sanitization now preserves safe canonical identity parameters such as `v=` and `list=` while stripping secret/signature/token-style query parameters, embedded credentials, and fragments.
+- IMPORTANT: Legacy `research_sources.source_url` rows are sanitized again on read, so older stored signed URLs are no longer returned verbatim even before any migration/cleanup pass.
+- MEDIUM: The canonical lowercase SHA-256 `script_hash` validation from round 1 remains in place.
+
+Fix TDD evidence
+----------------
+RED:
+- Command: `uv run pytest test/services/cloud_agent/test_research_store.py -q`
+- Output:
+
+```text
+.FF....                                                                  [100%]
+=================================== FAILURES ===================================
+__ test_store_preserves_safe_query_identity_while_stripping_secret_url_parts ___
+
+tmp_path = PosixPath('/tmp/pytest-of-linuxuser/pytest-442/test_store_preserves_safe_quer0')
+
+    def test_store_preserves_safe_query_identity_while_stripping_secret_url_parts(tmp_path):
+        store = ResearchDraftStore(tmp_path / "cloud-agent.sqlite3")
+        saved = store.save_success(
+            make_successful_draft().model_copy(
+                update={
+                    "sources": [
+                        ResearchSourceDraft(
+                            url=(
+                                "https://example.com/watch"
+                                "?v=abc123&list=PL42"
+                                "&X-Amz-Signature=secret-signature&token=secret-token"
+                                "#private-fragment"
+                            ),
+                            title="Signed source",
+                            body="source body",
+                        )
+                    ]
+                }
+            )
+        )
+
+        loaded = store.get(saved.research_draft_id)
+
+        assert loaded is not None
+>       assert loaded.sources[0].url == "https://example.com/watch?v=abc123&list=PL42"
+E       AssertionError: assert 'https://example.com/watch' == 'https://exam...123&list=PL42'
+E
+E         - https://example.com/watch?v=abc123&list=PL42
+E         + https://example.com/watch
+
+test/services/cloud_agent/test_research_store.py:83: AssertionError
+___________ test_store_sanitizes_legacy_rows_when_returning_sources ____________
+
+tmp_path = PosixPath('/tmp/pytest-of-linuxuser/pytest-442/test_store_sanitizes_legacy_ro0')
+
+    def test_store_sanitizes_legacy_rows_when_returning_sources(tmp_path):
+        store = ResearchDraftStore(tmp_path / "cloud-agent.sqlite3")
+        saved = store.save_success(make_successful_draft())
+
+        with sqlite3.connect(store.db_path) as connection:
+            connection.execute(
+                """
+                UPDATE research_sources
+                SET source_url = ?
+                WHERE research_draft_id = ?
+                """,
+                (
+                    "https://legacy.example.com/watch?v=keepme&api_key=secret-key#frag",
+                    saved.research_draft_id,
+                ),
+            )
+
+        loaded = store.get(saved.research_draft_id)
+
+        assert loaded is not None
+>       assert loaded.sources[0].url == "https://legacy.example.com/watch?v=keepme"
+E       AssertionError: assert 'https://lega...cret-key#frag' == 'https://lega...atch?v=keepme'
+E
+E         - https://legacy.example.com/watch?v=keepme
+E         + https://legacy.example.com/watch?v=keepme&api_key=secret-key#frag
+E         ?                                          ++++++++++++++++++++++++
+
+test/services/cloud_agent/test_research_store.py:114: AssertionError
+=========================== short test summary info ============================
+FAILED test/services/cloud_agent/test_research_store.py::test_store_preserves_safe_query_identity_while_stripping_secret_url_parts
+FAILED test/services/cloud_agent/test_research_store.py::test_store_sanitizes_legacy_rows_when_returning_sources
+2 failed, 5 passed in 2.38s
+```
+
+GREEN / verification:
+- Command: `uv run pytest test/services/cloud_agent/test_research_store.py -q`
+- Output:
+
+```text
+.......                                                                  [100%]
+7 passed in 2.41s
+```
+
+- Command: `uv run pytest test/services/cloud_agent/test_research_settings.py test/services/cloud_agent/test_research_store.py -q`
+- Output:
+
+```text
+..........                                                               [100%]
+10 passed in 2.47s
+```
+
+- Command: `uv run ruff check app/services/cloud_agent/factory.py app/services/cloud_agent/research test/services/cloud_agent/test_research_settings.py test/services/cloud_agent/test_research_store.py`
+- Output:
+
+```text
+All checks passed!
+```
+
 Notes
 -----
 - Preserved the existing untracked `config.toml.backup-*` and `config.toml.save*` artifacts.

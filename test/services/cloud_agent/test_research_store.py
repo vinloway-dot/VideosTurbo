@@ -56,7 +56,7 @@ def test_store_persists_only_non_secret_provenance(tmp_path):
     assert "source body" not in dump
 
 
-def test_store_sanitizes_persisted_source_urls_before_returning_or_storing(tmp_path):
+def test_store_preserves_safe_query_identity_while_stripping_secret_url_parts(tmp_path):
     store = ResearchDraftStore(tmp_path / "cloud-agent.sqlite3")
     saved = store.save_success(
         make_successful_draft().model_copy(
@@ -64,8 +64,9 @@ def test_store_sanitizes_persisted_source_urls_before_returning_or_storing(tmp_p
                 "sources": [
                     ResearchSourceDraft(
                         url=(
-                            "https://example.com/article/path"
-                            "?X-Amz-Signature=secret-signature&token=secret-token"
+                            "https://example.com/watch"
+                            "?v=abc123&list=PL42"
+                            "&X-Amz-Signature=secret-signature&token=secret-token"
                             "#private-fragment"
                         ),
                         title="Signed source",
@@ -79,7 +80,7 @@ def test_store_sanitizes_persisted_source_urls_before_returning_or_storing(tmp_p
     loaded = store.get(saved.research_draft_id)
 
     assert loaded is not None
-    assert loaded.sources[0].url == "https://example.com/article/path"
+    assert loaded.sources[0].url == "https://example.com/watch?v=abc123&list=PL42"
     assert "secret-signature" not in loaded.model_dump_json()
     assert "secret-token" not in loaded.model_dump_json()
     with sqlite3.connect(store.db_path) as connection:
@@ -87,7 +88,31 @@ def test_store_sanitizes_persisted_source_urls_before_returning_or_storing(tmp_p
             "SELECT source_url FROM research_sources WHERE research_draft_id = ?",
             (saved.research_draft_id,),
         ).fetchone()
-    assert persisted == ("https://example.com/article/path",)
+    assert persisted == ("https://example.com/watch?v=abc123&list=PL42",)
+
+
+def test_store_sanitizes_legacy_rows_when_returning_sources(tmp_path):
+    store = ResearchDraftStore(tmp_path / "cloud-agent.sqlite3")
+    saved = store.save_success(make_successful_draft())
+
+    with sqlite3.connect(store.db_path) as connection:
+        connection.execute(
+            """
+            UPDATE research_sources
+            SET source_url = ?
+            WHERE research_draft_id = ?
+            """,
+            (
+                "https://legacy.example.com/watch?v=keepme&api_key=secret-key#frag",
+                saved.research_draft_id,
+            ),
+        )
+
+    loaded = store.get(saved.research_draft_id)
+
+    assert loaded is not None
+    assert loaded.sources[0].url == "https://legacy.example.com/watch?v=keepme"
+    assert "secret-key" not in loaded.model_dump_json()
 
 
 def test_association_rejects_changed_script(tmp_path):

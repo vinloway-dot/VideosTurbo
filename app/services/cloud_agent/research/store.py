@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -14,6 +14,40 @@ from app.services.cloud_agent.research.models import ResearchUsageAccounting
 
 
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+_SECRET_QUERY_KEYS = frozenset(
+    {
+        "access_key",
+        "access_token",
+        "api_key",
+        "apikey",
+        "auth",
+        "authorization",
+        "client_secret",
+        "credential",
+        "expires",
+        "key",
+        "password",
+        "policy",
+        "s3token",
+        "secret",
+        "session_token",
+        "sig",
+        "signature",
+        "token",
+        "x-amz-algorithm",
+        "x-amz-credential",
+        "x-amz-date",
+        "x-amz-expires",
+        "x-amz-security-token",
+        "x-amz-signature",
+        "x-goog-algorithm",
+        "x-goog-credential",
+        "x-goog-date",
+        "x-goog-expires",
+        "x-goog-signature",
+        "x-goog-signedheaders",
+    }
+)
 
 
 def utc_now() -> str:
@@ -39,7 +73,30 @@ def _safe_public_url(value: str) -> str:
     netloc = parsed.hostname.lower()
     if parsed.port is not None:
         netloc = f"{netloc}:{parsed.port}"
-    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    sanitized_query = urlencode(
+        [
+            (key, query_value)
+            for key, query_value in parse_qsl(parsed.query, keep_blank_values=True)
+            if not _is_secret_query_key(key)
+        ],
+        doseq=True,
+    )
+    return urlunsplit((parsed.scheme, netloc, parsed.path, sanitized_query, ""))
+
+
+def _is_secret_query_key(key: str) -> bool:
+    normalized = str(key or "").strip().lower()
+    if not normalized:
+        return False
+    return (
+        normalized in _SECRET_QUERY_KEYS
+        or normalized.startswith("x-amz-")
+        or normalized.startswith("x-goog-")
+        or normalized.endswith("_token")
+        or normalized.endswith("_signature")
+        or normalized.endswith("_secret")
+        or normalized.endswith("_key")
+    )
 
 
 class ResearchSourceDraft(BaseModel):
@@ -354,7 +411,7 @@ class ResearchDraftStore:
                     research_source_id=source_row["research_source_id"],
                     research_draft_id=source_row["research_draft_id"],
                     position=source_row["position"],
-                    url=source_row["source_url"],
+                    url=_safe_public_url(source_row["source_url"]),
                     title=source_row["source_title"],
                     source_hash=source_row["source_hash"],
                     created_at=source_row["created_at"],
