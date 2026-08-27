@@ -71,6 +71,82 @@ def test_cloud_agent_tts_settings_payload_omits_blank_secret_unless_confirmed():
     ) == {"settings": {}, "clear_secret_fields": ["api_key"]}
 
 
+def test_tts_settings_save_verification_requires_the_server_readback_to_match():
+    metadata = {
+        "settings": [
+            {
+                "name": "api_key",
+                "label": "ElevenLabs API Key",
+                "kind": "password",
+                "configured": True,
+            },
+            {
+                "name": "model_id",
+                "label": "ElevenLabs Model",
+                "kind": "select",
+                "value": "eleven_v3",
+            },
+        ]
+    }
+
+    assert cloud_agent._verify_tts_settings_save(
+        settings={"api_key": "new-secret", "model_id": "eleven_v3"},
+        secret_fields={"api_key"},
+        clear_secret_fields=[],
+        metadata=metadata,
+    ) == (
+        True,
+        "Saved and verified: ElevenLabs API Key configured; ElevenLabs Model = eleven_v3",
+    )
+
+    mismatched_metadata = {
+        "settings": [
+            {
+                "name": "api_key",
+                "label": "ElevenLabs API Key",
+                "kind": "password",
+                "configured": True,
+            },
+            {
+                "name": "model_id",
+                "label": "ElevenLabs Model",
+                "kind": "select",
+                "value": "eleven_v3",
+            },
+        ]
+    }
+    assert cloud_agent._verify_tts_settings_save(
+        settings={"model_id": "eleven_flash_v2_5"},
+        secret_fields={"api_key"},
+        clear_secret_fields=[],
+        metadata=mismatched_metadata,
+    ) == (
+        False,
+        "Could not verify saved settings. Reload the provider settings and try again.",
+    )
+
+
+def test_cloud_agent_defaults_save_verification_requires_exact_readback():
+    payload = {
+        "tts_provider": "elevenlabs",
+        "voice_id": "elevenlabs:voice-1",
+        "voice_speed": 1.0,
+        "custom_system_prompt": "Use a calm tone.",
+    }
+
+    assert cloud_agent._verify_cloud_agent_defaults_save(payload, payload) == (
+        True,
+        "Saved and verified.",
+    )
+    assert cloud_agent._verify_cloud_agent_defaults_save(
+        payload,
+        {**payload, "voice_id": "different-voice"},
+    ) == (
+        False,
+        "Could not verify saved defaults. Reload the page and try again.",
+    )
+
+
 def test_cloud_agent_ui_offers_explicit_secret_removal_and_voice_refresh():
     source = UI_SOURCE.read_text(encoding="utf-8")
 
@@ -449,5 +525,6 @@ def test_cloud_agent_defaults_payload_keeps_voice_and_custom_system_prompt_toget
 def test_cloud_agent_ui_exposes_visible_individual_save_controls_for_voice_and_prompt():
     source = UI_SOURCE.read_text(encoding="utf-8")
 
-    assert "Save Voice Default" in source
+    assert "Save TTS Provider & Voice Default" in source
     assert "Save Custom System Prompt" in source
+    assert "Saved and verified" in source

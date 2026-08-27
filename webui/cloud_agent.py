@@ -62,6 +62,69 @@ def _tts_settings_payload(*, settings, secret_fields, clear_secret_fields):
     }
 
 
+def _verify_tts_settings_save(*, settings, secret_fields, clear_secret_fields, metadata):
+    """Confirm safe, observable settings after the server has saved them."""
+    fields = {field["name"]: field for field in metadata.get("settings", [])}
+    verified = []
+    for name, value in settings.items():
+        field = fields.get(name)
+        if field is None:
+            return (
+                False,
+                "Could not verify saved settings. Reload the provider settings and try again.",
+            )
+        label = field.get("label", name)
+        if name in secret_fields:
+            if not str(value).strip():
+                continue
+            if not field.get("configured"):
+                return (
+                    False,
+                    "Could not verify saved settings. Reload the provider settings and try again.",
+                )
+            verified.append(f"{label} configured")
+        elif field.get("value") != value:
+            return (
+                False,
+                "Could not verify saved settings. Reload the provider settings and try again.",
+            )
+        else:
+            verified.append(f"{label} = {field.get('value')}")
+
+    for name in clear_secret_fields:
+        field = fields.get(name)
+        if field is None or field.get("configured"):
+            return (
+                False,
+                "Could not verify saved settings. Reload the provider settings and try again.",
+            )
+        verified.append(f"{field.get('label', name)} removed")
+
+    if not verified:
+        return False, "Enter a setting to save, or explicitly remove a stored key."
+    return True, f"Saved and verified: {'; '.join(verified)}"
+
+
+def _clear_tts_settings_feedback():
+    st.session_state.pop("cloud_agent_tts_settings_feedback", None)
+
+
+def _clear_provider_feedback():
+    st.session_state.pop("cloud_agent_defaults_feedback", None)
+    _clear_tts_settings_feedback()
+
+
+def _verify_cloud_agent_defaults_save(payload, saved_defaults):
+    if all(saved_defaults.get(name) == value for name, value in payload.items()):
+        return True, "Saved and verified."
+    return False, "Could not verify saved defaults. Reload the page and try again."
+
+
+def _save_and_verify_cloud_agent_defaults(payload):
+    _save_cloud_agent_defaults(payload)
+    return _verify_cloud_agent_defaults_save(payload, _load_cloud_agent_defaults())
+
+
 def _fallback_tts_catalog():
     return [
         {"id": value, "label": label}
@@ -222,13 +285,14 @@ def render_cloud_agent_panel():
             key="cloud_agent_custom_system_prompt",
             max_chars=8000,
             help="Leave blank to use the system default script prompt.",
+            on_change=lambda: ui_state.pop("cloud_agent_defaults_feedback", None),
         )
         if st.button(
             "Save Custom System Prompt",
             key="cloud_agent_save_custom_system_prompt",
         ):
             try:
-                _save_cloud_agent_defaults(
+                verified, message = _save_and_verify_cloud_agent_defaults(
                     _cloud_agent_defaults_payload(
                         tts_provider=defaults["tts_provider"],
                         voice_id=defaults["voice_id"],
@@ -236,7 +300,11 @@ def render_cloud_agent_panel():
                         custom_system_prompt=custom_system_prompt,
                     )
                 )
-                st.rerun()
+                if verified:
+                    ui_state["cloud_agent_defaults_feedback"] = message
+                    st.rerun()
+                else:
+                    st.error(message)
             except requests.RequestException as exc:
                 st.error(_api_error_message(exc))
     if st.button("Generate Script", key="cloud_agent_generate_script"):
@@ -289,7 +357,9 @@ def render_cloud_agent_panel():
         ui_state["cloud_agent_provider"] = next(iter(provider_labels), "")
     provider = st.selectbox(
         "TTS Provider", list(provider_labels),
-        format_func=lambda value: provider_labels[value], key="cloud_agent_provider",
+        format_func=lambda value: provider_labels[value],
+        key="cloud_agent_provider",
+        on_change=_clear_provider_feedback,
     )
     provider_metadata = {"voices": [], "settings": []}
     if hasattr(st, "runtime"):
@@ -309,7 +379,10 @@ def render_cloud_agent_panel():
         "Voice", list(voice_labels) or [""],
         format_func=lambda value: voice_labels.get(value, "Select a configured voice"),
         key="cloud_agent_voice",
+        on_change=lambda: ui_state.pop("cloud_agent_defaults_feedback", None),
     )
+    if feedback := ui_state.get("cloud_agent_tts_settings_feedback"):
+        st.success(feedback)
     with st.expander("TTS Provider Settings", expanded=False):
         settings = {}
         secret_fields = set()
@@ -319,20 +392,61 @@ def render_cloud_agent_panel():
             if field["kind"] == "password":
                 secret_fields.add(name)
                 st.caption(f"{field['label']}: {'configured' if field.get('configured') else 'not configured'}")
-                settings[name] = st.text_input(field["label"], type="password", key=f"cloud_tts_{provider}_{name}")
+                settings[name] = st.text_input(
+                    field["label"],
+                    type="password",
+                    key=f"cloud_tts_{provider}_{name}",
+                    on_change=_clear_tts_settings_feedback,
+                )
                 if hasattr(st, "checkbox") and st.checkbox(
                     f"Remove stored key: {field['label']}",
                     key=f"cloud_tts_remove_{provider}_{name}",
+                    on_change=_clear_tts_settings_feedback,
                 ):
                     clear_secret_fields.append(name)
             elif field["kind"] == "select":
-                settings[name] = st.selectbox(field["label"], field.get("choices", []), key=f"cloud_tts_{provider}_{name}")
+                settings[name] = st.selectbox(
+                    field["label"],
+                    field.get("choices", []),
+                    key=f"cloud_tts_{provider}_{name}",
+                    on_change=_clear_tts_settings_feedback,
+                )
+            elif field["kind"] == "voice_list":
+                settings[name] = st.text_input(
+                    field["label"],
+                    value=", ".join(field.get("value") or []),
+                    key=f"cloud_tts_{provider}_{name}",
+                    on_change=_clear_tts_settings_feedback,
+                )
             else:
-                settings[name] = st.text_input(field["label"], value=str(field.get("value") or ""), key=f"cloud_tts_{provider}_{name}")
+                settings[name] = st.text_input(
+                    field["label"],
+                    value=str(field.get("value") or ""),
+                    key=f"cloud_tts_{provider}_{name}",
+                    on_change=_clear_tts_settings_feedback,
+                )
         if st.button("Save TTS Settings", key="cloud_agent_save_tts_settings"):
             try:
-                _api("PUT", f"tts/providers/{provider}/settings", json=_tts_settings_payload(settings=settings, secret_fields=secret_fields, clear_secret_fields=clear_secret_fields))
-                st.rerun()
+                _api(
+                    "PUT",
+                    f"tts/providers/{provider}/settings",
+                    json=_tts_settings_payload(
+                        settings=settings,
+                        secret_fields=secret_fields,
+                        clear_secret_fields=clear_secret_fields,
+                    ),
+                )
+                verified, message = _verify_tts_settings_save(
+                    settings=settings,
+                    secret_fields=secret_fields,
+                    clear_secret_fields=clear_secret_fields,
+                    metadata=_api("GET", f"tts/providers/{provider}"),
+                )
+                if verified:
+                    ui_state["cloud_agent_tts_settings_feedback"] = message
+                    st.rerun()
+                else:
+                    st.error(message)
             except requests.RequestException as exc:
                 st.error(_api_error_message(exc))
         if provider_metadata.get("requires_explicit_voice_refresh") and st.button("Load Voices", key="cloud_agent_load_tts_voices"):
@@ -341,10 +455,21 @@ def render_cloud_agent_panel():
                 st.rerun()
             except requests.RequestException as exc:
                 st.error(_api_error_message(exc))
-    speed = st.number_input("Speed", min_value=0.1, value=1.0, key="cloud_agent_speed")
-    if st.button("Save Voice Default", key="cloud_agent_save_voice_default"):
+    speed = st.number_input(
+        "Speed",
+        min_value=0.1,
+        value=1.0,
+        key="cloud_agent_speed",
+        on_change=lambda: ui_state.pop("cloud_agent_defaults_feedback", None),
+    )
+    if feedback := ui_state.get("cloud_agent_defaults_feedback"):
+        st.success(feedback)
+    if st.button(
+        "Save TTS Provider & Voice Default",
+        key="cloud_agent_save_voice_default",
+    ):
         try:
-            _save_cloud_agent_defaults(
+            verified, message = _save_and_verify_cloud_agent_defaults(
                 _cloud_agent_defaults_payload(
                     tts_provider=provider,
                     voice_id=voice,
@@ -352,14 +477,18 @@ def render_cloud_agent_panel():
                     custom_system_prompt=defaults["custom_system_prompt"],
                 )
             )
-            st.rerun()
+            if verified:
+                ui_state["cloud_agent_defaults_feedback"] = message
+                st.rerun()
+            else:
+                st.error(message)
         except requests.RequestException as exc:
             st.error(_api_error_message(exc))
     with st.expander("Cloud Agent Defaults", expanded=False):
         st.caption("Save the selected voice and Custom System Prompt for future jobs.")
         if st.button("Save All Defaults", key="cloud_agent_save_defaults"):
             try:
-                _save_cloud_agent_defaults(
+                verified, message = _save_and_verify_cloud_agent_defaults(
                     _cloud_agent_defaults_payload(
                         tts_provider=provider,
                         voice_id=voice,
@@ -367,7 +496,11 @@ def render_cloud_agent_panel():
                         custom_system_prompt=custom_system_prompt,
                     )
                 )
-                st.rerun()
+                if verified:
+                    ui_state["cloud_agent_defaults_feedback"] = message
+                    st.rerun()
+                else:
+                    st.error(message)
             except requests.RequestException as exc:
                 st.error(_api_error_message(exc))
         if st.button("Reset Defaults", key="cloud_agent_reset_defaults"):
