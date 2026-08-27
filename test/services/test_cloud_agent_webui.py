@@ -704,6 +704,19 @@ def test_research_model_options_come_from_provider_catalog():
     assert provider["custom_model_id"] == "openai/gpt-5.6-sol-pro"
 
 
+def test_research_model_selection_reads_streamlit_widget_state():
+    widget_state = {
+        "cloud_agent_research_aihubmix_model": "gpt-5.6-sol",
+        "cloud_agent_research_aihubmix_custom_model_id": "vendor/custom-model",
+    }
+
+    assert cloud_agent._research_model_choice("aihubmix", widget_state) == "gpt-5.6-sol"
+    assert (
+        cloud_agent._research_custom_model_id("aihubmix", widget_state)
+        == "vendor/custom-model"
+    )
+
+
 def test_research_key_submit_removes_raw_secret_before_api_call(monkeypatch):
     state_key = "cloud_agent_research_api_key_openrouter"
     session_state = {state_key: "raw-secret"}

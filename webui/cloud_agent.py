@@ -288,12 +288,20 @@ def _research_provider_metadata(catalog, provider):
 
 def _research_model_choice(provider, settings):
     provider_key = f"{provider}_model"
-    return str(settings.get(provider_key, "") or "").strip()
+    value = settings.get(
+        provider_key,
+        settings.get(f"cloud_agent_research_{provider_key}", ""),
+    )
+    return str(value or "").strip()
 
 
 def _research_custom_model_id(provider, settings):
     provider_key = f"{provider}_custom_model_id"
-    return str(settings.get(provider_key, "") or "").strip()
+    value = settings.get(
+        provider_key,
+        settings.get(f"cloud_agent_research_{provider_key}", ""),
+    )
+    return str(value or "").strip()
 
 
 def _clear_research_state():
