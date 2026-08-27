@@ -1296,9 +1296,9 @@ def test_research_failure_never_stores_draft(monkeypatch):
     assert (
         "Script",
         {
-            "key": "cloud_agent_script",
-            "height": 190,
-            "label_visibility": "collapsed",
+                "key": "cloud_agent_script",
+                "height": 120,
+                "label_visibility": "collapsed",
         },
     ) in fake_streamlit.text_area_calls
 

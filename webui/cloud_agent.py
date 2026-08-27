@@ -751,7 +751,7 @@ def _render_script_editor(*, brief, ui_state):
         script = st.text_area(
             "Script",
             key="cloud_agent_script",
-            height=190,
+            height=120,
             label_visibility="collapsed",
         )
         with st.expander("View master prompt", expanded=False):
@@ -1304,16 +1304,14 @@ def render_cloud_agent_panel():
                 generation=generation,
                 ui_state=ui_state,
             )
-
-    job_snapshot = dict(ui_state.get("cloud_agent_job_snapshot") or {})
-    cloud_agent_ui.render_production_status(
-        cloud_agent_ui.build_production_stages(
-            script_ready=script_ready,
-            prepared_voice_ready=prepared_voice_ready,
-            job=job_snapshot,
-        ),
-        job_snapshot,
-    )
+            cloud_agent_ui.render_production_status(
+                cloud_agent_ui.build_production_stages(
+                    script_ready=script_ready,
+                    prepared_voice_ready=prepared_voice_ready,
+                    job=job_snapshot,
+                ),
+                job_snapshot,
+            )
     with st.expander("Job controls", expanded=False):
         readiness_controls = st.columns(2)
         for service, column in (

@@ -110,11 +110,15 @@ def render_sidebar() -> None:
 
 
 def render_page_header(*, saved: bool) -> None:
-    st.html('<div class="vt-breadcrumb">Workspace&nbsp;&nbsp;/&nbsp;&nbsp;Cloud Agent</div>')
+    saved_indicator = '<div class="vt-saved"><span>✓</span> Saved</div>' if saved else ""
+    st.html(
+        '<div class="vt-header-meta">'
+        '<div class="vt-breadcrumb">Workspace&nbsp;&nbsp;/&nbsp;&nbsp;Cloud Agent</div>'
+        f"{saved_indicator}"
+        "</div>"
+    )
     st.title("Create a video")
     st.caption("Research, write, narrate, and produce — all in one flow.")
-    if saved:
-        st.html('<div class="vt-saved"><span>✓</span> Saved</div>')
 
 
 def render_workflow_rail(active_step: int) -> None:

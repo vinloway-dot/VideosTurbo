@@ -16,7 +16,7 @@
 header[data-testid="stHeader"],
 div[data-testid="stToolbar"],
 div[data-testid="stDecoration"],
-section[data-testid="stSidebar"] nav[data-testid="stSidebarNav"] {
+section[data-testid="stSidebar"] [data-testid="stSidebarNav"] {
     display: none !important;
 }
 
@@ -24,10 +24,12 @@ section[data-testid="stSidebar"] nav[data-testid="stSidebarNav"] {
 
 div[data-testid="stMainBlockContainer"] {
     max-width: 1440px;
-    padding: 1.5rem 2rem 2rem;
+    padding: 1rem 2rem 1.5rem;
 }
 
 section[data-testid="stSidebar"] {
+    min-width: 245px !important;
+    width: 245px !important;
     border-right: 1px solid var(--vt-border);
     background: var(--vt-surface);
 }
@@ -36,6 +38,7 @@ section[data-testid="stSidebar"] {
 .vt-wordmark span { color: var(--vt-primary); }
 .vt-breadcrumb, .vt-saved { color: var(--vt-text-muted); font-size: 0.82rem; font-weight: 600; }
 .vt-saved span { color: var(--vt-success); }
+.vt-header-meta { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .vt-nav-disabled { color: #98a2b3; padding: 0.7rem 0.75rem; cursor: not-allowed; }
 .vt-system-status { margin-top: 40vh; border: 1px solid var(--vt-border); border-radius: 12px; padding: 0.8rem; color: var(--vt-text-muted); }
 .vt-system-status > span { display: inline-block; width: 0.55rem; height: 0.55rem; border-radius: 50%; margin-right: 0.5rem; background: #2bc46d; }
@@ -72,7 +75,7 @@ div[class*="st-key-cloud_agent_"] textarea:focus-visible {
 }
 
 div.st-key-cloud_agent_brief_card {
-    margin: 1rem 0 1.25rem;
+    margin: 0.75rem 0;
     border-color: var(--vt-border);
     border-radius: var(--vt-radius);
     box-shadow: var(--vt-shadow);
@@ -94,23 +97,35 @@ div[class*="st-key-cloud_agent_research_source_"] input {
     background: var(--vt-surface);
 }
 
-div.st-key-cloud_agent_brief_card [data-testid="stSegmentedControl"] {
+div.st-key-cloud_agent_brief_card [data-testid="stButtonGroup"] {
     margin: 0.75rem 0;
 }
 
-div.st-key-cloud_agent_brief_card [data-testid="stSegmentedControl"] button {
+div.st-key-cloud_agent_brief_card [data-testid="stButtonGroup"] button {
     min-height: 2.5rem;
 }
 
+div.st-key-cloud_agent_subject [data-testid="stTextArea"] textarea {
+    min-height: 56px !important;
+    height: 56px !important;
+}
+
+div.st-key-cloud_agent_script_mode [data-testid="stButtonGroup"]
+button[data-selected="true"] {
+    color: var(--vt-primary) !important;
+    border-color: #b2ccff !important;
+    background: #eff4ff !important;
+}
+
 div.st-key-cloud_agent_script_card {
-    margin: 1rem 0 1.25rem;
+    margin: 0.75rem 0;
     border-color: var(--vt-border);
     border-radius: var(--vt-radius);
     box-shadow: var(--vt-shadow);
 }
 
 div.st-key-cloud_agent_script_card [data-testid="stTextArea"] textarea {
-    min-height: 190px;
+    min-height: 120px;
     background: var(--vt-surface-muted);
 }
 
@@ -214,7 +229,7 @@ div.st-key-cloud_agent_generation_setup_card [data-testid="stExpander"] {
     div[class*="st-key-cloud_agent_workspace"] div[data-testid="stHorizontalBlock"] {
         flex-wrap: wrap;
     }
-    div[class*="st-key-cloud_agent_workspace"] div[data-testid="column"] {
+    div[class*="st-key-cloud_agent_workspace"] div[data-testid="stColumn"] {
         flex: 1 1 100% !important;
         width: 100% !important;
     }
