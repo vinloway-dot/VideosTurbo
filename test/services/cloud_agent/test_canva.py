@@ -332,6 +332,17 @@ class _AudioPositionMouse:
         self.page.pending_audio_position_update = True
 
 
+class _AudioTrackButton:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return 1
+
+    def click(self):
+        self.page.audio_track_selected = True
+
+
 class FakeCurrentCanvaAudioTimelinePage:
     """Current Canva exposes a separate draggable audio-position control."""
 
@@ -340,6 +351,7 @@ class FakeCurrentCanvaAudioTimelinePage:
         self.audio_position_raw = 9_102_000
         self.pending_audio_position_update = False
         self.audio_position_reads_after_drag = 0
+        self.audio_track_selected = False
         self.audio_box = {"x": 300.0, "y": 20.0, "width": 20.0, "height": 28.0}
         self.zero_box = {"x": 100.0, "y": 20.0, "width": 20.0, "height": 64.0}
         self.mouse = _AudioPositionMouse(self)
@@ -349,6 +361,8 @@ class FakeCurrentCanvaAudioTimelinePage:
         return _AudioTimelineStarts(self)
 
     def get_by_role(self, role, *, name, exact):
+        if (role, name, exact) == ("button", "voice.mp3, audio track", True):
+            return _AudioTrackButton(self)
         assert (role, name, exact) == ("slider", "Trimming position", True)
         return _AudioPositionSlider(self)
 
@@ -1254,8 +1268,9 @@ def test_canva_moves_current_audio_track_to_timeline_zero_before_verifying():
     page = FakeCurrentCanvaAudioTimelinePage()
     client, _ = _assembly_client(FakeCanvaEditorPage())
 
-    client._position_narration_at_zero(page)
+    client._position_narration_at_zero(page, "voice.mp3")
 
+    assert page.audio_track_selected is True
     assert page.audio_position_text == "0 seconds"
     assert page.mouse.moves
 

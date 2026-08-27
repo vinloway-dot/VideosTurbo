@@ -159,7 +159,7 @@ class CanvaAssemblyClient:
             for index in range(1, 7):
                 self._set_and_verify_playback(page, index, speed)
         self._add_uploaded_audio(page, audio_path.name)
-        self._position_narration_at_zero(page)
+        self._position_narration_at_zero(page, audio_path.name)
         self._mute_source_audio(page)
         self._bound_final_visual_end(page, target_seconds)
         self._verify_timeline_end(page, target_seconds)
@@ -843,16 +843,24 @@ class CanvaAssemblyClient:
                 raise CanvaUIVerificationError("Canva narration was not added to the timeline")
             time.sleep(self.poll_seconds)
 
-    def _position_narration_at_zero(self, page: Any) -> None:
+    def _position_narration_at_zero(self, page: Any, audio_name: str = "") -> None:
         if hasattr(page, "position_narration_at_zero"):
             page.position_narration_at_zero()
             return
-        starts = page.locator(self._VIDEO_START_EDGE)
-        if starts.count() < 7:
-            raise CanvaUIVerificationError("Canva narration cannot be verified at timeline time 0")
 
         # Current Canva adds narration at the playhead.  Its audio track has a
         # dedicated accessible position handle, unlike the six visual scenes.
+        if audio_name and hasattr(page, "get_by_role"):
+            audio_track = page.get_by_role(
+                "button", name=f"{audio_name}, audio track", exact=True
+            )
+            if audio_track.count() != 1:
+                raise CanvaUIVerificationError("Canva narration audio track cannot be found")
+            audio_track.click()
+
+        starts = page.locator(self._VIDEO_START_EDGE)
+        if starts.count() < 7:
+            raise CanvaUIVerificationError("Canva narration cannot be verified at timeline time 0")
         if hasattr(page, "get_by_role"):
             narration_position = page.get_by_role(
                 "slider", name="Trimming position", exact=True
