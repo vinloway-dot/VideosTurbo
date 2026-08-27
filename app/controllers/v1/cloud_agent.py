@@ -1,7 +1,8 @@
+import json
 import shutil
 from pathlib import Path
 
-from fastapi import Body, Depends, Request
+from fastapi import Depends, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -274,6 +275,22 @@ def _parse_research_api_key(body: object) -> str:
     return normalized
 
 
+async def _parse_research_api_key_request(request: Request) -> str:
+    try:
+        raw_body = await request.body()
+    except Exception as exc:
+        raise ResearchError("RESEARCH_RESPONSE_INVALID", "request body unavailable") from exc
+
+    if not raw_body:
+        parsed = {}
+    else:
+        try:
+            parsed = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ResearchError("RESEARCH_RESPONSE_INVALID", "invalid api key payload") from exc
+    return _parse_research_api_key(parsed)
+
+
 def _research_association_failed(
     store: CloudJobStore, job_id: str, exc: Exception
 ) -> HttpException:
@@ -526,16 +543,14 @@ def update_research_settings(
 
 
 @router.put("/cloud-agent/research/providers/{provider_id}/api-key")
-def update_research_provider_api_key(
+async def update_research_provider_api_key(
     provider_id: str,
     request: Request,
-    body: object = Body(default=None),
     service: ResearchSettingsService = Depends(get_research_settings_service),
 ):
-    del request
     try:
         data = service.set_api_key(
-            provider_id, _parse_research_api_key(body)
+            provider_id, await _parse_research_api_key_request(request)
         ).model_dump(mode="json")
     except ResearchError as exc:
         raise _research_http_exception(exc) from exc

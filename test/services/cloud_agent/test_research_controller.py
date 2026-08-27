@@ -433,6 +433,35 @@ def test_oversized_provider_key_request_returns_safe_typed_error(
     assert "input" not in response.text
 
 
+def test_malformed_provider_key_json_returns_safe_typed_error(
+    tmp_path, monkeypatch
+):
+    client = research_client(
+        tmp_path,
+        monkeypatch,
+        research_service=forbidden_adapter(),
+    )
+
+    response = client.request(
+        "PUT",
+        "/api/v1/cloud-agent/research/providers/openrouter/api-key",
+        content='{"api_key": "secret"',
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["message"] == "ผลลัพธ์ Research ไม่สมบูรณ์ จึงยังไม่เปลี่ยน Script Editor"
+    assert response.json()["data"]["code"] == "RESEARCH_RESPONSE_INVALID"
+    assert response.json()["data"]["accounting"] == {
+        "tool_calls": 0,
+        "provider_rounds": 0,
+        "usage": {},
+        "cost": 0.0,
+    }
+    assert "secret" not in response.text
+    assert "detail" not in response.text
+
+
 def test_research_settings_rejects_unsupported_provider(tmp_path, monkeypatch):
     client = research_client(
         tmp_path,

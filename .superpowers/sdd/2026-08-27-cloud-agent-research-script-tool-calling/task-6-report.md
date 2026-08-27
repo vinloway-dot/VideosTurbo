@@ -85,3 +85,34 @@ GREEN / verification:
 38 passed, 11 warnings in 27.52s
 All checks passed!
 ```
+
+Fix round 2
+-----------
+
+Reviewer finding addressed
+--------------------------
+- IMPORTANT: `PUT /cloud-agent/research/providers/{provider_id}/api-key` now bypasses FastAPI body-model parsing entirely and parses the raw request body inside the endpoint, so syntactically malformed JSON, non-object JSON, and invalid API-key payloads all return the same safe Research envelope without `detail`, echoed `input`, or raw secret text.
+
+Fix round 2 TDD evidence
+------------------------
+RED:
+- Command: `uv run pytest test/services/cloud_agent/test_research_controller.py -q`
+- Output:
+
+```text
+......F.                                                            [100%]
+...
+E       KeyError: 'message'
+...
+1 failed, 12 passed, 11 warnings in 28.69s
+```
+
+GREEN / verification:
+- Command: `uv run pytest test/services/cloud_agent/test_research_controller.py test/services/test_cloud_agent_controller.py -q && uv run ruff check app/controllers/v1/cloud_agent.py test/services/cloud_agent/test_research_controller.py test/services/test_cloud_agent_controller.py`
+- Output:
+
+```text
+...........................                                  [100%]
+39 passed, 11 warnings in 26.46s
+All checks passed!
+```
