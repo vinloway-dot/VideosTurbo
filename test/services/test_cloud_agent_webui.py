@@ -2,6 +2,7 @@ import ast
 from contextlib import nullcontext
 from pathlib import Path
 
+import pytest
 import requests
 
 from webui import cloud_agent
@@ -570,3 +571,306 @@ def test_cloud_agent_ui_exposes_visible_individual_save_controls_for_voice_and_p
     assert "Save TTS Provider & Voice Default" in source
     assert "Save Custom System Prompt" in source
     assert "Saved and verified" in source
+
+
+def test_research_mode_offers_fastapi_only_controls_and_shared_editor_handoff():
+    source = UI_SOURCE.read_text(encoding="utf-8")
+
+    for label in (
+        "Standard Script",
+        "Research Script",
+        "Source URLs",
+        "Generate Research Script",
+        "Sources",
+    ):
+        assert label in source
+    assert "sqlite3" not in source.lower()
+    assert "PersistentBrowserManager" not in source
+
+
+def test_research_error_data_reads_safe_message_code_and_accounting():
+    class Response:
+        def json(self):
+            return {
+                "status": 422,
+                "message": "กรุณาใส่ URL อย่างน้อยหนึ่งแหล่ง",
+                "data": {
+                    "code": "URL_REQUIRED",
+                    "accounting": {"provider_rounds": 0},
+                },
+            }
+
+    assert cloud_agent._research_error_data(Response()) == {
+        "message": "กรุณาใส่ URL อย่างน้อยหนึ่งแหล่ง",
+        "code": "URL_REQUIRED",
+        "accounting": {"provider_rounds": 0},
+    }
+
+
+def test_research_settings_save_requires_exact_server_readback(monkeypatch):
+    responses = iter(
+        [
+            {
+                "provider": "openrouter",
+                "openrouter_model": "openai/gpt-5.6-sol-pro",
+                "openrouter_custom_model_id": "",
+                "aihubmix_model": "gpt-5.6-sol",
+                "aihubmix_custom_model_id": "",
+                "custom_system_prompt": "Use source evidence first.",
+            },
+            {
+                "provider": "aihubmix",
+                "openrouter_model": "openai/gpt-5.6-sol-pro",
+                "openrouter_custom_model_id": "",
+                "aihubmix_model": "gpt-5.6-sol",
+                "aihubmix_custom_model_id": "",
+                "custom_system_prompt": "Use source evidence first.",
+            },
+        ]
+    )
+
+    def api(method, path, **_kwargs):
+        assert (method, path) in {
+            ("PUT", "research/settings"),
+            ("GET", "research/settings"),
+        }
+        return next(responses)
+
+    monkeypatch.setattr(cloud_agent, "_api", api)
+
+    assert cloud_agent._save_and_verify_research_settings(
+        {
+            "provider": "openrouter",
+            "openrouter_model": "openai/gpt-5.6-sol-pro",
+            "openrouter_custom_model_id": "",
+            "aihubmix_model": "gpt-5.6-sol",
+            "aihubmix_custom_model_id": "",
+            "custom_system_prompt": "Use source evidence first.",
+        }
+    ) == (
+        False,
+        "Could not verify saved research settings. Reload the page and try again.",
+    )
+
+
+def test_blank_research_key_is_not_sent_as_replacement():
+    assert cloud_agent._research_key_payload("") is None
+    assert cloud_agent._research_key_payload(" new-key ") == {"api_key": "new-key"}
+
+
+def test_store_draft_clears_stale_research_provenance(monkeypatch):
+    session_state = {
+        "cloud_agent_research_draft_id": "draft-1",
+        "cloud_agent_research_sources": [{"url": "https://example.com"}],
+        "cloud_agent_research_accounting": {"provider_rounds": 2},
+    }
+    monkeypatch.setattr(cloud_agent.st, "session_state", session_state)
+
+    cloud_agent._store_draft(
+        {
+            "script": "Standard narration",
+            "master_prompt": "Standard prompt",
+            "clip_plan": {"target_words": 130, "segments": [{"index": 1}] * 6},
+        }
+    )
+
+    assert "cloud_agent_research_draft_id" not in session_state
+    assert "cloud_agent_research_sources" not in session_state
+    assert "cloud_agent_research_accounting" not in session_state
+
+
+def test_edit_then_refresh_clears_research_association_but_keeps_shared_workflow(monkeypatch):
+    session_state = {
+        "cloud_agent_script": "Edited narration",
+        "cloud_agent_draft_script": "Original research narration",
+        "cloud_agent_research_draft_id": "draft-1",
+        "cloud_agent_research_sources": [{"url": "https://example.com"}],
+        "cloud_agent_research_accounting": {"provider_rounds": 2},
+    }
+    monkeypatch.setattr(cloud_agent.st, "session_state", session_state)
+
+    cloud_agent._store_refreshed_draft(
+        {
+            "script": "Edited narration",
+            "master_prompt": "Refreshed prompt",
+            "clip_plan": {"target_words": 130, "segments": [{"index": 1}] * 6},
+        }
+    )
+
+    assert "cloud_agent_research_draft_id" not in session_state
+    assert session_state["cloud_agent_script"] == "Edited narration"
+    assert session_state["cloud_agent_draft_script"] == "Edited narration"
+
+
+def test_unchanged_refresh_retains_research_association(monkeypatch):
+    session_state = {
+        "cloud_agent_draft_script": "Research narration",
+        "cloud_agent_research_draft_id": "draft-1",
+        "cloud_agent_research_sources": [{"url": "https://example.com"}],
+        "cloud_agent_research_accounting": {"provider_rounds": 2},
+    }
+    monkeypatch.setattr(cloud_agent.st, "session_state", session_state)
+
+    cloud_agent._store_refreshed_draft(
+        {
+            "script": "Research narration",
+            "master_prompt": "Research prompt",
+            "clip_plan": {"target_words": 130, "segments": [{"index": 1}] * 6},
+        }
+    )
+
+    assert session_state["cloud_agent_research_draft_id"] == "draft-1"
+    assert session_state["cloud_agent_research_sources"] == [
+        {"url": "https://example.com"}
+    ]
+
+
+def test_start_job_sends_optional_research_draft_id_when_present(monkeypatch):
+    recorded = {}
+
+    def api(method, path, **kwargs):
+        recorded.update(method=method, path=path, **kwargs)
+        return {"id": "job-123"}
+
+    monkeypatch.setattr(cloud_agent, "_api", api)
+
+    cloud_agent._start_job(
+        subject="Research start",
+        target_words=130,
+        language="English",
+        script="Ready narration",
+        master_prompt="Ready prompt",
+        clip_plan={"target_words": 130, "segments": [{"index": 1}] * 6},
+        tts_provider="azure-tts-v1",
+        voice_id="en-US-JennyNeural-Female",
+        voice_speed=1.0,
+        prepared_voice_fingerprint="f" * 64,
+        research_draft_id="draft-1",
+    )
+
+    assert recorded["json"]["research_draft_id"] == "draft-1"
+
+
+def test_research_failure_never_stores_draft(monkeypatch):
+    class Response:
+        def __init__(self):
+            self.status_code = 422
+
+        def json(self):
+            return {
+                "message": "กรุณาใส่ URL อย่างน้อยหนึ่งแหล่ง",
+                "data": {
+                    "code": "URL_REQUIRED",
+                    "accounting": {"provider_rounds": 0},
+                },
+            }
+
+    class Column:
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def link_button(self, *_args, **_kwargs):
+            return None
+
+    class Spinner:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Streamlit:
+        def __init__(self):
+            self.session_state = {}
+            self.errors = []
+            self.captions = []
+            self.radios = []
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def text_input(self, _label, **kwargs):
+            return self.session_state.get(kwargs.get("key", ""), kwargs.get("value", ""))
+
+        def text_area(self, label, **kwargs):
+            if label == "Video Subject":
+                return "Research-backed draft"
+            if label == "Source URLs":
+                return ""
+            return self.session_state.get(kwargs.get("key", ""), "")
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, **_kwargs):
+            return options[0]
+
+        def radio(self, _label, options, **_kwargs):
+            self.radios.append(tuple(options))
+            return "Research Script"
+
+        def expander(self, *_args, **_kwargs):
+            return nullcontext()
+
+        def button(self, label, **_kwargs):
+            return label == "Generate Research Script"
+
+        def columns(self, _count):
+            return [Column(), Column(), Column(), Column()]
+
+        def empty(self):
+            return self
+
+        def container(self):
+            return nullcontext()
+
+        def spinner(self, _label):
+            return Spinner()
+
+        def caption(self, message):
+            self.captions.append(message)
+
+        def error(self, message):
+            self.errors.append(message)
+
+        def success(self, *_args, **_kwargs):
+            return None
+
+        def info(self, *_args, **_kwargs):
+            return None
+
+        def warning(self, *_args, **_kwargs):
+            return None
+
+        def checkbox(self, *_args, **_kwargs):
+            return False
+
+        def link_button(self, *_args, **_kwargs):
+            return None
+
+        def json(self, *_args, **_kwargs):
+            return None
+
+        def rerun(self):
+            raise AssertionError("rerun must not happen on research failure")
+
+        def audio(self, *_args, **_kwargs):
+            return None
+
+    def prepare_research_draft(**_kwargs):
+        error = requests.HTTPError("research failed")
+        error.response = Response()
+        raise error
+
+    fake_streamlit = Streamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(cloud_agent, "_prepare_research_draft", prepare_research_draft)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_store_draft",
+        lambda _draft: pytest.fail("research failure must preserve the existing editor"),
+    )
+
+    cloud_agent.render_cloud_agent_panel()
+
+    assert fake_streamlit.errors == ["กรุณาใส่ URL อย่างน้อยหนึ่งแหล่ง"]
