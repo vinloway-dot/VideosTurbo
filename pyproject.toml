@@ -13,6 +13,7 @@ readme = "README-en.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
+    "beautifulsoup4==4.15.0",
     "moviepy==2.2.1",
     "streamlit==1.59.1",
     "streamlit-tour==1.1.0",
@@ -35,6 +36,7 @@ dependencies = [
     "litellm==1.86.2",
     "google-genai==2.11.0",
     "playwright==1.62.0",
+    "pypdf==6.16.2",
 ]
 
 [project.optional-dependencies]
