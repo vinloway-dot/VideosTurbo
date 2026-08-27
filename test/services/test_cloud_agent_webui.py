@@ -12,6 +12,39 @@ UI_SOURCE = Path("webui/cloud_agent.py")
 MAIN_SOURCE = Path("webui/Main.py")
 
 
+class ModeStreamlit:
+    def __init__(self):
+        self.calls = []
+
+    def segmented_control(self, label, options, **kwargs):
+        self.calls.append((label, list(options), kwargs))
+        return "Research Script"
+
+
+def test_script_mode_uses_approved_segmented_control_and_retained_key(monkeypatch):
+    fake = ModeStreamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake)
+
+    selected = cloud_agent._render_script_mode_control(
+        ["Standard Script", "Research Script"],
+        "Standard Script",
+    )
+
+    assert selected == "Research Script"
+    assert fake.calls == [
+        (
+            "Script creation mode",
+            ["Standard Script", "Research Script"],
+            {
+                "default": "Standard Script",
+                "key": "cloud_agent_script_mode",
+                "width": "stretch",
+                "label_visibility": "collapsed",
+            },
+        )
+    ]
+
+
 def test_cloud_agent_ui_is_a_thin_fastapi_client_with_required_controls_and_status():
     source = UI_SOURCE.read_text(encoding="utf-8")
 
@@ -54,6 +87,9 @@ def test_cloud_agent_video_subject_uses_compact_multiline_text_area():
             isinstance(target, ast.Name) and target.id == "subject"
             for target in node.targets
         )
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "text_area"
     )
     call = subject_assignment.value
 
@@ -62,7 +98,8 @@ def test_cloud_agent_video_subject_uses_compact_multiline_text_area():
     assert call.func.attr == "text_area"
     assert {keyword.arg: ast.literal_eval(keyword.value) for keyword in call.keywords} == {
         "key": "cloud_agent_subject",
-        "height": 68,
+        "height": 82,
+        "placeholder": "e.g., How to cook perfect rice every time",
     }
 
 
@@ -208,11 +245,24 @@ def test_cloud_agent_language_selector_reuses_the_main_script_auto_contract():
 
 def test_cloud_agent_language_selector_formats_the_auto_empty_value(monkeypatch):
     class Column:
+        def __init__(self, parent):
+            self.parent = parent
+
         def button(self, *_args, **_kwargs):
             return False
 
         def link_button(self, *_args, **_kwargs):
             return None
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, *, format_func, **_kwargs):
+            if _label == "Language":
+                self.parent.formatted_language_options = [
+                    format_func(option) for option in options
+                ]
+            return options[0]
 
     class Streamlit:
         def __init__(self):
@@ -241,8 +291,14 @@ def test_cloud_agent_language_selector_formats_the_auto_empty_value(monkeypatch)
         def button(self, *_args, **_kwargs):
             return False
 
-        def columns(self, _count):
-            return [Column(), Column(), Column(), Column()]
+        def columns(self, _count, **_kwargs):
+            return [Column(self), Column(self), Column(self), Column(self)]
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def segmented_control(self, _label, options, **_kwargs):
+            return options[0]
 
         def text_area(self, *_args, **_kwargs):
             return ""
@@ -274,6 +330,12 @@ def test_cloud_agent_custom_system_prompt_is_hidden_by_default(monkeypatch):
         def link_button(self, *_args, **_kwargs):
             return None
 
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, **_kwargs):
+            return options[0]
+
     class Streamlit:
         def __init__(self):
             self.session_state = {}
@@ -304,8 +366,14 @@ def test_cloud_agent_custom_system_prompt_is_hidden_by_default(monkeypatch):
         def button(self, *_args, **_kwargs):
             return False
 
-        def columns(self, _count):
+        def columns(self, _count, **_kwargs):
             return [Column(), Column(), Column(), Column()]
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def segmented_control(self, _label, options, **_kwargs):
+            return options[0]
 
         def caption(self, *_args, **_kwargs):
             return None
@@ -442,6 +510,11 @@ def test_canva_check_timeout_is_shown_as_a_safe_webui_error(monkeypatch):
 
     monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
     monkeypatch.setattr(cloud_agent.requests, "request", request)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_render_video_brief",
+        lambda **_kwargs: cloud_agent._BriefSelection("", 130, "", "Standard Script", ""),
+    )
 
     cloud_agent.render_cloud_agent_panel()
 
@@ -850,6 +923,15 @@ def test_research_failure_never_stores_draft(monkeypatch):
         def link_button(self, *_args, **_kwargs):
             return None
 
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, **_kwargs):
+            return options[0]
+
+        def caption(self, *_args, **_kwargs):
+            return None
+
     class Spinner:
         def __enter__(self):
             return None
@@ -872,7 +954,7 @@ def test_research_failure_never_stores_draft(monkeypatch):
             return self.session_state.get(kwargs.get("key", ""), kwargs.get("value", ""))
 
         def text_area(self, label, **kwargs):
-            if label == "Video Subject":
+            if label == "Video subject":
                 return "Research-backed draft"
             if label == "Source URLs":
                 return ""
@@ -884,7 +966,7 @@ def test_research_failure_never_stores_draft(monkeypatch):
         def selectbox(self, _label, options, **_kwargs):
             return options[0]
 
-        def radio(self, _label, options, **_kwargs):
+        def segmented_control(self, _label, options, **_kwargs):
             self.radios.append(tuple(options))
             return "Research Script"
 
@@ -892,15 +974,15 @@ def test_research_failure_never_stores_draft(monkeypatch):
             return nullcontext()
 
         def button(self, label, **_kwargs):
-            return label == "Generate Research Script"
+            return label == "Generate research script"
 
-        def columns(self, _count):
+        def columns(self, _count, **_kwargs):
             return [Column(), Column(), Column(), Column()]
 
         def empty(self):
             return self
 
-        def container(self):
+        def container(self, **_kwargs):
             return nullcontext()
 
         def spinner(self, _label):
@@ -1041,6 +1123,11 @@ def test_start_button_forwards_stored_research_draft_id(monkeypatch):
     fake_streamlit = Streamlit()
     monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
     monkeypatch.setattr(cloud_agent, "_start_job", start_job)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_render_video_brief",
+        lambda **_kwargs: cloud_agent._BriefSelection("Research start", 130, "", "Standard Script", ""),
+    )
 
     cloud_agent.render_cloud_agent_panel()
 
@@ -1054,6 +1141,12 @@ def test_standard_mode_hides_research_only_controls(monkeypatch):
 
         def link_button(self, *_args, **_kwargs):
             return None
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, **_kwargs):
+            return options[0]
 
     class Streamlit:
         def __init__(self):
@@ -1083,7 +1176,7 @@ def test_standard_mode_hides_research_only_controls(monkeypatch):
             self.selectbox_labels.append(label)
             return options[0]
 
-        def radio(self, _label, options, **_kwargs):
+        def segmented_control(self, _label, options, **_kwargs):
             return "Standard Script"
 
         def expander(self, label, **_kwargs):
@@ -1094,8 +1187,11 @@ def test_standard_mode_hides_research_only_controls(monkeypatch):
             self.button_labels.append(label)
             return False
 
-        def columns(self, _count):
+        def columns(self, _count, **_kwargs):
             return [Column(), Column(), Column(), Column()]
+
+        def container(self, **_kwargs):
+            return nullcontext()
 
         def empty(self):
             return nullcontext()

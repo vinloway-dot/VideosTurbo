@@ -70,3 +70,34 @@ div[class*="st-key-cloud_agent_"] textarea:focus-visible {
     outline: 3px solid rgba(21, 94, 239, 0.24) !important;
     outline-offset: 2px;
 }
+
+div.st-key-cloud_agent_brief_card {
+    margin: 1rem 0 1.25rem;
+    border-color: var(--vt-border);
+    border-radius: var(--vt-radius);
+    box-shadow: var(--vt-shadow);
+}
+
+div.st-key-cloud_agent_brief_card [data-testid="stVerticalBlock"] > div > h3 {
+    margin-bottom: 0.25rem;
+}
+
+div.st-key-cloud_agent_research_source_area {
+    margin: 0.9rem 0;
+    padding: 0.85rem;
+    border: 1px solid var(--vt-border);
+    border-radius: 10px;
+    background: var(--vt-surface-muted);
+}
+
+div[class*="st-key-cloud_agent_research_source_"] input {
+    background: var(--vt-surface);
+}
+
+div.st-key-cloud_agent_brief_card [data-testid="stSegmentedControl"] {
+    margin: 0.75rem 0;
+}
+
+div.st-key-cloud_agent_brief_card [data-testid="stSegmentedControl"] button {
+    min-height: 2.5rem;
+}
