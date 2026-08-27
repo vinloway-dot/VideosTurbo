@@ -1,7 +1,12 @@
 """Safe Cloud Agent metadata for the repository's existing TTS providers."""
 
 from app.config import config
-from app.models.cloud_agent import TTSProviderMetadata, TTSSettingField, TTSVoiceOption
+from app.models.cloud_agent import (
+    TTSProviderMetadata,
+    TTSProviderSettingsPatch,
+    TTSSettingField,
+    TTSVoiceOption,
+)
 from app.services import voice
 
 
@@ -35,13 +40,21 @@ def _password_field(name: str, label: str, configured: bool) -> TTSSettingField:
     )
 
 
+def _configured_voice_list(values: str | list[str]) -> list[str]:
+    if isinstance(values, str):
+        return [item.strip() for item in values.split(",") if item.strip()]
+    return [str(item).strip() for item in values if str(item).strip()]
+
+
 class CloudTTSSettingsService:
     """Read safe provider metadata without exposing configuration credentials."""
 
     def list_providers(self) -> list[TTSProviderMetadata]:
         return [self.get_provider(provider_id) for provider_id, _label in _PROVIDERS]
 
-    def get_provider(self, provider_id: str) -> TTSProviderMetadata:
+    def get_provider(
+        self, provider_id: str, *, voices_override: list[str] | None = None
+    ) -> TTSProviderMetadata:
         providers = dict(_PROVIDERS)
         if provider_id not in providers:
             raise CloudTTSSettingsError("unsupported TTS provider")
@@ -136,7 +149,9 @@ class CloudTTSSettingsService:
             ]
         else:
             voices = voice.get_chatterbox_voices()
-            configured_voices = config.chatterbox.get("voices", []) or []
+            configured_voices = _configured_voice_list(
+                config.chatterbox.get("voices", []) or []
+            )
             settings = [
                 TTSSettingField(
                     name="base_url",
@@ -166,7 +181,66 @@ class CloudTTSSettingsService:
         return TTSProviderMetadata(
             id=provider_id,
             label=providers[provider_id],
-            voices=_voice_options(voices),
+            voices=_voice_options(voices if voices_override is None else voices_override),
             settings=settings,
             requires_explicit_voice_refresh=provider_id in {"elevenlabs", "minimax-tts"},
         )
+
+    def update_provider(
+        self, provider_id: str, patch: TTSProviderSettingsPatch
+    ) -> TTSProviderMetadata:
+        section, fields, secret_fields = self._settings_spec(provider_id)
+        unknown_settings = set(patch.settings) - set(fields)
+        if unknown_settings:
+            raise CloudTTSSettingsError("setting is not supported by this provider")
+        invalid_clears = set(patch.clear_secret_fields) - secret_fields
+        if invalid_clears:
+            raise CloudTTSSettingsError("only secrets may be cleared explicitly")
+
+        with config.runtime_config_lock():
+            for name, value in patch.settings.items():
+                if name in secret_fields and not str(value).strip():
+                    continue
+                section[fields[name]] = value
+            for name in patch.clear_secret_fields:
+                section.pop(fields[name], None)
+            config.save_config()
+        return self.get_provider(provider_id)
+
+    def refresh_voices(self, provider_id: str) -> TTSProviderMetadata:
+        if provider_id == "elevenlabs":
+            return self.get_provider(
+                provider_id,
+                voices_override=voice.get_elevenlabs_voices(
+                    voice.get_elevenlabs_api_key()
+                ),
+            )
+        if provider_id == "minimax-tts":
+            return self.get_provider(
+                provider_id,
+                voices_override=[
+                    f"minimax:{item['voice_id']}"
+                    for item in voice.get_minimax_voice_catalog()
+                    if str(item.get("voice_id", "")).strip()
+                ],
+            )
+        raise CloudTTSSettingsError("provider does not support remote voice refresh")
+
+    def _settings_spec(self, provider_id: str):
+        if provider_id == "azure-tts-v2":
+            return config.azure, {"speech_region": "speech_region", "speech_key": "speech_key"}, {"speech_key"}
+        if provider_id == "siliconflow":
+            return config.siliconflow, {"api_key": "api_key"}, {"api_key"}
+        if provider_id == "gemini-tts":
+            return config.app, {"api_key": "gemini_api_key"}, {"api_key"}
+        if provider_id == "mimo-tts":
+            return config.app, {"api_key": "mimo_api_key"}, {"api_key"}
+        if provider_id == "minimax-tts":
+            return config.minimax_tts, {"api_key": "api_key", "base_url": "base_url", "model_id": "model_id"}, {"api_key"}
+        if provider_id == "elevenlabs":
+            return config.elevenlabs, {"api_key": "api_key", "model_id": "model_id"}, {"api_key"}
+        if provider_id == "chatterbox":
+            return config.chatterbox, {"base_url": "base_url", "api_key": "api_key", "model_id": "model_id", "voices": "voices"}, {"api_key"}
+        if provider_id == "azure-tts-v1":
+            return config.app, {}, set()
+        raise CloudTTSSettingsError("unsupported TTS provider")

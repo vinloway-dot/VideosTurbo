@@ -12,6 +12,7 @@ from app.models.cloud_agent import (
     CloudJobCheckpoint,
     CloudJobCreate,
     CloudJobStatus,
+    TTSProviderSettingsPatch,
 )
 from app.services.llm import generate_script
 from app.services.six_clip_plan import build_master_prompt, generate_six_clip_plan
@@ -22,10 +23,15 @@ from app.services.cloud_agent.errors import PreFlowRetryEligibilityError
 from app.services.cloud_agent.factory import (
     build_pre_flow_retry_service,
     build_session_manager,
+    build_cloud_tts_settings_service,
 )
 from app.services.cloud_agent.retry import PreFlowRetryService
 from app.services.cloud_agent.preflight import _probe_storage_writable
 from app.services.cloud_agent.session import SessionManager
+from app.services.cloud_agent.tts_settings import (
+    CloudTTSSettingsError,
+    CloudTTSSettingsService,
+)
 from app.services.cloud_agent.storage import CloudJobStorage
 from app.utils import utils
 from app.utils.file_security import resolve_path_within_directory
@@ -77,8 +83,21 @@ def get_pre_flow_retry_service() -> PreFlowRetryService:
     return build_pre_flow_retry_service()
 
 
+def get_cloud_tts_settings_service() -> CloudTTSSettingsService:
+    return build_cloud_tts_settings_service()
+
+
 def _job_data(job) -> dict:
     return job.model_dump(mode="json")
+
+
+def _cloud_tts_provider_data(
+    service: CloudTTSSettingsService, provider_id: str
+) -> dict:
+    try:
+        return service.get_provider(provider_id).model_dump(mode="json")
+    except CloudTTSSettingsError as exc:
+        raise HttpException(task_id="", status_code=422, message=str(exc)) from exc
 
 
 def _require_job(store: CloudJobStore, job_id: str):
@@ -132,6 +151,56 @@ def get_cloud_agent_health(
             and free_space_bytes >= required_free_bytes,
         },
     )
+
+
+@router.get("/cloud-agent/tts/providers")
+def list_cloud_tts_providers(
+    request: Request,
+    service: CloudTTSSettingsService = Depends(get_cloud_tts_settings_service),
+):
+    del request
+    return utils.get_response(
+        200, [item.model_dump(mode="json") for item in service.list_providers()]
+    )
+
+
+@router.get("/cloud-agent/tts/providers/{provider_id}")
+def get_cloud_tts_provider(
+    provider_id: str,
+    request: Request,
+    service: CloudTTSSettingsService = Depends(get_cloud_tts_settings_service),
+):
+    del request
+    return utils.get_response(200, _cloud_tts_provider_data(service, provider_id))
+
+
+@router.put("/cloud-agent/tts/providers/{provider_id}/settings")
+def update_cloud_tts_provider_settings(
+    provider_id: str,
+    body: TTSProviderSettingsPatch,
+    request: Request,
+    service: CloudTTSSettingsService = Depends(get_cloud_tts_settings_service),
+):
+    del request
+    try:
+        data = service.update_provider(provider_id, body).model_dump(mode="json")
+    except CloudTTSSettingsError as exc:
+        raise HttpException(task_id="", status_code=422, message=str(exc)) from exc
+    return utils.get_response(200, data)
+
+
+@router.post("/cloud-agent/tts/providers/{provider_id}/voices/refresh")
+def refresh_cloud_tts_provider_voices(
+    provider_id: str,
+    request: Request,
+    service: CloudTTSSettingsService = Depends(get_cloud_tts_settings_service),
+):
+    del request
+    try:
+        data = service.refresh_voices(provider_id).model_dump(mode="json")
+    except CloudTTSSettingsError as exc:
+        raise HttpException(task_id="", status_code=422, message=str(exc)) from exc
+    return utils.get_response(200, data)
 
 
 @router.post("/cloud-agent/draft")

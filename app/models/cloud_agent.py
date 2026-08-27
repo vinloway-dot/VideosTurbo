@@ -166,3 +166,8 @@ class TTSProviderMetadata(BaseModel):
     voices: list[TTSVoiceOption]
     settings: list[TTSSettingField]
     requires_explicit_voice_refresh: bool = False
+
+
+class TTSProviderSettingsPatch(BaseModel):
+    settings: dict[str, str | list[str]] = Field(default_factory=dict)
+    clear_secret_fields: list[str] = Field(default_factory=list)

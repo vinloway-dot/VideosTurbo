@@ -33,6 +33,10 @@ EXPECTED_CLOUD_AGENT_PATHS = {
     ("POST", "/api/v1/cloud-agent/jobs/{job_id}/retry"),
     ("POST", "/api/v1/cloud-agent/jobs/{job_id}/cancel"),
     ("GET", "/api/v1/cloud-agent/jobs/{job_id}/final"),
+    ("GET", "/api/v1/cloud-agent/tts/providers"),
+    ("GET", "/api/v1/cloud-agent/tts/providers/{provider_id}"),
+    ("PUT", "/api/v1/cloud-agent/tts/providers/{provider_id}/settings"),
+    ("POST", "/api/v1/cloud-agent/tts/providers/{provider_id}/voices/refresh"),
     ("POST", "/api/v1/cloud-agent/sessions/check"),
     ("POST", "/api/v1/cloud-agent/sessions/google-flow/check"),
     ("POST", "/api/v1/cloud-agent/sessions/canva/check"),
@@ -90,6 +94,48 @@ def test_cloud_agent_router_contract_is_registered_on_existing_root_router():
 
     assert cloud_agent.router.prefix == "/api/v1"
     assert registered == EXPECTED_CLOUD_AGENT_PATHS
+
+
+def test_tts_provider_metadata_api_redacts_stored_credential(monkeypatch, tmp_path):
+    client, _store = _client(tmp_path)
+    sentinel_secret = "credential-must-not-be-returned"
+    monkeypatch.setitem(config.elevenlabs, "api_key", sentinel_secret)
+
+    response = client.get("/api/v1/cloud-agent/tts/providers/elevenlabs")
+
+    assert response.status_code == 200
+    assert sentinel_secret not in response.text
+    field = next(
+        item
+        for item in response.json()["data"]["settings"]
+        if item["name"] == "api_key"
+    )
+    assert field["configured"] is True
+    assert field["value"] is None
+
+
+def test_tts_settings_endpoints_do_not_start_tts_or_browser(monkeypatch, tmp_path):
+    client, _store = _client(tmp_path)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("settings endpoint must not start production work")
+
+    monkeypatch.setattr(voice, "tts", forbidden)
+    monkeypatch.setattr(PersistentBrowserManager, "open", forbidden)
+
+    response = client.get("/api/v1/cloud-agent/tts/providers")
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["data"]] == [
+        "azure-tts-v1",
+        "azure-tts-v2",
+        "siliconflow",
+        "gemini-tts",
+        "mimo-tts",
+        "minimax-tts",
+        "elevenlabs",
+        "chatterbox",
+    ]
 
 
 def test_health_reports_enabled_worker_storage_and_free_space(monkeypatch, tmp_path):
