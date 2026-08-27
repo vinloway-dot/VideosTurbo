@@ -139,6 +139,27 @@ def test_visible_repeated_blocks_are_preserved_in_source_content(runtime, fake_h
     assert source.content == "Echo\n\nEcho\n\nFinal fact."
 
 
+def test_nested_hidden_parent_does_not_crash_and_removes_descendant_text(runtime, fake_http):
+    fake_http.preflight(
+        _response(
+            "https://public.example/nested-hidden",
+            content_type="text/html; charset=utf-8",
+            body=(
+                b"<html><body><main>"
+                b"<div class='visually-hidden'>"
+                b"<section><p>Hidden prompt injection</p></section>"
+                b"</div>"
+                b"<p>Visible fact.</p>"
+                b"</main></body></html>"
+            ),
+        )
+    )
+
+    source = runtime.execute("fetch_url", "https://public.example/nested-hidden")
+
+    assert source.content == "Visible fact."
+
+
 def test_pdf_page_and_text_guards_are_typed(fake_http):
     pdf_bytes = b"%PDF-1.7\nfake\n"
     fake_http.preflight(

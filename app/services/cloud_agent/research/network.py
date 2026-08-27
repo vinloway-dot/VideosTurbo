@@ -162,7 +162,9 @@ class PinnedPublicHTTPClient:
     def _download_once(
         self, canonical: CanonicalURL, deadline: float
     ) -> DownloadedResource:
+        self._check_deadline(deadline)
         addresses = self._validated_connection_addresses(canonical)
+        self._check_deadline(deadline)
         ip_address = addresses[0]
         sock = None
         response_file = None
@@ -171,6 +173,7 @@ class PinnedPublicHTTPClient:
                 ip_address,
                 canonical.port,
                 server_hostname=canonical.hostname,
+                deadline=deadline,
             )
             self._apply_timeout(sock, deadline)
             request_bytes = (
@@ -274,16 +277,21 @@ class PinnedPublicHTTPClient:
         return addresses
 
     def _connect_pinned(
-        self, ip: str, port: int, *, server_hostname: str
+        self, ip: str, port: int, *, server_hostname: str, deadline: float
     ) -> socket.socket:
+        connect_timeout = self._remaining_timeout(
+            deadline, cap_seconds=self.CONNECT_TIMEOUT_SECONDS
+        )
         try:
-            raw_socket = self._connector((ip, port), timeout=self.CONNECT_TIMEOUT_SECONDS)
+            raw_socket = self._connector((ip, port), timeout=connect_timeout)
         except TypeError:
-            raw_socket = self._connector((ip, port), self.CONNECT_TIMEOUT_SECONDS)
+            raw_socket = self._connector((ip, port), connect_timeout)
         if port == 443:
+            self._apply_timeout(raw_socket, deadline)
             wrapped_socket = self._ssl_context_factory().wrap_socket(
                 raw_socket, server_hostname=server_hostname
             )
+            self._apply_timeout(wrapped_socket, deadline)
             return wrapped_socket
         return raw_socket
 
@@ -416,10 +424,9 @@ class PinnedPublicHTTPClient:
         return stream.read(size)
 
     def _apply_timeout(self, sock: socket.socket, deadline: float) -> None:
-        remaining = min(self.READ_TIMEOUT_SECONDS, deadline - self._monotonic())
-        if remaining <= 0:
-            raise ResearchError("PROVIDER_TIMEOUT", "request deadline exceeded")
-        sock.settimeout(remaining)
+        sock.settimeout(
+            self._remaining_timeout(deadline, cap_seconds=self.READ_TIMEOUT_SECONDS)
+        )
 
     def _refresh_read_timeout(self, sock: socket.socket, deadline: float) -> None:
         self._apply_timeout(sock, deadline)
@@ -450,6 +457,12 @@ class PinnedPublicHTTPClient:
             or normalized.endswith("_secret")
             or normalized.endswith("_key")
         )
+
+    def _remaining_timeout(self, deadline: float, *, cap_seconds: float) -> float:
+        remaining = min(cap_seconds, deadline - self._monotonic())
+        if remaining <= 0:
+            raise ResearchError("PROVIDER_TIMEOUT", "request deadline exceeded")
+        return remaining
 
     def _is_public_ip(self, value: ipaddress._BaseAddress) -> bool:
         return value.is_global and not any(

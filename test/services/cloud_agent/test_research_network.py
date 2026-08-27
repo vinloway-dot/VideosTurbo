@@ -1,4 +1,5 @@
 import gzip
+from itertools import chain, repeat
 import socket
 import zlib
 
@@ -38,9 +39,16 @@ class _FakeSocket:
 class _FakeSSLContext:
     def __init__(self, connect_calls: list[dict[str, object]]):
         self._connect_calls = connect_calls
+        self.wrap_calls: list[dict[str, object]] = []
 
     def wrap_socket(self, sock, *, server_hostname: str):
         self._connect_calls[-1]["server_hostname"] = server_hostname
+        self.wrap_calls.append(
+            {
+                "server_hostname": server_hostname,
+                "socket_timeout": sock.timeout,
+            }
+        )
         return sock
 
 
@@ -148,10 +156,11 @@ def fake_network():
 
 @pytest.fixture
 def client(fake_network):
+    ssl_context = _FakeSSLContext(fake_network.connect_calls)
     return PinnedPublicHTTPClient(
         resolver=fake_network.getaddrinfo,
         connector=fake_network.create_connection,
-        ssl_context_factory=lambda: _FakeSSLContext(fake_network.connect_calls),
+        ssl_context_factory=lambda: ssl_context,
     )
 
 
@@ -358,8 +367,9 @@ def test_get_refreshes_socket_timeout_before_each_blocking_read(fake_network):
             ]
         ),
     )
-    monotonic_values = iter(
-        [100.0, 115.0, 118.0, 121.0, 125.0, 126.0, 127.0, 127.5, 128.0, 128.0, 128.0]
+    monotonic_values = chain(
+        [100.0, 115.0, 118.0, 121.0, 125.0, 126.0, 127.0, 127.5, 128.0],
+        repeat(128.0),
     )
     client = PinnedPublicHTTPClient(
         resolver=fake_network.getaddrinfo,
@@ -371,8 +381,69 @@ def test_get_refreshes_socket_timeout_before_each_blocking_read(fake_network):
     response = client.get("https://public.example/article")
 
     assert response.body == b"body"
-    assert fake_network.sockets[-1].timeout_history[:6] == [15.0, 12.0, 9.0, 5.0, 4.0, 3.0]
-    assert fake_network.sockets[-1].timeout_history[-1] < fake_network.sockets[-1].timeout_history[0]
+    timeout_history = fake_network.sockets[-1].timeout_history
+    assert len(timeout_history) >= 6
+    assert timeout_history[:3] == [5.0, 4.0, 3.0]
+    assert timeout_history[-1] < timeout_history[0]
+    assert timeout_history == sorted(timeout_history, reverse=True)
+
+
+def test_connect_and_tls_use_remaining_total_deadline(fake_network):
+    ssl_context = _FakeSSLContext(fake_network.connect_calls)
+    fake_network.resolve("public.example", ["93.184.216.34"])
+    fake_network.respond(
+        "public.example",
+        _http_response(
+            200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=b"ok",
+        ),
+    )
+    monotonic_values = chain(
+        [100.0, 128.0, 128.5, 129.0, 129.2, 129.4, 129.5, 129.6],
+        repeat(129.6),
+    )
+    client = PinnedPublicHTTPClient(
+        resolver=fake_network.getaddrinfo,
+        connector=fake_network.create_connection,
+        ssl_context_factory=lambda: ssl_context,
+        monotonic=lambda: next(monotonic_values),
+    )
+
+    response = client.get("https://public.example/article")
+
+    assert response.body == b"ok"
+    assert fake_network.connect_calls == [
+        {
+            "ip": "93.184.216.34",
+            "port": 443,
+            "timeout": 1.0,
+            "server_hostname": "public.example",
+        }
+    ]
+    assert ssl_context.wrap_calls == [
+        {
+            "server_hostname": "public.example",
+            "socket_timeout": pytest.approx(0.8),
+        }
+    ]
+
+
+def test_connect_rejects_when_total_deadline_is_already_exhausted(fake_network):
+    fake_network.resolve("public.example", ["93.184.216.34"])
+    monotonic_values = iter([100.0, 130.1])
+    client = PinnedPublicHTTPClient(
+        resolver=fake_network.getaddrinfo,
+        connector=fake_network.create_connection,
+        ssl_context_factory=lambda: _FakeSSLContext(fake_network.connect_calls),
+        monotonic=lambda: next(monotonic_values),
+    )
+
+    with pytest.raises(ResearchError) as excinfo:
+        client.get("https://public.example/article")
+
+    assert excinfo.value.code == "PROVIDER_TIMEOUT"
+    assert fake_network.connect_calls == []
 
 
 def test_decoder_caps_incremental_output_before_body_extension(client, fake_network, monkeypatch):

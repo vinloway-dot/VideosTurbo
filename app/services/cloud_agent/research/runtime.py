@@ -213,6 +213,8 @@ class ResearchToolRuntime:
 
     def _remove_hidden_and_cookie_content(self, soup: BeautifulSoup) -> None:
         for tag in list(soup.find_all(True)):
+            if getattr(tag, "attrs", None) is None:
+                continue
             classes = " ".join(tag.get("class", []))
             tag_id = tag.get("id", "")
             style = self._normalize_css(tag.get("style", ""))

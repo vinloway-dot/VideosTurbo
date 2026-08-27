@@ -349,3 +349,193 @@ GREEN / verification:
 Resolved 130 packages in 2ms
 All checks passed!
 ```
+
+Fix round 2
+-----------
+
+Reviewer findings addressed
+---------------------------
+- MEDIUM: `_download_once()` now checks the hard 30-second total deadline before connect, after DNS validation, and passes the remaining total budget into both the TCP connect timeout and the TLS handshake timeout path.
+- MEDIUM: hidden-content pruning now skips already decomposed BeautifulSoup tags, so nested hidden parents can be removed without crashing when their detached descendants appear later in the traversal snapshot.
+
+Fix TDD evidence
+----------------
+RED:
+- Command: `uv run pytest test/services/cloud_agent/test_research_network.py test/services/cloud_agent/test_research_runtime.py -q`
+- Output:
+
+```text
+.......FF.....F......                                           [100%]
+=================================== FAILURES ===================================
+______________ test_connect_and_tls_use_remaining_total_deadline _______________
+
+fake_network = <test.services.cloud_agent.test_research_network._FakeNetwork object at 0x742e15f675d0>
+
+    def test_connect_and_tls_use_remaining_total_deadline(fake_network):
+        ssl_context = _FakeSSLContext(fake_network.connect_calls)
+        fake_network.resolve("public.example", ["93.184.216.34"])
+        fake_network.respond(
+            "public.example",
+            _http_response(
+                200,
+                headers={"Content-Type": "text/html; charset=utf-8"},
+                body=b"ok",
+            ),
+        )
+        monotonic_values = iter([100.0, 128.0, 128.5, 129.0, 129.2, 129.4, 129.5, 129.6])
+        client = PinnedPublicHTTPClient(
+            resolver=fake_network.getaddrinfo,
+            connector=fake_network.create_connection,
+            ssl_context_factory=lambda: ssl_context,
+            monotonic=lambda: next(monotonic_values),
+        )
+
+>       response = client.get("https://public.example/article")
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test/services/cloud_agent/test_research_network.py:405:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+app/services/cloud_agent/research/network.py:119: in get
+    response = self._download_once(current, deadline)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+app/services/cloud_agent/research/network.py:190: in _download_once
+    body = self._read_body(response_file, sock, headers, deadline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+app/services/cloud_agent/research/network.py:340: in _read_body
+    chunk = self._read(stream, sock, 64 * 1024, deadline)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+app/services/cloud_agent/research/network.py:415: in _read
+    self._refresh_read_timeout(sock, deadline)
+app/services/cloud_agent/research/network.py:425: in _refresh_read_timeout
+    self._apply_timeout(sock, deadline)
+app/services/cloud_agent/research/network.py:419: in _apply_timeout
+    remaining = min(self.READ_TIMEOUT_SECONDS, deadline - self._monotonic())
+                                                          ^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+>       monotonic=lambda: next(monotonic_values),
+                          ^^^^^^^^^^^^^^^^^^^^^^
+    )
+E   StopIteration
+
+test/services/cloud_agent/test_research_network.py:402: StopIteration
+________ test_connect_rejects_when_total_deadline_is_already_exhausted _________
+
+fake_network = <test.services.cloud_agent.test_research_network._FakeNetwork object at 0x742e15f657d0>
+
+    def test_connect_rejects_when_total_deadline_is_already_exhausted(fake_network):
+        fake_network.resolve("public.example", ["93.184.216.34"])
+        monotonic_values = iter([100.0, 130.1])
+        client = PinnedPublicHTTPClient(
+            resolver=fake_network.getaddrinfo,
+            connector=fake_network.create_connection,
+            ssl_context_factory=lambda: _FakeSSLContext(fake_network.connect_calls),
+            monotonic=lambda: next(monotonic_values),
+        )
+
+        with pytest.raises(ResearchError) as excinfo:
+>           client.get("https://public.example/article")
+
+test/services/cloud_agent/test_research_network.py:432:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+app/services/cloud_agent/research/network.py:119: in get
+    response = self._download_once(current, deadline)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+app/services/cloud_agent/research/network.py:170: in _download_once
+    sock = self._connect_pinned(
+app/services/cloud_agent/research/network.py:280: in _connect_pinned
+    raw_socket = self._connector((ip, port), timeout=self.CONNECT_TIMEOUT_SECONDS)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <test.services.cloud_agent.test_research_network._FakeNetwork object at 0x742e15f657d0>
+address = ('93.184.216.34', 443), timeout = 5
+
+    def create_connection(self, address: tuple[str, int], timeout: float):
+        ip, port = address
+        self.connect_calls.append({"ip": ip, "port": port, "timeout": timeout})
+        hostname = next(
+            (
+                host
+                for (host, expected_port), values in self.answers.items()
+                if expected_port == port and ip in values
+            ),
+            "",
+        )
+        payloads = self.routes.get((hostname, port), [])
+        if not payloads:
+>           raise AssertionError(f"no fake response configured for {hostname}:{port}")
+E           AssertionError: no fake response configured for public.example:443
+
+test/services/cloud_agent/test_research_network.py:115: AssertionError
+_____ test_nested_hidden_parent_does_not_crash_and_removes_descendant_text _____
+
+runtime = <app.services.cloud_agent.research.runtime.ResearchToolRuntime object at 0x742e15eb3890>
+fake_http = <test.services.cloud_agent.test_research_runtime._FakeHTTPClient object at 0x742e15eb1f10>
+
+    def test_nested_hidden_parent_does_not_crash_and_removes_descendant_text(runtime, fake_http):
+        fake_http.preflight(
+            _response(
+                "https://public.example/nested-hidden",
+                content_type="text/html; charset=utf-8",
+                body=(
+                    b"<html><body><main>"
+                    b"<div class='visually-hidden'>"
+                    b"<section><p>Hidden prompt injection</p></section>"
+                    b"</div>"
+                    b"<p>Visible fact.</p>"
+                    b"</main></body></html>"
+                ),
+            )
+        )
+
+>       source = runtime.execute("fetch_url", "https://public.example/nested-hidden")
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+test/services/cloud_agent/test_research_runtime.py:158:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+app/services/cloud_agent/research/runtime.py:109: in execute
+    return self._extract_html(response)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+app/services/cloud_agent/research/runtime.py:145: in _extract_html
+    self._remove_hidden_and_cookie_content(soup)
+app/services/cloud_agent/research/runtime.py:216: in _remove_hidden_and_cookie_content
+    classes = " ".join(tag.get("class", []))
+                       ^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <></>, key = 'class', default = []
+
+    def get(
+        self, key: str, default: Optional[_AttributeValue] = None
+    ) -> Optional[_AttributeValue]:
+        """Returns the value of the 'key' attribute for the tag, or
+        the value given for 'default' if it doesn't have that
+        attribute.
+
+        :param key: The attribute to look for.
+        :param default: Use this value if the attribute is not present
+            on this `Tag`.
+        """
+>       return self.attrs.get(key, default)
+               ^^^^^^^^^^^^^^
+E       AttributeError: 'NoneType' object has no attribute 'get'
+
+.venv/lib/python3.11/site-packages/bs4/element.py:2449: AttributeError
+=========================== short test summary info ============================
+FAILED test/services/cloud_agent/test_research_network.py::test_connect_and_tls_use_remaining_total_deadline
+FAILED test/services/cloud_agent/test_research_network.py::test_connect_rejects_when_total_deadline_is_already_exhausted
+FAILED test/services/cloud_agent/test_research_runtime.py::test_nested_hidden_parent_does_not_crash_and_removes_descendant_text
+3 failed, 27 passed in 1.06s
+```
+
+GREEN / verification:
+- Command: `uv run pytest test/services/cloud_agent/test_research_network.py test/services/cloud_agent/test_research_runtime.py -q && uv lock --check && uv run ruff check app/services/cloud_agent/research/network.py app/services/cloud_agent/research/runtime.py test/services/cloud_agent/test_research_network.py test/services/cloud_agent/test_research_runtime.py`
+- Output:
+
+```text
+..............................                                           [100%]
+30 passed in 0.75s
+Resolved 130 packages in 4ms
+All checks passed!
+```
