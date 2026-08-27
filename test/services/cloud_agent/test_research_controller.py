@@ -403,3 +403,49 @@ def test_provider_key_routes_are_write_only_and_confirmed(tmp_path, monkeypatch)
     assert refused.status_code == 422
     assert removed.status_code == 200
     assert removed.json()["data"]["api_key_configured"] is False
+
+
+def test_oversized_provider_key_request_returns_safe_typed_error(
+    tmp_path, monkeypatch
+):
+    client = research_client(
+        tmp_path,
+        monkeypatch,
+        research_service=forbidden_adapter(),
+    )
+    oversized_secret = "s" * 5000
+
+    response = client.put(
+        "/api/v1/cloud-agent/research/providers/openrouter/api-key",
+        json={"api_key": oversized_secret},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["message"] == "ผลลัพธ์ Research ไม่สมบูรณ์ จึงยังไม่เปลี่ยน Script Editor"
+    assert response.json()["data"]["code"] == "RESEARCH_RESPONSE_INVALID"
+    assert response.json()["data"]["accounting"] == {
+        "tool_calls": 0,
+        "provider_rounds": 0,
+        "usage": {},
+        "cost": 0.0,
+    }
+    assert oversized_secret not in response.text
+    assert "input" not in response.text
+
+
+def test_research_settings_rejects_unsupported_provider(tmp_path, monkeypatch):
+    client = research_client(
+        tmp_path,
+        monkeypatch,
+        research_service=forbidden_adapter(),
+    )
+
+    response = client.put(
+        "/api/v1/cloud-agent/research/settings",
+        json={**valid_settings_payload(), "provider": "unsupported-provider"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["data"]["code"] == "RESEARCH_RESPONSE_INVALID"
+    assert response.json()["message"] == "ผลลัพธ์ Research ไม่สมบูรณ์ จึงยังไม่เปลี่ยน Script Editor"
+    assert config.app["cloud_agent_research_default_provider"] == "openrouter"

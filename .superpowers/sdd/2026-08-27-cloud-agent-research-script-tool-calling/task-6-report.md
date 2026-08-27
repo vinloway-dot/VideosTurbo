@@ -51,3 +51,37 @@ Notes
 -----
 - The passing test run still emits pre-existing Pydantic deprecation warnings from `app/models/schema.py` and a Starlette `TestClient` deprecation warning; Task 6 did not change those areas.
 - Existing untracked `config.toml.backup-*` and `config.toml.save*` files were preserved untouched.
+
+Fix round 1
+-----------
+
+Reviewer findings addressed
+---------------------------
+- IMPORTANT: `PUT /cloud-agent/research/providers/{provider_id}/api-key` now accepts an unvalidated JSON body and performs internal typed validation, so oversized or malformed API-key requests are converted into the safe Research envelope instead of falling through FastAPI's generic validation response with echoed `input`.
+- MINOR: `PUT /cloud-agent/research/settings` now validates the selected provider through `ResearchSettingsService` before any config write, so unsupported providers are rejected and the stored default provider is left unchanged.
+
+Fix round 1 TDD evidence
+------------------------
+RED:
+- Command: `uv run pytest test/services/cloud_agent/test_research_controller.py -q`
+- Output:
+
+```text
+.....FF                                                             [100%]
+...
+E       KeyError: 'message'
+...
+E       assert 200 == 422
+...
+2 failed, 10 passed, 11 warnings in 23.94s
+```
+
+GREEN / verification:
+- Command: `uv run pytest test/services/cloud_agent/test_research_controller.py test/services/test_cloud_agent_controller.py -q && uv run ruff check app/controllers/v1/cloud_agent.py test/services/cloud_agent/test_research_controller.py test/services/test_cloud_agent_controller.py`
+- Output:
+
+```text
+.................................                                   [100%]
+38 passed, 11 warnings in 27.52s
+All checks passed!
+```

@@ -1,7 +1,7 @@
 import shutil
 from pathlib import Path
 
-from fastapi import Depends, Request
+from fastapi import Body, Depends, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -121,7 +121,7 @@ class ResearchSettingsPayload(BaseModel):
 
 
 class ResearchAPIKeyPatch(BaseModel):
-    api_key: str = Field(default="", max_length=4096)
+    api_key: str = Field(default="")
 
     @field_validator("api_key")
     @classmethod
@@ -232,9 +232,19 @@ def _research_settings_data() -> dict:
     }
 
 
-def _update_research_settings(body: ResearchSettingsPayload) -> dict:
+def _validated_research_provider(
+    provider_id: str, service: ResearchSettingsService
+) -> str:
+    return service.get_provider(provider_id).id
+
+
+def _update_research_settings(
+    body: ResearchSettingsPayload,
+    service: ResearchSettingsService,
+) -> dict:
+    provider_id = _validated_research_provider(body.provider, service)
     with config.runtime_config_lock():
-        config.app[_RESEARCH_SETTINGS_KEYS["provider"]] = body.provider
+        config.app[_RESEARCH_SETTINGS_KEYS["provider"]] = provider_id
         config.app[_RESEARCH_SETTINGS_KEYS["openrouter_model"]] = body.openrouter_model
         config.app[_RESEARCH_SETTINGS_KEYS["openrouter_custom_model_id"]] = (
             body.openrouter_custom_model_id
@@ -248,6 +258,20 @@ def _update_research_settings(body: ResearchSettingsPayload) -> dict:
         )
         config.save_config()
     return _research_settings_data()
+
+
+def _parse_research_api_key(body: object) -> str:
+    if not isinstance(body, dict):
+        raise ResearchError("RESEARCH_RESPONSE_INVALID", "invalid api key payload")
+    value = body.get("api_key", "")
+    if value is None:
+        value = ""
+    if not isinstance(value, str):
+        raise ResearchError("RESEARCH_RESPONSE_INVALID", "api key must be a string")
+    normalized = value.strip()
+    if len(normalized) > 4096:
+        raise ResearchError("RESEARCH_RESPONSE_INVALID", "api key exceeded limit")
+    return normalized
 
 
 def _research_association_failed(
@@ -493,20 +517,26 @@ def update_research_settings(
     request: Request,
     service: ResearchSettingsService = Depends(get_research_settings_service),
 ):
-    del request, service
-    return utils.get_response(200, _update_research_settings(body))
+    del request
+    try:
+        data = _update_research_settings(body, service)
+    except ResearchError as exc:
+        raise _research_http_exception(exc) from exc
+    return utils.get_response(200, data)
 
 
 @router.put("/cloud-agent/research/providers/{provider_id}/api-key")
 def update_research_provider_api_key(
     provider_id: str,
-    body: ResearchAPIKeyPatch,
     request: Request,
+    body: object = Body(default=None),
     service: ResearchSettingsService = Depends(get_research_settings_service),
 ):
     del request
     try:
-        data = service.set_api_key(provider_id, body.api_key).model_dump(mode="json")
+        data = service.set_api_key(
+            provider_id, _parse_research_api_key(body)
+        ).model_dump(mode="json")
     except ResearchError as exc:
         raise _research_http_exception(exc) from exc
     return utils.get_response(200, data)
