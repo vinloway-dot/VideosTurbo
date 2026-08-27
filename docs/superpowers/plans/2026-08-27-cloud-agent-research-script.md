@@ -1,5 +1,7 @@
 # Cloud Agent Research Script Mode Implementation Plan
 
+> **Status:** Superseded by the operator on 2026-08-27. Do not execute this plan. Continue from `docs/superpowers/handoffs/2026-08-27-research-script-tool-calling-handoff.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add an isolated OpenRouter-powered Research Script mode that produces source-verified drafts in the existing Cloud Agent Script Editor while leaving Standard Script and the TTS → Google Flow → Canva workflow unchanged.

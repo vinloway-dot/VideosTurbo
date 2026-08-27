@@ -2,7 +2,9 @@
 
 **Date:** 2026-08-27
 
-**Status:** Approved by the operator on 2026-08-27
+**Status:** Superseded by the operator on 2026-08-27. Do not implement this design.
+
+**Replacement direction:** Continue from `docs/superpowers/handoffs/2026-08-27-research-script-tool-calling-handoff.md` and write a new Design Spec after the remaining architecture decisions are approved.
 
 **Scope:** Script drafting only. TTS, Google Flow, Canva, worker checkpoints, and final validation remain unchanged.
 
