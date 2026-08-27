@@ -75,6 +75,9 @@ class FakeCanvaEditorPage:
     def clear_video_timeline(self):
         self.timeline_video_count = 0
 
+    def clear_audio_timeline(self):
+        self.actions.append(("clear_audio_timeline",))
+
     def add_uploaded_clip(self, _name):
         self.timeline_video_count += 1
 
@@ -140,6 +143,9 @@ class FakePreparedCanvaEditorPage(FakeCanvaEditorPage):
     def clear_video_timeline(self):
         self.actions.append(("clear_video_timeline",))
         self.timeline_video_count = 0
+
+    def clear_audio_timeline(self):
+        self.actions.append(("clear_audio_timeline",))
 
     def add_uploaded_clip(self, name):
         before = self.timeline_video_count
@@ -1219,6 +1225,7 @@ def test_canva_assembly_uploads_orders_and_exports_adaptive_six_clip_job(tmp_pat
             "https://www.canva.com/design/demo/edit",
             {"wait_until": "domcontentloaded", "timeout": 180_000},
         ),
+        ("clear_audio_timeline",),
         ("upload", ("clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4", "voice.mp3")),
         ("order", ("clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4")),
         ("select_clip", 1),
@@ -1344,7 +1351,7 @@ def test_canva_assembly_prepares_clean_workspace_before_upload_and_adds_clips_in
     client.assemble_and_export(_assembly_job(), clips, audio, output)
 
     actions = page.actions
-    assert actions[:9] == [
+    assert actions[:10] == [
         (
             "goto",
             "https://www.canva.com/design/demo/edit",
@@ -1362,6 +1369,7 @@ def test_canva_assembly_prepares_clean_workspace_before_upload_and_adds_clips_in
             ),
         ),
         ("clear_video_timeline",),
+        ("clear_audio_timeline",),
         ("upload", ("clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4", "voice.mp3")),
         ("add_uploaded_clip", "clip_01.mp4", 0, 1),
         ("add_uploaded_clip", "clip_02.mp4", 1, 2),
@@ -1369,7 +1377,7 @@ def test_canva_assembly_prepares_clean_workspace_before_upload_and_adds_clips_in
         ("add_uploaded_clip", "clip_04.mp4", 3, 4),
         ("add_uploaded_clip", "clip_05.mp4", 4, 5),
     ]
-    assert actions[9] == ("add_uploaded_clip", "clip_06.mp4", 5, 6)
+    assert actions[10] == ("add_uploaded_clip", "clip_06.mp4", 5, 6)
 
 
 def test_canva_assembly_cleans_only_current_job_video_and_audio_names_before_upload(
@@ -1382,7 +1390,7 @@ def test_canva_assembly_cleans_only_current_job_video_and_audio_names_before_upl
 
     client.assemble_and_export(_assembly_job(), clips, audio, output)
 
-    assert page.actions[1:5] == [
+    assert page.actions[1:6] == [
         (
             "clean_uploaded_videos",
             (
@@ -1396,6 +1404,7 @@ def test_canva_assembly_cleans_only_current_job_video_and_audio_names_before_upl
         ),
         ("clean_uploaded_audio", "voice.mp3"),
         ("clear_video_timeline",),
+        ("clear_audio_timeline",),
         (
             "upload",
             (
@@ -1421,6 +1430,7 @@ def test_canva_post_final_cleanup_clears_timeline_before_deleting_managed_upload
 
     assert page.actions == [
         ("clear_video_timeline",),
+        ("clear_audio_timeline",),
         (
             "clean_uploaded_videos",
             (

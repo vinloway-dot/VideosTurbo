@@ -152,6 +152,7 @@ class CanvaAssemblyClient:
         self._clean_uploaded_videos(page, clip_names)
         self._clean_uploaded_audio(page, audio_path.name)
         self._clear_video_timeline(page)
+        self._clear_audio_timeline(page)
         self._upload_media(page, [*clip_paths, audio_path])
         self._add_uploaded_clips(page, clip_names)
         self._order_clips(page, clip_names)
@@ -213,6 +214,7 @@ class CanvaAssemblyClient:
 
     def _clean_open_page(self, page: Any) -> None:
         self._clear_video_timeline(page)
+        self._clear_audio_timeline(page)
         self._clean_uploaded_videos(
             page,
             tuple(f"clip_{index:02d}.mp4" for index in range(1, 7)),
@@ -554,6 +556,28 @@ class CanvaAssemblyClient:
             while page.locator(self._VIDEO_START_EDGE).count() >= before:
                 if time.monotonic() >= deadline:
                     raise CanvaUIVerificationError("Canva video timeline cannot be cleared")
+                time.sleep(self.poll_seconds)
+
+    def _clear_audio_timeline(self, page: Any) -> None:
+        """Remove every audio track from the reusable design before a new job."""
+        if hasattr(page, "clear_audio_timeline"):
+            page.clear_audio_timeline()
+            return
+
+        while True:
+            tracks = page.locator('[role="button"][aria-label$=", audio track"]')
+            if tracks.count() == 0:
+                return
+            track, _track_box = self._first_visible_box(tracks)
+            if track is None:
+                raise CanvaUIVerificationError("Canva audio timeline track cannot be selected")
+            before = tracks.count()
+            track.click()
+            page.keyboard.press("Delete")
+            deadline = time.monotonic() + self.export_timeout_seconds
+            while page.locator('[role="button"][aria-label$=", audio track"]').count() >= before:
+                if time.monotonic() >= deadline:
+                    raise CanvaUIVerificationError("Canva audio timeline cannot be cleared")
                 time.sleep(self.poll_seconds)
 
     def _add_uploaded_clips(self, page: Any, expected_names: list[str]) -> None:
