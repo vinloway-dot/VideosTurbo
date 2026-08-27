@@ -27,7 +27,9 @@ def _render_application():
     """Render the retained Cloud Agent entry point."""
     cloud_agent_ui.apply_cloud_agent_theme()
     cloud_agent_ui.render_sidebar()
-    cloud_agent_ui.render_page_header(saved=True)
+    cloud_agent_ui.render_page_header(
+        saved=cloud_agent_ui.has_saved_draft(st.session_state)
+    )
     cloud_agent.render_cloud_agent_panel()
 
 

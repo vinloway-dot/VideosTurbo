@@ -38,6 +38,24 @@ def test_page_header_uses_approved_primary_copy(monkeypatch):
     assert any("Saved" in body for body in fake.html_bodies)
 
 
+def test_saved_indicator_requires_a_local_saved_draft(monkeypatch):
+    fresh = ShellStreamlit()
+    monkeypatch.setattr(cloud_agent_ui, "st", fresh)
+
+    assert not cloud_agent_ui.has_saved_draft({})
+    cloud_agent_ui.render_page_header(saved=cloud_agent_ui.has_saved_draft({}))
+    assert not any("Saved" in body for body in fresh.html_bodies)
+
+    saved_state = {"cloud_agent_draft_script": "A saved narration draft."}
+    assert cloud_agent_ui.has_saved_draft(saved_state)
+    saved = ShellStreamlit()
+    monkeypatch.setattr(cloud_agent_ui, "st", saved)
+    cloud_agent_ui.render_page_header(
+        saved=cloud_agent_ui.has_saved_draft(saved_state)
+    )
+    assert any("Saved" in body for body in saved.html_bodies)
+
+
 def test_cloud_agent_theme_is_a_project_local_css_asset():
     css_path = Path("webui/cloud_agent.css")
     assert css_path.is_file()

@@ -83,6 +83,10 @@ _PRODUCTION_STAGE_LABELS = {
 _CSS_PATH = Path(__file__).with_name("cloud_agent.css")
 
 
+def has_saved_draft(session_state) -> bool:
+    return bool(str(session_state.get("cloud_agent_draft_script") or "").strip())
+
+
 def apply_cloud_agent_theme() -> None:
     st.html(_CSS_PATH)
 

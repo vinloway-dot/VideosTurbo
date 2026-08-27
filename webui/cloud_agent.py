@@ -1304,14 +1304,14 @@ def render_cloud_agent_panel():
                 generation=generation,
                 ui_state=ui_state,
             )
-            cloud_agent_ui.render_production_status(
-                cloud_agent_ui.build_production_stages(
-                    script_ready=script_ready,
-                    prepared_voice_ready=prepared_voice_ready,
-                    job=job_snapshot,
-                ),
-                job_snapshot,
-            )
+    cloud_agent_ui.render_production_status(
+        cloud_agent_ui.build_production_stages(
+            script_ready=script_ready,
+            prepared_voice_ready=prepared_voice_ready,
+            job=job_snapshot,
+        ),
+        job_snapshot,
+    )
     with st.expander("Job controls", expanded=False):
         readiness_controls = st.columns(2)
         for service, column in (
