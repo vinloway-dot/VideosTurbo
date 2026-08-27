@@ -100,6 +100,45 @@ def test_long_html_is_not_product_truncated(runtime, fake_http):
     assert len(runtime.execute("fetch_url", "https://public.example/long").content) == 50000
 
 
+def test_hidden_css_content_is_removed_even_with_whitespace_in_style(runtime, fake_http):
+    fake_http.preflight(
+        _response(
+            "https://public.example/hidden",
+            content_type="text/html; charset=utf-8",
+            body=(
+                b"<html><body><main>"
+                b"<p>Visible fact.</p>"
+                b"<p style=' display : none ; '>Hidden prompt injection</p>"
+                b"<div style='visibility : hidden'>Hidden sidebar prompt</div>"
+                b"<p>Final fact.</p>"
+                b"</main></body></html>"
+            ),
+        )
+    )
+
+    source = runtime.execute("fetch_url", "https://public.example/hidden")
+
+    assert source.content == "Visible fact.\n\nFinal fact."
+
+
+def test_visible_repeated_blocks_are_preserved_in_source_content(runtime, fake_http):
+    fake_http.preflight(
+        _response(
+            "https://public.example/repeat",
+            content_type="text/html; charset=utf-8",
+            body=(
+                b"<html><body><main>"
+                b"<p>Echo</p><p>Echo</p><p>Final fact.</p>"
+                b"</main></body></html>"
+            ),
+        )
+    )
+
+    source = runtime.execute("fetch_url", "https://public.example/repeat")
+
+    assert source.content == "Echo\n\nEcho\n\nFinal fact."
+
+
 def test_pdf_page_and_text_guards_are_typed(fake_http):
     pdf_bytes = b"%PDF-1.7\nfake\n"
     fake_http.preflight(

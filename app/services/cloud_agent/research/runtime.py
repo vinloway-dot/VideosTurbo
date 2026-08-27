@@ -49,6 +49,17 @@ _PAYWALL_MARKERS = (
     "premium content",
     "subscription required",
 )
+_HIDDEN_CLASS_TOKENS = frozenset(
+    {
+        "hidden",
+        "sr-only",
+        "screen-reader",
+        "screenreader",
+        "visually-hidden",
+        "d-none",
+        "invisible",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -204,12 +215,18 @@ class ResearchToolRuntime:
         for tag in list(soup.find_all(True)):
             classes = " ".join(tag.get("class", []))
             tag_id = tag.get("id", "")
-            style = str(tag.get("style", "")).lower()
+            style = self._normalize_css(tag.get("style", ""))
             marker_text = " ".join([classes, tag_id]).lower()
+            class_tokens = {
+                token for token in re.split(r"[^a-z0-9-]+", marker_text) if token
+            }
             if tag.has_attr("hidden") or tag.get("aria-hidden") == "true":
                 tag.decompose()
                 continue
-            if "display:none" in style or "visibility:hidden" in style:
+            if self._style_hides_content(style):
+                tag.decompose()
+                continue
+            if _HIDDEN_CLASS_TOKENS & class_tokens:
                 tag.decompose()
                 continue
             if any(marker in marker_text for marker in _COOKIE_MARKERS):
@@ -227,7 +244,7 @@ class ResearchToolRuntime:
         if not blocks:
             fallback = self._normalize_text(root.get_text(" ", strip=True))
             return fallback
-        return "\n\n".join(dict.fromkeys(blocks))
+        return "\n\n".join(blocks)
 
     def _normalize_text(self, value: str) -> str:
         return re.sub(r"\s+", " ", str(value or "")).strip()
@@ -255,3 +272,12 @@ class ResearchToolRuntime:
     def _source_id(self, url: str, content: str) -> str:
         digest = sha256(f"{url}\n{content}".encode("utf-8")).hexdigest()
         return f"source-{digest[:16]}"
+
+    def _normalize_css(self, value: str) -> str:
+        return re.sub(r"\s+", "", str(value or "").lower())
+
+    def _style_hides_content(self, normalized_style: str) -> bool:
+        return (
+            "display:none" in normalized_style
+            or "visibility:hidden" in normalized_style
+        )

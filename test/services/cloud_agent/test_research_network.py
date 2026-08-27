@@ -1,4 +1,5 @@
 import gzip
+import socket
 import zlib
 
 import pytest
@@ -8,14 +9,17 @@ from app.services.cloud_agent.research.network import PinnedPublicHTTPClient
 
 
 class _FakeSocket:
-    def __init__(self, response_bytes: bytes):
+    def __init__(self, response_bytes: bytes, *, response_file=None):
         self._response_bytes = response_bytes
+        self._response_file = response_file
         self.requests: list[bytes] = []
         self.timeout = None
+        self.timeout_history: list[float] = []
         self.closed = False
 
     def settimeout(self, value):
         self.timeout = value
+        self.timeout_history.append(value)
 
     def sendall(self, data: bytes) -> None:
         self.requests.append(data)
@@ -23,6 +27,8 @@ class _FakeSocket:
     def makefile(self, mode: str):  # noqa: ARG002
         from io import BytesIO
 
+        if self._response_file is not None:
+            return self._response_file
         return BytesIO(self._response_bytes)
 
     def close(self) -> None:
@@ -58,7 +64,10 @@ class _FakeNetwork:
     def __init__(self):
         self.answers: dict[tuple[str, int], list[str]] = {}
         self.routes: dict[tuple[str, int], list[bytes]] = {}
+        self.response_files: dict[tuple[str, int], object] = {}
         self.connect_calls: list[dict[str, object]] = []
+        self.sockets: list[_FakeSocket] = []
+        self.resolve_calls: list[dict[str, object]] = []
 
     def resolve(self, hostname: str, addresses: list[str], *, port: int = 443) -> None:
         self.answers[(hostname, port)] = list(addresses)
@@ -72,7 +81,11 @@ class _FakeNetwork:
             return
         self.routes[key] = [response_bytes]
 
+    def respond_with_file(self, hostname: str, response_file, *, port: int = 443) -> None:
+        self.response_files[(hostname, port)] = response_file
+
     def getaddrinfo(self, host: str, port: int, *, type: int):  # noqa: A002
+        self.resolve_calls.append({"host": host, "port": port, "type": type})
         addresses = self.answers.get((host, port), [])
         return [
             (0, 0, type, "", (address, port))
@@ -93,7 +106,39 @@ class _FakeNetwork:
         payloads = self.routes.get((hostname, port), [])
         if not payloads:
             raise AssertionError(f"no fake response configured for {hostname}:{port}")
-        return _FakeSocket(payloads.pop(0))
+        sock = _FakeSocket(
+            payloads.pop(0),
+            response_file=self.response_files.get((hostname, port)),
+        )
+        self.sockets.append(sock)
+        return sock
+
+
+class _TrackingResponseFile:
+    def __init__(self, chunks: list[bytes]):
+        self._chunks = list(chunks)
+        self.closed = False
+
+    def readline(self, _limit=-1):
+        return self._chunks.pop(0)
+
+    def read(self, size=-1):
+        if size == -1:
+            if not self._chunks:
+                return b""
+            data = self._chunks[0]
+            self._chunks[0] = b""
+            return data
+        if not self._chunks:
+            return b""
+        data = self._chunks[0][:size]
+        self._chunks[0] = self._chunks[0][size:]
+        if not self._chunks[0]:
+            self._chunks.pop(0)
+        return data
+
+    def close(self):
+        self.closed = True
 
 
 @pytest.fixture
@@ -256,3 +301,115 @@ def test_http_client_rejects_unsupported_content_encoding(client, fake_network):
         client.get("https://public.example/article")
 
     assert excinfo.value.code == "URL_CONTENT_UNSUPPORTED"
+
+
+def test_multicast_targets_fail_closed_for_literal_and_dns_answers(client, fake_network):
+    with pytest.raises(ResearchError) as excinfo:
+        client.get("http://224.0.0.1/")
+
+    assert excinfo.value.code == "URL_TARGET_NOT_PUBLIC"
+
+    fake_network.resolve("multicast.example", ["93.184.216.34", "224.0.0.1"])
+    with pytest.raises(ResearchError) as excinfo:
+        client.get("https://multicast.example/article")
+
+    assert excinfo.value.code == "URL_TARGET_NOT_PUBLIC"
+
+
+def test_get_resolves_hostname_once_immediately_before_pinned_connection(client, fake_network):
+    fake_network.resolve("public.example", ["93.184.216.34"])
+    fake_network.respond(
+        "public.example",
+        _http_response(
+            200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=b"<html><body>Article</body></html>",
+        ),
+    )
+
+    client.get("https://public.example/article")
+
+    assert fake_network.resolve_calls == [
+        {"host": "public.example", "port": 443, "type": socket.SOCK_STREAM}
+    ]
+
+
+def test_get_refreshes_socket_timeout_before_each_blocking_read(fake_network):
+    fake_network.resolve("public.example", ["93.184.216.34"])
+    fake_network.respond(
+        "public.example",
+        _http_response(
+            200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            body=b"body",
+        ),
+    )
+    fake_network.respond_with_file(
+        "public.example",
+        _TrackingResponseFile(
+            [
+                b"HTTP/1.1 200 OK\r\n",
+                b"Content-Type: text/html; charset=utf-8\r\n",
+                b"Content-Length: 4\r\n",
+                b"Connection: close\r\n",
+                b"\r\n",
+                b"body",
+                b"",
+            ]
+        ),
+    )
+    monotonic_values = iter(
+        [100.0, 115.0, 118.0, 121.0, 125.0, 126.0, 127.0, 127.5, 128.0, 128.0, 128.0]
+    )
+    client = PinnedPublicHTTPClient(
+        resolver=fake_network.getaddrinfo,
+        connector=fake_network.create_connection,
+        ssl_context_factory=lambda: _FakeSSLContext(fake_network.connect_calls),
+        monotonic=lambda: next(monotonic_values),
+    )
+
+    response = client.get("https://public.example/article")
+
+    assert response.body == b"body"
+    assert fake_network.sockets[-1].timeout_history[:6] == [15.0, 12.0, 9.0, 5.0, 4.0, 3.0]
+    assert fake_network.sockets[-1].timeout_history[-1] < fake_network.sockets[-1].timeout_history[0]
+
+
+def test_decoder_caps_incremental_output_before_body_extension(client, fake_network, monkeypatch):
+    class _FakeDecoder:
+        def __init__(self):
+            self.calls: list[int | None] = []
+            self.unconsumed_tail = b"x"
+
+        def decompress(self, chunk: bytes, max_length: int | None = None) -> bytes:
+            self.calls.append(max_length)
+            if max_length is None:
+                raise AssertionError("decoder must receive an incremental max_length cap")
+            if len(self.calls) == 1:
+                return b"A" * max_length
+            self.unconsumed_tail = b""
+            return b"B"
+
+        def flush(self) -> bytes:
+            return b""
+
+    fake_network.resolve("public.example", ["93.184.216.34"])
+    fake_network.respond(
+        "public.example",
+        _http_response(
+            200,
+            headers={
+                "Content-Type": "text/html; charset=utf-8",
+                "Content-Encoding": "gzip",
+            },
+            body=b"compressed",
+        ),
+    )
+    decoder = _FakeDecoder()
+    monkeypatch.setattr(client, "_build_decoder", lambda encoding: decoder)
+
+    with pytest.raises(ResearchError) as excinfo:
+        client.get("https://public.example/article")
+
+    assert excinfo.value.code == "URL_CONTENT_TOO_LARGE"
+    assert decoder.calls[0] == client.MAX_BODY_BYTES

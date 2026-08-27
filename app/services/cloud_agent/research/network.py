@@ -102,7 +102,7 @@ class PinnedPublicHTTPClient:
             if not str(raw_url or "").strip():
                 raise ResearchError("URL_INVALID", "blank URLs are not allowed")
             canonical = self._canonicalize_url(raw_url)
-            self._validate_public_target(canonical)
+            self._validated_connection_addresses(canonical)
             if canonical.url not in seen:
                 canonical_urls.append(canonical.url)
                 seen.add(canonical.url)
@@ -112,11 +112,21 @@ class PinnedPublicHTTPClient:
 
     def get(self, url: str) -> DownloadedResource:
         current = self._canonicalize_url(url)
-        self._validate_public_target(current)
         deadline = self._monotonic() + self.TOTAL_TIMEOUT_SECONDS
 
         for redirect_count in range(self.MAX_REDIRECTS + 1):
-            response = self._download_once(current, deadline)
+            try:
+                response = self._download_once(current, deadline)
+            except ResearchError as exc:
+                if redirect_count > 0 and exc.code in {
+                    "URL_INVALID",
+                    "URL_TARGET_NOT_PUBLIC",
+                }:
+                    raise ResearchError(
+                        "URL_REDIRECT_REJECTED",
+                        exc.detail or "redirect target is not allowed",
+                    ) from exc
+                raise
             if response.status_code in _REDIRECT_STATUS_CODES:
                 if redirect_count >= self.MAX_REDIRECTS:
                     raise ResearchError(
@@ -130,7 +140,6 @@ class PinnedPublicHTTPClient:
                 redirected = urljoin(current.url, location)
                 try:
                     current = self._canonicalize_url(redirected)
-                    self._validate_public_target(current)
                 except ResearchError as exc:
                     raise ResearchError(
                         "URL_REDIRECT_REJECTED",
@@ -153,7 +162,7 @@ class PinnedPublicHTTPClient:
     def _download_once(
         self, canonical: CanonicalURL, deadline: float
     ) -> DownloadedResource:
-        addresses = self._resolve_public_addresses(canonical.hostname, canonical.port)
+        addresses = self._validated_connection_addresses(canonical)
         ip_address = addresses[0]
         sock = None
         response_file = None
@@ -176,9 +185,9 @@ class PinnedPublicHTTPClient:
 
             response_file = sock.makefile("rb")
             status_code, reason, headers = self._read_status_and_headers(
-                response_file, deadline
+                response_file, sock, deadline
             )
-            body = self._read_body(response_file, headers, deadline)
+            body = self._read_body(response_file, sock, headers, deadline)
             return DownloadedResource(
                 url=canonical.url,
                 final_url=canonical.url,
@@ -239,16 +248,16 @@ class PinnedPublicHTTPClient:
             host_header=host_header,
         )
 
-    def _validate_public_target(self, canonical: CanonicalURL) -> None:
+    def _validated_connection_addresses(self, canonical: CanonicalURL) -> tuple[str, ...]:
         try:
             literal_ip = ipaddress.ip_address(canonical.hostname)
         except ValueError:
-            self._resolve_public_addresses(canonical.hostname, canonical.port)
-            return
-        if not literal_ip.is_global:
+            return self._resolve_public_addresses(canonical.hostname, canonical.port)
+        if not self._is_public_ip(literal_ip):
             raise ResearchError(
                 "URL_TARGET_NOT_PUBLIC", "literal IP target is not globally routable"
             )
+        return (canonical.hostname,)
 
     def _resolve_public_addresses(self, hostname: str, port: int) -> tuple[str, ...]:
         try:
@@ -258,7 +267,7 @@ class PinnedPublicHTTPClient:
         addresses = tuple(dict.fromkeys(answer[4][0] for answer in answers))
         if not addresses:
             raise ResearchError("URL_FETCH_FAILED", "DNS did not return any addresses")
-        if any(not ipaddress.ip_address(value).is_global for value in addresses):
+        if any(not self._is_public_ip(ipaddress.ip_address(value)) for value in addresses):
             raise ResearchError(
                 "URL_TARGET_NOT_PUBLIC", "DNS returned a prohibited address"
             )
@@ -278,9 +287,11 @@ class PinnedPublicHTTPClient:
             return wrapped_socket
         return raw_socket
 
-    def _read_status_and_headers(self, stream, deadline: float) -> tuple[int, str, dict[str, str]]:
+    def _read_status_and_headers(
+        self, stream, sock: socket.socket, deadline: float
+    ) -> tuple[int, str, dict[str, str]]:
         header_bytes = 0
-        status_line = self._readline(stream, deadline)
+        status_line = self._readline(stream, sock, deadline)
         header_bytes += len(status_line)
         if not status_line.startswith(b"HTTP/"):
             raise ResearchError("URL_FETCH_FAILED", "invalid HTTP status line")
@@ -292,7 +303,7 @@ class PinnedPublicHTTPClient:
 
         headers: dict[str, str] = {}
         while True:
-            line = self._readline(stream, deadline)
+            line = self._readline(stream, sock, deadline)
             header_bytes += len(line)
             if header_bytes > self.MAX_HEADER_BYTES:
                 raise ResearchError("URL_FETCH_FAILED", "response headers exceeded limit")
@@ -310,7 +321,9 @@ class PinnedPublicHTTPClient:
                 headers[header_name] = header_value
         return status_code, reason, headers
 
-    def _read_body(self, stream, headers: dict[str, str], deadline: float) -> bytes:
+    def _read_body(
+        self, stream, sock: socket.socket, headers: dict[str, str], deadline: float
+    ) -> bytes:
         encoding = headers.get("content-encoding", "").strip().lower()
         if encoding not in _ALLOWED_ENCODINGS:
             raise ResearchError(
@@ -321,31 +334,34 @@ class PinnedPublicHTTPClient:
         decoder = self._build_decoder(encoding)
         body = bytearray()
         if "chunked" in headers.get("transfer-encoding", "").lower():
-            self._read_chunked_body(stream, deadline, decoder, body)
+            self._read_chunked_body(stream, sock, deadline, decoder, body)
         else:
             while True:
-                self._check_deadline(deadline)
-                chunk = stream.read(64 * 1024)
+                chunk = self._read(stream, sock, 64 * 1024, deadline)
                 if not chunk:
                     break
                 self._append_decoded(body, decoder, chunk)
         if decoder is not None:
             self._append_decoded(body, None, decoder.flush())
+            if len(body) > self.MAX_BODY_BYTES:
+                raise ResearchError("URL_CONTENT_TOO_LARGE", "response body exceeded limit")
         return bytes(body)
 
-    def _read_chunked_body(self, stream, deadline: float, decoder, body: bytearray) -> None:
+    def _read_chunked_body(
+        self, stream, sock: socket.socket, deadline: float, decoder, body: bytearray
+    ) -> None:
         while True:
-            size_line = self._readline(stream, deadline).decode("iso-8859-1").strip()
+            size_line = self._readline(stream, sock, deadline).decode("iso-8859-1").strip()
             chunk_size = int(size_line.split(";", 1)[0], 16)
             if chunk_size == 0:
                 while True:
-                    trailer = self._readline(stream, deadline)
+                    trailer = self._readline(stream, sock, deadline)
                     if trailer in {b"\r\n", b"\n", b""}:
                         return
                 return
-            chunk = self._readexactly(stream, chunk_size, deadline)
+            chunk = self._readexactly(stream, sock, chunk_size, deadline)
             self._append_decoded(body, decoder, chunk)
-            ending = self._readexactly(stream, 2, deadline)
+            ending = self._readexactly(stream, sock, 2, deadline)
             if ending != b"\r\n":
                 raise ResearchError("URL_FETCH_FAILED", "invalid chunk terminator")
 
@@ -357,32 +373,56 @@ class PinnedPublicHTTPClient:
         return zlib.decompressobj()
 
     def _append_decoded(self, body: bytearray, decoder, chunk: bytes) -> None:
-        decoded = chunk if decoder is None else decoder.decompress(chunk)
-        if not decoded:
+        if decoder is None:
+            body.extend(chunk)
+            if len(body) > self.MAX_BODY_BYTES:
+                raise ResearchError("URL_CONTENT_TOO_LARGE", "response body exceeded limit")
             return
-        body.extend(decoded)
-        if len(body) > self.MAX_BODY_BYTES:
-            raise ResearchError("URL_CONTENT_TOO_LARGE", "response body exceeded limit")
 
-    def _readline(self, stream, deadline: float) -> bytes:
-        self._check_deadline(deadline)
+        pending = chunk
+        while pending:
+            remaining = self.MAX_BODY_BYTES - len(body)
+            if remaining <= 0:
+                raise ResearchError("URL_CONTENT_TOO_LARGE", "response body exceeded limit")
+            decoded = decoder.decompress(pending, remaining)
+            if decoded:
+                body.extend(decoded)
+            pending = getattr(decoder, "unconsumed_tail", b"")
+            if len(body) >= self.MAX_BODY_BYTES and (
+                pending or getattr(decoder, "unused_data", b"")
+            ):
+                raise ResearchError("URL_CONTENT_TOO_LARGE", "response body exceeded limit")
+            if not decoded and not pending:
+                break
+
+    def _readline(self, stream, sock: socket.socket, deadline: float) -> bytes:
+        self._refresh_read_timeout(sock, deadline)
         line = stream.readline(self.MAX_HEADER_BYTES + 1)
         if len(line) > self.MAX_HEADER_BYTES:
             raise ResearchError("URL_FETCH_FAILED", "header line exceeded limit")
         return line
 
-    def _readexactly(self, stream, size: int, deadline: float) -> bytes:
-        self._check_deadline(deadline)
+    def _readexactly(
+        self, stream, sock: socket.socket, size: int, deadline: float
+    ) -> bytes:
+        self._refresh_read_timeout(sock, deadline)
         data = stream.read(size)
         if len(data) != size:
             raise ResearchError("URL_FETCH_FAILED", "unexpected end of response body")
         return data
+
+    def _read(self, stream, sock: socket.socket, size: int, deadline: float) -> bytes:
+        self._refresh_read_timeout(sock, deadline)
+        return stream.read(size)
 
     def _apply_timeout(self, sock: socket.socket, deadline: float) -> None:
         remaining = min(self.READ_TIMEOUT_SECONDS, deadline - self._monotonic())
         if remaining <= 0:
             raise ResearchError("PROVIDER_TIMEOUT", "request deadline exceeded")
         sock.settimeout(remaining)
+
+    def _refresh_read_timeout(self, sock: socket.socket, deadline: float) -> None:
+        self._apply_timeout(sock, deadline)
 
     def _check_deadline(self, deadline: float) -> None:
         if self._monotonic() > deadline:
@@ -409,4 +449,17 @@ class PinnedPublicHTTPClient:
             or normalized.endswith("_signature")
             or normalized.endswith("_secret")
             or normalized.endswith("_key")
+        )
+
+    def _is_public_ip(self, value: ipaddress._BaseAddress) -> bool:
+        return value.is_global and not any(
+            (
+                value.is_multicast,
+                value.is_private,
+                value.is_loopback,
+                value.is_link_local,
+                value.is_reserved,
+                value.is_unspecified,
+                getattr(value, "is_site_local", False),
+            )
         )
