@@ -42,6 +42,43 @@ def test_cloud_agent_ui_is_a_thin_fastapi_client_with_required_controls_and_stat
     assert "PersistentBrowserManager" not in source
 
 
+def test_cloud_agent_loads_tts_provider_metadata_through_fastapi(monkeypatch):
+    calls = []
+
+    def api(method, path, **_kwargs):
+        calls.append((method, path))
+        return [{"id": "elevenlabs", "label": "ElevenLabs TTS"}]
+
+    monkeypatch.setattr(cloud_agent, "_api", api)
+
+    assert cloud_agent._load_tts_provider_catalog() == [
+        {"id": "elevenlabs", "label": "ElevenLabs TTS"}
+    ]
+    assert calls == [("GET", "tts/providers")]
+
+
+def test_cloud_agent_tts_settings_payload_omits_blank_secret_unless_confirmed():
+    assert cloud_agent._tts_settings_payload(
+        settings={"api_key": "", "model_id": "eleven_v3"},
+        secret_fields={"api_key"},
+        clear_secret_fields=[],
+    ) == {"settings": {"model_id": "eleven_v3"}, "clear_secret_fields": []}
+
+    assert cloud_agent._tts_settings_payload(
+        settings={"api_key": ""},
+        secret_fields={"api_key"},
+        clear_secret_fields=["api_key"],
+    ) == {"settings": {}, "clear_secret_fields": ["api_key"]}
+
+
+def test_cloud_agent_ui_offers_explicit_secret_removal_and_voice_refresh():
+    source = UI_SOURCE.read_text(encoding="utf-8")
+
+    assert "Remove stored key" in source
+    assert "clear_secret_fields" in source
+    assert '"cloud_agent_tts_voices"' in source
+
+
 def test_cloud_agent_language_selector_reuses_the_main_script_auto_contract():
     assert cloud_agent.SCRIPT_LANGUAGE_OPTIONS == [
         ("Auto — detect from Video Subject", ""),
@@ -82,7 +119,10 @@ def test_cloud_agent_language_selector_formats_the_auto_empty_value(monkeypatch)
             return kwargs["value"]
 
         def selectbox(self, _label, options, *, format_func, **_kwargs):
-            self.formatted_language_options = [format_func(option) for option in options]
+            if _label == "Language":
+                self.formatted_language_options = [
+                    format_func(option) for option in options
+                ]
             return options[0]
 
         def expander(self, *_args, **_kwargs):
@@ -162,7 +202,7 @@ def test_cloud_agent_custom_system_prompt_is_hidden_by_default(monkeypatch):
 
     cloud_agent.render_cloud_agent_panel()
 
-    assert fake_streamlit.expander_arguments == [("Custom System Prompt", False)]
+    assert ("Custom System Prompt", False) in fake_streamlit.expander_arguments
 
 
 def test_main_renders_cloud_agent_without_the_retired_local_generation_flow():

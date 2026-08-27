@@ -47,6 +47,37 @@ def _api_error_message(error):
     return "Cloud Agent request could not be completed."
 
 
+def _load_tts_provider_catalog():
+    return _api("GET", "tts/providers")
+
+
+def _tts_settings_payload(*, settings, secret_fields, clear_secret_fields):
+    return {
+        "settings": {
+            name: value
+            for name, value in settings.items()
+            if name not in secret_fields or str(value).strip()
+        },
+        "clear_secret_fields": list(clear_secret_fields),
+    }
+
+
+def _fallback_tts_catalog():
+    return [
+        {"id": value, "label": label}
+        for value, label in (
+            ("azure-tts-v1", "Azure TTS V1"),
+            ("azure-tts-v2", "Azure TTS V2"),
+            ("siliconflow", "SiliconFlow TTS"),
+            ("gemini-tts", "Google Gemini TTS"),
+            ("mimo-tts", "Xiaomi MiMo TTS"),
+            ("minimax-tts", "MiniMax TTS"),
+            ("elevenlabs", "ElevenLabs TTS"),
+            ("chatterbox", "Chatterbox TTS"),
+        )
+    ]
+
+
 def _job_error_message(job):
     code = str(job.get("error_code", "") or "").strip()
     message = str(job.get("error_message", "") or "").strip()
@@ -170,8 +201,64 @@ def render_cloud_agent_panel():
     master_prompt = st.text_area(
         "View Master Prompt", key="cloud_agent_master_prompt", disabled=True
     )
-    provider = st.text_input("TTS Provider", value="azure-tts-v1", key="cloud_agent_provider")
-    voice = st.text_input("Voice", key="cloud_agent_voice")
+    provider_catalog = _fallback_tts_catalog()
+    if hasattr(st, "runtime"):
+        try:
+            provider_catalog = _load_tts_provider_catalog()
+        except requests.RequestException as exc:
+            st.error(_api_error_message(exc))
+    provider_labels = {item["id"]: item["label"] for item in provider_catalog}
+    provider = st.selectbox(
+        "TTS Provider", list(provider_labels),
+        format_func=lambda value: provider_labels[value], key="cloud_agent_provider",
+    )
+    provider_metadata = {"voices": [], "settings": []}
+    if hasattr(st, "runtime"):
+        try:
+            provider_metadata = _api("GET", f"tts/providers/{provider}")
+        except requests.RequestException as exc:
+            st.error(_api_error_message(exc))
+    tts_session_state = getattr(st, "session_state", {})
+    voice_options = tts_session_state.get(
+        "cloud_agent_tts_voices", provider_metadata.get("voices", [])
+    )
+    voice_labels = {item["id"]: item.get("label", item["id"]) for item in voice_options}
+    voice = st.selectbox(
+        "Voice", list(voice_labels) or [""],
+        format_func=lambda value: voice_labels.get(value, "Select a configured voice"),
+        key="cloud_agent_voice",
+    )
+    with st.expander("TTS Provider Settings", expanded=False):
+        settings = {}
+        secret_fields = set()
+        clear_secret_fields = []
+        for field in provider_metadata.get("settings", []):
+            name = field["name"]
+            if field["kind"] == "password":
+                secret_fields.add(name)
+                st.caption(f"{field['label']}: {'configured' if field.get('configured') else 'not configured'}")
+                settings[name] = st.text_input(field["label"], type="password", key=f"cloud_tts_{provider}_{name}")
+                if hasattr(st, "checkbox") and st.checkbox(
+                    f"Remove stored key: {field['label']}",
+                    key=f"cloud_tts_remove_{provider}_{name}",
+                ):
+                    clear_secret_fields.append(name)
+            elif field["kind"] == "select":
+                settings[name] = st.selectbox(field["label"], field.get("choices", []), key=f"cloud_tts_{provider}_{name}")
+            else:
+                settings[name] = st.text_input(field["label"], value=str(field.get("value") or ""), key=f"cloud_tts_{provider}_{name}")
+        if st.button("Save TTS Settings", key="cloud_agent_save_tts_settings"):
+            try:
+                _api("PUT", f"tts/providers/{provider}/settings", json=_tts_settings_payload(settings=settings, secret_fields=secret_fields, clear_secret_fields=clear_secret_fields))
+                st.rerun()
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
+        if provider_metadata.get("requires_explicit_voice_refresh") and st.button("Load Voices", key="cloud_agent_load_tts_voices"):
+            try:
+                tts_session_state["cloud_agent_tts_voices"] = _api("POST", f"tts/providers/{provider}/voices/refresh")["voices"]
+                st.rerun()
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
     speed = st.number_input("Speed", min_value=0.1, value=1.0, key="cloud_agent_speed")
     controls = st.columns(4)
     for service, column in (("google-flow", controls[0]), ("canva", controls[1])):
