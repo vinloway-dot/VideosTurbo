@@ -146,6 +146,7 @@ def create_cloud_agent_draft(request: Request, body: CloudJobDraftRequest):
             video_script_prompt=(
                 f"Write approximately {body.target_words} words for this narration."
             ),
+            custom_system_prompt=body.custom_system_prompt,
         ).strip()
     if script.startswith("Error:"):
         raise HttpException(

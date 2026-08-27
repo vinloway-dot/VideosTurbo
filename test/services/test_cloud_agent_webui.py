@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from pathlib import Path
 
 import requests
@@ -84,6 +85,9 @@ def test_cloud_agent_language_selector_formats_the_auto_empty_value(monkeypatch)
             self.formatted_language_options = [format_func(option) for option in options]
             return options[0]
 
+        def expander(self, *_args, **_kwargs):
+            return nullcontext()
+
         def button(self, *_args, **_kwargs):
             return False
 
@@ -107,6 +111,58 @@ def test_cloud_agent_language_selector_formats_the_auto_empty_value(monkeypatch)
     assert fake_streamlit.formatted_language_options[0] == (
         "Auto — detect from Video Subject"
     )
+
+
+def test_cloud_agent_custom_system_prompt_is_hidden_by_default(monkeypatch):
+    class Column:
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def link_button(self, *_args, **_kwargs):
+            return None
+
+    class Streamlit:
+        def __init__(self):
+            self.session_state = {}
+            self.expander_arguments = []
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def text_input(self, _label, **kwargs):
+            return kwargs.get("value", "")
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, **_kwargs):
+            return options[0]
+
+        def expander(self, label, *, expanded):
+            self.expander_arguments.append((label, expanded))
+            return nullcontext()
+
+        def text_area(self, *_args, **_kwargs):
+            return ""
+
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def columns(self, _count):
+            return [Column(), Column(), Column(), Column()]
+
+        def caption(self, *_args, **_kwargs):
+            return None
+
+        def error(self, *_args, **_kwargs):
+            return None
+
+    fake_streamlit = Streamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+
+    cloud_agent.render_cloud_agent_panel()
+
+    assert fake_streamlit.expander_arguments == [("Custom System Prompt", False)]
 
 
 def test_main_renders_cloud_agent_without_the_retired_local_generation_flow():
@@ -196,6 +252,9 @@ def test_canva_check_timeout_is_shown_as_a_safe_webui_error(monkeypatch):
         def selectbox(self, _label, options, **_kwargs):
             return options[0]
 
+        def expander(self, *_args, **_kwargs):
+            return nullcontext()
+
         def text_area(self, *_args, **_kwargs):
             return ""
 
@@ -244,6 +303,7 @@ def test_prepare_draft_calls_the_fastapi_draft_endpoint_with_editor_inputs(monke
         language="English",
         target_words=130,
         script="Edited narration",
+        custom_system_prompt="Use a documentary tone.",
     )["script"] == "Draft"
     assert recorded == {
         "method": "POST",
@@ -253,6 +313,7 @@ def test_prepare_draft_calls_the_fastapi_draft_endpoint_with_editor_inputs(monke
             "language": "English",
             "target_words": 130,
             "script": "Edited narration",
+            "custom_system_prompt": "Use a documentary tone.",
         },
         "timeout": 120,
     }

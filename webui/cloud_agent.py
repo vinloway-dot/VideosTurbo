@@ -55,7 +55,7 @@ def _job_error_message(job):
     return code or message
 
 
-def _prepare_draft(*, subject, language, target_words, script):
+def _prepare_draft(*, subject, language, target_words, script, custom_system_prompt):
     return _api(
         "POST",
         "draft",
@@ -64,6 +64,7 @@ def _prepare_draft(*, subject, language, target_words, script):
             "language": language,
             "target_words": target_words,
             "script": script,
+            "custom_system_prompt": custom_system_prompt,
         },
         timeout=DRAFT_TIMEOUT_SECONDS,
     )
@@ -123,6 +124,13 @@ def render_cloud_agent_panel():
         format_func=lambda value: language_labels[value],
         key="cloud_agent_language",
     )
+    with st.expander("Custom System Prompt", expanded=False):
+        custom_system_prompt = st.text_area(
+            "Custom System Prompt",
+            key="cloud_agent_custom_system_prompt",
+            max_chars=8000,
+            help="Leave blank to use the system default script prompt.",
+        )
     if st.button("Generate Script", key="cloud_agent_generate_script"):
         if not subject.strip():
             st.error("Video Subject is required.")
@@ -134,6 +142,7 @@ def render_cloud_agent_panel():
                         language=language,
                         target_words=words,
                         script="",
+                        custom_system_prompt=custom_system_prompt,
                     )
                 )
                 st.rerun()
@@ -151,6 +160,7 @@ def render_cloud_agent_panel():
                         language=language,
                         target_words=words,
                         script=script_for_refresh,
+                        custom_system_prompt=custom_system_prompt,
                     )
                 )
                 st.rerun()

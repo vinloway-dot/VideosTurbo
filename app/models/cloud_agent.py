@@ -89,6 +89,7 @@ class CloudJobDraftRequest(BaseModel):
     script: str = ""
     language: str = ""
     target_words: int = Field(default=130, ge=40, le=400)
+    custom_system_prompt: str = Field(default="", max_length=8000)
 
     @field_validator("subject")
     @classmethod

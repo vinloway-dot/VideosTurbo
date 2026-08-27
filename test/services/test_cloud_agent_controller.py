@@ -184,6 +184,41 @@ def test_draft_generates_a_complete_start_payload_without_starting_production_wo
     assert calls["plan"]["target_words"] == 130
 
 
+def test_draft_forwards_custom_system_prompt_only_to_script_generation(
+    monkeypatch, tmp_path
+):
+    client, _store = _client(tmp_path)
+    cloud_agent = _cloud_agent_controller()
+    calls = {}
+
+    def generate_script(**kwargs):
+        calls["script"] = kwargs
+        return "A narration generated with the requested writing rules."
+
+    monkeypatch.setattr(cloud_agent, "generate_script", generate_script)
+    monkeypatch.setattr(
+        cloud_agent,
+        "generate_six_clip_plan",
+        lambda *_args, **_kwargs: empty_six_clip_plan(target_words=130),
+    )
+
+    response = client.post(
+        "/api/v1/cloud-agent/draft",
+        json={
+            "subject": "Why Saturn Has a Hexagon",
+            "language": "",
+            "target_words": 130,
+            "script": "",
+            "custom_system_prompt": "Write in a calm documentary tone.",
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls["script"]["custom_system_prompt"] == (
+        "Write in a calm documentary tone."
+    )
+
+
 def test_draft_rejects_a_sanitized_llm_error_without_generating_a_clip_plan(
     monkeypatch, tmp_path
 ):
