@@ -3,7 +3,7 @@ import json
 from collections.abc import AsyncIterator
 from uuid import uuid4
 
-from app.services.cloud_agent.job_events import CloudJobEvent
+from app.services.cloud_agent.job_events import CloudAgentEvent
 
 
 class CloudJobEventHub:
@@ -11,10 +11,10 @@ class CloudJobEventHub:
         if subscriber_queue_size <= 0:
             raise ValueError("subscriber_queue_size must be positive")
         self.subscriber_queue_size = subscriber_queue_size
-        self._subscribers: set[asyncio.Queue[CloudJobEvent | None]] = set()
+        self._subscribers: set[asyncio.Queue[CloudAgentEvent | None]] = set()
         self._lock = asyncio.Lock()
 
-    async def publish(self, event: CloudJobEvent) -> None:
+    async def publish(self, event: CloudAgentEvent) -> None:
         async with self._lock:
             subscribers = tuple(self._subscribers)
         for subscriber in subscribers:
@@ -31,7 +31,7 @@ class CloudJobEventHub:
     async def stream(self, heartbeat_seconds: float = 25) -> AsyncIterator[str]:
         if heartbeat_seconds <= 0:
             raise ValueError("heartbeat_seconds must be positive")
-        queue: asyncio.Queue[CloudJobEvent | None] = asyncio.Queue(
+        queue: asyncio.Queue[CloudAgentEvent | None] = asyncio.Queue(
             maxsize=self.subscriber_queue_size
         )
         async with self._lock:
@@ -47,7 +47,8 @@ class CloudJobEventHub:
                 if event is None:
                     yield self._frame("sync_required", {"event_id": uuid4().hex})
                     continue
-                yield self._frame(event.type.value, event.model_dump(mode="json"), event.event_id)
+                event_type = getattr(event.type, "value", event.type)
+                yield self._frame(event_type, event.model_dump(mode="json"), event.event_id)
         finally:
             async with self._lock:
                 self._subscribers.discard(queue)

@@ -22,12 +22,15 @@ from app.models.six_clip import empty_six_clip_plan
 from app.services import voice
 from app.services.cloud_agent.browser import PersistentBrowserManager
 from app.services.cloud_agent.job_store import CloudJobStore
+from app.services.cloud_agent.incidents import CloudJobIncidentStore
 from app.services.cloud_agent.storage import CloudJobStorage
 
 
 EXPECTED_CLOUD_AGENT_PATHS = {
     ("POST", "/api/v1/cloud-agent/internal/events"),
     ("GET", "/api/v1/cloud-agent/events/stream"),
+    ("GET", "/api/v1/cloud-agent/incidents"),
+    ("POST", "/api/v1/cloud-agent/incidents/{incident_id}/dismiss"),
     ("GET", "/api/v1/cloud-agent/health"),
     ("GET", "/api/v1/cloud-agent/defaults"),
     ("PUT", "/api/v1/cloud-agent/defaults"),
@@ -94,6 +97,9 @@ def _client(tmp_path):
     app.add_exception_handler(HttpException, asgi.exception_handler)
     app.dependency_overrides[cloud_agent.get_cloud_job_store] = lambda: store
     app.dependency_overrides[cloud_agent.get_cloud_job_storage] = lambda: storage
+    app.dependency_overrides[cloud_agent.get_cloud_job_incident_store] = (
+        lambda: CloudJobIncidentStore(store.db_path)
+    )
 
     class FakeDraftVoices:
         def __init__(self):
@@ -154,6 +160,29 @@ def _client(tmp_path):
 
 def _created_job(store: CloudJobStore):
     return store.create_job(CloudJobCreate.model_validate(_request_payload()))
+
+
+def test_incident_api_lists_and_dismisses_sanitized_records(tmp_path):
+    client, store = _client(tmp_path)
+    job = _created_job(store)
+    incidents = CloudJobIncidentStore(store.db_path)
+    incident = incidents.create_pending(
+        job,
+        reason_code="JOB_STALLED_TIMEOUT",
+        stage="canva",
+        message_th="งานหยุดเกินเวลาที่กำหนด",
+    )
+
+    listed = client.get("/api/v1/cloud-agent/incidents?unread=true")
+    dismissed = client.post(
+        f"/api/v1/cloud-agent/incidents/{incident.id}/dismiss"
+    )
+
+    assert listed.status_code == 200
+    assert listed.json()["data"][0]["id"] == incident.id
+    assert "script" not in listed.text
+    assert dismissed.status_code == 200
+    assert incidents.list_unread() == ()
 
 
 def _created_completed_final_job(client, store: CloudJobStore):

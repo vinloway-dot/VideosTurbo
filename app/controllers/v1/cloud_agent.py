@@ -59,7 +59,8 @@ from app.services.cloud_agent.video_library import (
     VideoLibraryNotFoundError,
 )
 from app.services.cloud_agent.event_hub import event_hub
-from app.services.cloud_agent.job_events import CloudJobEvent
+from app.services.cloud_agent.incidents import CloudJobIncidentStore
+from app.services.cloud_agent.job_events import CloudAgentEvent
 from app.utils import utils
 from app.utils.file_security import resolve_path_within_directory
 
@@ -68,7 +69,7 @@ router = new_router()
 
 
 @router.post("/cloud-agent/internal/events", status_code=202)
-async def ingest_cloud_agent_event(event: CloudJobEvent):
+async def ingest_cloud_agent_event(event: CloudAgentEvent):
     await event_hub.publish(event)
     return {"accepted": True}
 
@@ -170,6 +171,10 @@ def get_cloud_job_store() -> CloudJobStore:
 
 def get_cloud_job_storage() -> CloudJobStorage:
     return CloudJobStorage()
+
+
+def get_cloud_job_incident_store() -> CloudJobIncidentStore:
+    return CloudJobIncidentStore(str(config.app["cloud_agent_db_path"]))
 
 
 def get_cloud_video_library_service(
@@ -760,6 +765,43 @@ def list_cloud_agent_jobs(
     del request
     jobs = store.list_jobs()
     return utils.get_response(200, [_job_data(job) for job in jobs])
+
+
+@router.get("/cloud-agent/incidents")
+def list_cloud_agent_incidents(
+    request: Request,
+    unread: bool = True,
+    incidents: CloudJobIncidentStore = Depends(get_cloud_job_incident_store),
+):
+    del request
+    if not unread:
+        raise HttpException(
+            task_id="cloud-agent-incidents",
+            status_code=422,
+            message="only unread incidents are supported",
+        )
+    return utils.get_response(
+        200,
+        [item.model_dump(mode="json") for item in incidents.list_unread()],
+    )
+
+
+@router.post("/cloud-agent/incidents/{incident_id}/dismiss")
+def dismiss_cloud_agent_incident(
+    incident_id: str,
+    request: Request,
+    incidents: CloudJobIncidentStore = Depends(get_cloud_job_incident_store),
+):
+    del request
+    try:
+        dismissed = incidents.dismiss(incident_id)
+    except KeyError as exc:
+        raise HttpException(
+            task_id="cloud-agent-incidents",
+            status_code=404,
+            message="incident not found",
+        ) from exc
+    return utils.get_response(200, dismissed.model_dump(mode="json"))
 
 
 @router.get("/cloud-agent/jobs/{job_id}")

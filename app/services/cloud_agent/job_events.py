@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import uuid4
 
 from loguru import logger
@@ -28,8 +28,23 @@ class CloudJobEvent(BaseModel):
     completed_at: str = Field(max_length=64)
 
 
+class CloudJobIncidentEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str = Field(min_length=1, max_length=64)
+    type: Literal["job.incident"] = "job.incident"
+    incident_id: str = Field(min_length=1, max_length=64)
+    former_job_id: str = Field(min_length=1, max_length=64)
+    reason_code: str = Field(min_length=1, max_length=128)
+    stage: str = Field(min_length=1, max_length=64)
+    created_at: str = Field(min_length=1, max_length=64)
+
+
+CloudAgentEvent = CloudJobEvent | CloudJobIncidentEvent
+
+
 class JobEventSink(Protocol):
-    def publish_nowait(self, event: CloudJobEvent) -> bool: ...
+    def publish_nowait(self, event: CloudAgentEvent) -> bool: ...
 
 
 class EventPublishingCloudJobStore(CloudJobStore):

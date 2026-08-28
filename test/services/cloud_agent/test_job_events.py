@@ -7,6 +7,7 @@ from app.models.cloud_agent import (
 )
 from app.models.six_clip import empty_six_clip_plan
 from app.services.cloud_agent.job_events import (
+    CloudJobIncidentEvent,
     CloudJobEvent,
     CloudJobEventType,
     EventPublishingCloudJobStore,
@@ -148,3 +149,25 @@ def test_event_model_rejects_sensitive_extra_fields():
                 "script": "must-not-enter",
             }
         )
+
+
+def test_incident_event_contains_no_subject_message_or_paths():
+    event = CloudJobIncidentEvent(
+        event_id="event-1",
+        type="job.incident",
+        incident_id="incident-1",
+        former_job_id="job-1",
+        reason_code="JOB_STALLED_TIMEOUT",
+        stage="canva",
+        created_at="2026-08-28T00:00:00+00:00",
+    )
+
+    assert set(event.model_dump(mode="json")) == {
+        "event_id",
+        "type",
+        "incident_id",
+        "former_job_id",
+        "reason_code",
+        "stage",
+        "created_at",
+    }

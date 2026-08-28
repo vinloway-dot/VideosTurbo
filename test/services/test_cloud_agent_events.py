@@ -32,6 +32,7 @@ const component = {
 render(component);
 eventSource.emit('sync_required', {event_id: 'sync-1', type: 'sync_required'});
 eventSource.emit('job.updated', {event_id: 'event-2', type: 'job.updated', job_id: 'job-1'});
+eventSource.emit('job.incident', {event_id: 'event-3', type: 'job.incident', incident_id: 'incident-1'});
 process.stdout.write(JSON.stringify(triggers));
 """
 
@@ -47,6 +48,10 @@ process.stdout.write(JSON.stringify(triggers));
         [
             "event",
             {"event_id": "event-2", "type": "job.updated", "job_id": "job-1"},
+        ],
+        [
+            "event",
+            {"event_id": "event-3", "type": "job.incident", "incident_id": "incident-1"},
         ],
     ]
 
@@ -85,3 +90,4 @@ def test_classifier_refreshes_selected_job_and_app_on_completion():
     assert classify_event({"event_id": "3", "type": "sync_required"}, selected_job_id="job-1", last_event_id="2") == "sync"
     assert classify_event({"event_id": "4", "type": "job.updated", "job_id": "job-2"}, selected_job_id="job-1", last_event_id="2") == "ignore"
     assert classify_event({}, selected_job_id="job-1", last_event_id="") == "ignore"
+    assert classify_event({"event_id": "5", "type": "job.incident", "former_job_id": "job-1"}, selected_job_id="job-1", last_event_id="4") == "refresh_incidents"

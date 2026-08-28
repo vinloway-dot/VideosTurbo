@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 import requests
 from loguru import logger
 
-from app.services.cloud_agent.job_events import CloudJobEvent, JobEventSink
+from app.services.cloud_agent.job_events import CloudAgentEvent, JobEventSink
 
 
 class RequestsJobEventTransport:
@@ -27,7 +27,7 @@ class RequestsJobEventTransport:
         self.url = url
         self.timeout_seconds = float(timeout_seconds)
 
-    def send(self, event: CloudJobEvent) -> None:
+    def send(self, event: CloudAgentEvent) -> None:
         response = requests.post(
             self.url,
             json=event.model_dump(mode="json"),
@@ -37,17 +37,17 @@ class RequestsJobEventTransport:
 
 
 class CloudJobEventDispatcher(JobEventSink):
-    def __init__(self, transport: Callable[[CloudJobEvent], None], queue_size: int):
+    def __init__(self, transport: Callable[[CloudAgentEvent], None], queue_size: int):
         if queue_size <= 0:
             raise ValueError("queue_size must be positive")
         self._transport = transport
-        self._queue: queue.Queue[CloudJobEvent | object] = queue.Queue(maxsize=queue_size)
+        self._queue: queue.Queue[CloudAgentEvent | object] = queue.Queue(maxsize=queue_size)
         self._sentinel = object()
         self._closed = threading.Event()
         self._thread = threading.Thread(target=self._deliver, daemon=True, name="cloud-agent-events")
         self._thread.start()
 
-    def publish_nowait(self, event: CloudJobEvent) -> bool:
+    def publish_nowait(self, event: CloudAgentEvent) -> bool:
         if self._closed.is_set():
             return False
         try:
@@ -67,9 +67,9 @@ class CloudJobEventDispatcher(JobEventSink):
                     self._transport(event)
                 except Exception as exc:
                     logger.warning(
-                        "cloud job event delivery failed type={} job_id={} error_type={}",
-                        event.type.value,
-                        event.job_id,
+                        "cloud job event delivery failed type={} item_id={} error_type={}",
+                        getattr(event.type, "value", event.type),
+                        getattr(event, "job_id", getattr(event, "former_job_id", "")),
                         type(exc).__name__,
                     )
             finally:

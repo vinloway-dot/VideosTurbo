@@ -16,6 +16,7 @@ export default function(component) {
     };
     source.addEventListener('job.updated', emit);
     source.addEventListener('job.completed', emit);
+    source.addEventListener('job.incident', emit);
     source.addEventListener('sync_required', emit);
     parent.__cloudAgentEventSource = {source, emit};
   }
@@ -48,7 +49,7 @@ def render_cloud_job_event_listener(stream_url: str, *, key: str) -> Mapping[str
 
 
 def classify_event(event, *, selected_job_id: str, last_event_id: str) -> Literal[
-    "ignore", "refresh_job", "refresh_app", "sync"
+    "ignore", "refresh_job", "refresh_app", "refresh_incidents", "sync"
 ]:
     if not isinstance(event, Mapping):
         return "ignore"
@@ -60,6 +61,8 @@ def classify_event(event, *, selected_job_id: str, last_event_id: str) -> Litera
         return "sync"
     if event_type == "job.completed":
         return "refresh_job" if event.get("job_id") == selected_job_id else "refresh_app"
+    if event_type == "job.incident":
+        return "refresh_incidents"
     if event_type == "job.updated" and event.get("job_id") == selected_job_id:
         return "refresh_job"
     return "ignore"

@@ -1382,6 +1382,49 @@ def test_selected_job_event_reads_job_once_and_stores_snapshot(monkeypatch):
     assert rendered[-1][1]["progress"] == 15
 
 
+def test_incident_event_reads_unread_once_and_clears_deleted_selection(monkeypatch):
+    state = {
+        "cloud_agent_job_id": "job-123",
+        "cloud_agent_job_lookup_id": "job-123",
+        "cloud_agent_job_snapshot": {"id": "job-123", "status": "FLOW_GENERATING"},
+        "cloud_agent_last_event_id": "",
+    }
+
+    class EventStreamlit:
+        session_state = state
+
+    calls = []
+    monkeypatch.setattr(cloud_agent, "st", EventStreamlit())
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_events,
+        "render_cloud_job_event_listener",
+        lambda *_args, **_kwargs: {
+            "event_id": "incident-event-1",
+            "type": "job.incident",
+            "incident_id": "incident-1",
+            "former_job_id": "job-123",
+        },
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_api",
+        lambda method, path, **_kwargs: calls.append((method, path)) or [],
+    )
+    monkeypatch.setattr(cloud_agent, "_render_incident_banners", lambda *_args: None)
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_ui, "render_production_status", lambda *_args: None
+    )
+
+    cloud_agent._render_event_driven_production_status(
+        script_ready=True, prepared_voice_ready=True, ui_state=state
+    )
+
+    assert calls == [("GET", "incidents?unread=true")]
+    assert state["cloud_agent_job_id"] == ""
+    assert state["cloud_agent_job_lookup_id"] == ""
+    assert state["cloud_agent_job_snapshot"] == {}
+
+
 def test_pause_refreshes_snapshot_without_mutating_the_lookup_widget(monkeypatch):
     rendered_statuses = []
 

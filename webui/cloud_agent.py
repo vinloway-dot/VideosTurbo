@@ -523,6 +523,37 @@ def _selected_job_id(ui_state, entered_job_id):
     ).strip()
 
 
+def _load_unread_incidents():
+    return list(_api("GET", "incidents?unread=true") or [])
+
+
+def _render_incident_banners(ui_state):
+    incidents = list(ui_state.get("cloud_agent_unread_incidents") or [])
+    for incident in incidents:
+        incident_id = str(incident.get("id") or "")
+        stage = str(incident.get("stage") or "unknown")
+        reason = str(incident.get("message_th") or "งานถูกหยุดเพื่อให้ตรวจสอบ")
+        attempts = (
+            f"Flow {int(incident.get('flow_attempts') or 0)} ครั้ง · "
+            f"Canva {int(incident.get('canva_attempts') or 0)} ครั้ง"
+        )
+        with st.container(border=True):
+            st.warning(f"{reason}\n\nขั้นตอน: {stage} · {attempts}")
+            if incident_id and st.button(
+                "รับทราบ",
+                key=f"cloud_agent_incident_dismiss_{incident_id}",
+            ):
+                _api("POST", f"incidents/{incident_id}/dismiss")
+                ui_state["cloud_agent_unread_incidents"] = [
+                    item
+                    for item in incidents
+                    if str(item.get("id") or "") != incident_id
+                ]
+                rerun = getattr(st, "rerun", None)
+                if callable(rerun):
+                    rerun(scope="app")
+
+
 def _render_event_driven_production_status(*, script_ready, prepared_voice_ready, ui_state):
     def render(snapshot):
         cloud_agent_ui.render_production_status(
@@ -546,6 +577,17 @@ def _render_event_driven_production_status(*, script_ready, prepared_voice_ready
     )
     if event and event.get("event_id"):
         ui_state["cloud_agent_last_event_id"] = event["event_id"]
+    if action in {"refresh_incidents", "sync"}:
+        try:
+            ui_state["cloud_agent_unread_incidents"] = _load_unread_incidents()
+        except requests.RequestException:
+            pass
+    if action == "refresh_incidents" and event.get("former_job_id") == job_id:
+        ui_state["cloud_agent_job_id"] = ""
+        ui_state["cloud_agent_job_lookup_id"] = ""
+        ui_state["cloud_agent_job_snapshot"] = {}
+        snapshot = {}
+        job_id = ""
     if action in {"refresh_job", "sync"} and job_id:
         try:
             latest = _api("GET", f"jobs/{job_id}")
@@ -557,6 +599,10 @@ def _render_event_driven_production_status(*, script_ready, prepared_voice_ready
         rerun = getattr(st, "rerun", None)
         if callable(rerun):
             rerun(scope="app")
+    try:
+        _render_incident_banners(ui_state)
+    except Exception:
+        pass
     render(snapshot)
 
 
