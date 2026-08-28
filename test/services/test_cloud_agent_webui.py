@@ -490,6 +490,28 @@ def test_settings_provider_selectors_keep_research_and_tts_selection_separate(
     ]
 
 
+def test_invalid_research_provider_falls_back_to_aihubmix(monkeypatch):
+    class SelectorStreamlit:
+        @staticmethod
+        def selectbox(_label, options, **kwargs):
+            return options[kwargs.get("index", 0)]
+
+    monkeypatch.setattr(cloud_agent, "st", SelectorStreamlit())
+    ui_state = {}
+
+    selected = cloud_agent._render_settings_research_provider_selector(
+        ui_state=ui_state,
+        research_settings={"provider": "unsupported"},
+        research_provider_catalog=[
+            {"id": "openrouter", "label": "OpenRouter"},
+            {"id": "aihubmix", "label": "AIHubMix"},
+        ],
+    )
+
+    assert selected == "aihubmix"
+    assert ui_state["cloud_agent_settings_research_provider"] == "aihubmix"
+
+
 def test_cloud_agent_ui_is_a_thin_fastapi_client_with_required_controls_and_status():
     source = UI_SOURCE.read_text(encoding="utf-8")
 

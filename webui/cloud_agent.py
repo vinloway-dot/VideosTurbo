@@ -13,6 +13,7 @@ API_TIMEOUT_SECONDS = 15
 SESSION_CHECK_TIMEOUT_SECONDS = 45
 DRAFT_TIMEOUT_SECONDS = 120
 RESEARCH_DRAFT_TIMEOUT_SECONDS = 300
+DEFAULT_RESEARCH_PROVIDER_ID = "aihubmix"
 RESEARCH_PROVIDER_OPTIONS = [
     {
         "id": "openrouter",
@@ -158,6 +159,12 @@ def _load_research_provider_catalog():
 
 def _load_research_settings():
     return _api("GET", "research/settings")
+
+
+def _fallback_research_provider_id(provider_labels):
+    if DEFAULT_RESEARCH_PROVIDER_ID in provider_labels:
+        return DEFAULT_RESEARCH_PROVIDER_ID
+    return next(iter(provider_labels), "")
 
 
 def _save_and_verify_research_settings(payload):
@@ -761,8 +768,8 @@ def _render_video_brief(
                 item["id"]: item["label"] for item in research_provider_catalog
             }
             if ui_state.get("cloud_agent_research_provider") not in research_provider_labels:
-                ui_state["cloud_agent_research_provider"] = next(
-                    iter(research_provider_labels), "openrouter"
+                ui_state["cloud_agent_research_provider"] = (
+                    _fallback_research_provider_id(research_provider_labels)
                 )
             research_provider = st.selectbox(
                 "Research Provider", list(research_provider_labels),
@@ -891,7 +898,7 @@ def _render_settings_research_provider_selector(
     state_key = "cloud_agent_settings_research_provider"
     provider = str(ui_state.get(state_key) or research_settings["provider"])
     if provider not in provider_labels:
-        provider = next(iter(provider_labels), "")
+        provider = _fallback_research_provider_id(provider_labels)
     ui_state[state_key] = provider
     provider_ids = list(provider_labels)
     return st.selectbox(
@@ -1551,7 +1558,7 @@ def render_cloud_agent_panel():
             st.error(_api_error_message(exc))
     research_settings = {
         "enabled": True,
-        "provider": "openrouter",
+        "provider": DEFAULT_RESEARCH_PROVIDER_ID,
         "openrouter_model": "openai/gpt-5.6-sol-pro",
         "openrouter_custom_model_id": "openai/gpt-5.6-sol-pro",
         "aihubmix_model": "gpt-5.6-sol",

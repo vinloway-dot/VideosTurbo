@@ -29,7 +29,7 @@ def _render_settings_page():
     }
     research_settings = {
         "enabled": True,
-        "provider": "openrouter",
+        "provider": cloud_agent.DEFAULT_RESEARCH_PROVIDER_ID,
         "openrouter_model": "openai/gpt-5.6-sol-pro",
         "openrouter_custom_model_id": "openai/gpt-5.6-sol-pro",
         "aihubmix_model": "gpt-5.6-sol",

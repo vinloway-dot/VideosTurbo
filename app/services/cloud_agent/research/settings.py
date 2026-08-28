@@ -32,7 +32,7 @@ class ResearchProviderMetadata(BaseModel):
 
 
 class ResearchSettingsService:
-    DEFAULT_PROVIDER_ID = "openrouter"
+    DEFAULT_PROVIDER_ID = "aihubmix"
     KEY_NAMES = {
         provider_id: str(metadata["api_key_name"])
         for provider_id, metadata in _PROVIDERS.items()

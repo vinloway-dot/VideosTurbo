@@ -512,8 +512,8 @@ def test_research_settings_read_normalizes_stale_invalid_default_provider(
     )
 
     assert response.status_code == 200
-    assert response.json()["data"]["provider"] == "openrouter"
-    assert config.app["cloud_agent_research_default_provider"] == "openrouter"
+    assert response.json()["data"]["provider"] == "aihubmix"
+    assert config.app["cloud_agent_research_default_provider"] == "aihubmix"
     assert saved == [True]
 
 
