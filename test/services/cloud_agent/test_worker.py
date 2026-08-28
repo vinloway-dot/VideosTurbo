@@ -1,10 +1,13 @@
 import threading
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 from app.models.cloud_agent import CloudJobCheckpoint, CloudJobCreate, CloudJobStatus
 from app.models.six_clip import empty_six_clip_plan
 from app.services.cloud_agent import factory, worker as worker_module
 from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.worker import CloudAgentWorker
+from app.services.cloud_agent.worker_process import ChildWaitResult
 
 
 def _request(subject: str = "Worker test") -> CloudJobCreate:
@@ -71,6 +74,94 @@ class RecordingStore(CloudJobStore):
         if renewed:
             self.lease_renewed.set()
         return renewed
+
+
+class FakeClock:
+    def __init__(self):
+        self.current = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
+
+    def now(self):
+        return self.current
+
+    def advance(self, *, seconds: float = 0, minutes: float = 0, hours: float = 0):
+        self.current += timedelta(seconds=seconds, minutes=minutes, hours=hours)
+
+
+class FakeChildHandle:
+    def __init__(self, launcher, job_id: str):
+        self.launcher = launcher
+        self.job_id = job_id
+        self.alive = True
+
+    def wait(self, timeout_seconds: float) -> ChildWaitResult:
+        self.launcher.clock.advance(seconds=timeout_seconds)
+        job = self.launcher.store.get_job(self.job_id)
+        if self.launcher.complete_on_wait or (
+            self.launcher.complete_after_restart and job.canva_restart_attempts > 0
+        ):
+            self.launcher.store.patch_job(
+                self.job_id,
+                status=CloudJobStatus.COMPLETED,
+                checkpoint=CloudJobCheckpoint.COMPLETED,
+                current_step="completed",
+                progress=100,
+            )
+            self.alive = False
+            return ChildWaitResult(exited=True, exit_code=0, progress_signal=None)
+        return ChildWaitResult(exited=False, exit_code=None, progress_signal=None)
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+    def terminate_group(self, grace_seconds: float) -> bool:
+        del grace_seconds
+        self.launcher.events.extend(["terminate", "confirmed_stopped"])
+        self.alive = False
+        return True
+
+
+class FakeLauncher:
+    def __init__(
+        self,
+        store: CloudJobStore,
+        clock: FakeClock,
+        *,
+        complete=False,
+        complete_after_restart=False,
+    ):
+        self.store = store
+        self.clock = clock
+        self.complete_on_wait = complete
+        self.complete_after_restart = complete_after_restart
+        self.started = []
+        self.events = []
+
+    def start(self, job_id: str, worker_id: str):
+        self.started.append((job_id, worker_id))
+        attempt = self.store.get_job(job_id).canva_restart_attempts + 1
+        self.events.append(f"start_attempt_{attempt}")
+        return FakeChildHandle(self, job_id)
+
+
+@dataclass
+class TerminationCall:
+    job_id: str
+    child_stopped: bool
+    reason_code: str
+    stage: str
+
+
+class FakeTerminationService:
+    def __init__(self):
+        self.calls: list[TerminationCall] = []
+
+    def delete_stopped_job(
+        self, job_id: str, *, child_stopped: bool, reason_code: str, stage: str
+    ):
+        self.calls.append(
+            TerminationCall(job_id, child_stopped, reason_code, stage)
+        )
+        return None
 
 
 def test_run_once_keeps_second_worker_from_claiming_active_job(tmp_path):
@@ -205,3 +296,113 @@ def test_worker_module_main_builds_and_runs_production_worker(monkeypatch):
     worker_module.main()
 
     assert calls == ["run_forever"]
+
+
+def test_supervisor_claims_and_child_completes_job(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+    clock = FakeClock()
+    launcher = FakeLauncher(store, clock, complete=True)
+    worker = CloudAgentWorker(
+        store,
+        process_launcher=launcher,
+        worker_id="worker-child",
+        clock=clock,
+        lease_seconds=30,
+        lease_renew_interval_seconds=10,
+    )
+
+    assert worker.run_once() is True
+    assert store.get_job(job.id).status is CloudJobStatus.COMPLETED
+    assert launcher.started == [(job.id, "worker-child")]
+
+
+def test_queued_wait_time_is_not_counted_as_active_stall(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+    clock = FakeClock()
+    clock.advance(hours=2)
+    claimed_at = clock.now().isoformat(timespec="microseconds")
+    launcher = FakeLauncher(store, clock, complete=True)
+    worker = CloudAgentWorker(
+        store,
+        process_launcher=launcher,
+        worker_id="worker-child",
+        clock=clock,
+    )
+
+    worker.run_once()
+
+    claimed = store.get_job(job.id)
+    assert claimed.last_progress_at == claimed_at
+
+
+def test_canva_twenty_minute_idle_stops_old_child_before_restart(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+    clock = FakeClock()
+    stalled_at = (clock.now() - timedelta(minutes=20)).isoformat(timespec="microseconds")
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.CANVA_EDITING,
+        checkpoint=CloudJobCheckpoint.FLOW_READY,
+        current_step="canva_editing",
+        last_progress_at=stalled_at,
+    )
+    launcher = FakeLauncher(store, clock, complete_after_restart=True)
+    termination = FakeTerminationService()
+    worker = CloudAgentWorker(
+        store,
+        process_launcher=launcher,
+        termination_service=termination,
+        worker_id="worker-child",
+        clock=clock,
+        lease_seconds=120,
+        lease_renew_interval_seconds=40,
+        canva_stall_seconds=1200,
+        job_stall_seconds=3600,
+    )
+
+    worker.run_once()
+
+    assert launcher.events[:4] == [
+        "start_attempt_1",
+        "terminate",
+        "confirmed_stopped",
+        "start_attempt_2",
+    ]
+    assert store.get_job(job.id).canva_restart_attempts == 1
+    assert termination.calls == []
+
+
+def test_global_hour_idle_preempts_unused_canva_budget(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+    clock = FakeClock()
+    stalled_at = (clock.now() - timedelta(hours=1)).isoformat(timespec="microseconds")
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.CANVA_EDITING,
+        checkpoint=CloudJobCheckpoint.FLOW_READY,
+        current_step="canva_editing",
+        last_progress_at=stalled_at,
+        canva_restart_attempts=2,
+    )
+    launcher = FakeLauncher(store, clock)
+    termination = FakeTerminationService()
+    worker = CloudAgentWorker(
+        store,
+        process_launcher=launcher,
+        termination_service=termination,
+        worker_id="worker-child",
+        clock=clock,
+        canva_stall_seconds=1200,
+        job_stall_seconds=3600,
+    )
+
+    worker.run_once()
+
+    assert launcher.events == ["start_attempt_3", "terminate", "confirmed_stopped"]
+    assert termination.calls == [
+        TerminationCall(job.id, True, "JOB_STALLED_TIMEOUT", "canva")
+    ]
