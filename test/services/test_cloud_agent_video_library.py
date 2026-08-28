@@ -8,6 +8,10 @@ from app.models.cloud_agent import (
 from app.models.six_clip import empty_six_clip_plan
 from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.storage import CloudJobStorage
+from app.services.cloud_agent.video_library import (
+    CloudVideoLibraryService,
+    VideoLibraryNotFoundError,
+)
 
 
 def _request() -> CloudJobCreate:
@@ -47,6 +51,93 @@ def _completed_job(
 
 def _queued_job(store: CloudJobStore):
     return store.create_job(_request())
+
+
+def _library_service(tmp_path):
+    store = CloudJobStore(str(tmp_path / "jobs.sqlite3"))
+    storage = CloudJobStorage(tmp_path / "jobs")
+    return CloudVideoLibraryService(store=store, storage=storage), store, storage
+
+
+def _write_final(store: CloudJobStore, storage: CloudJobStorage, job):
+    paths = storage.prepare(job.id)
+    paths.final_file.write_bytes(b"mp4")
+    return paths, store.patch_job(job.id, final_video=str(paths.final_file))
+
+
+def test_library_filters_missing_final_files_before_pagination(tmp_path):
+    service, store, storage = _library_service(tmp_path)
+    visible = _completed_job(
+        store, job_id="visible", completed_at="2026-08-28T12:00:00+00:00"
+    )
+    _paths, visible = _write_final(store, storage, visible)
+    _completed_job(store, job_id="missing", completed_at="2026-08-28T13:00:00+00:00")
+
+    page = service.list_videos(page=1, page_size=10)
+
+    assert [item.job_id for item in page.items] == [visible.id]
+    assert (page.total_items, page.total_pages) == (1, 1)
+
+
+def test_library_orders_visible_items_and_returns_empty_out_of_range_page(tmp_path):
+    service, store, storage = _library_service(tmp_path)
+    older = _completed_job(
+        store, job_id="older", completed_at="2026-08-28T10:00:00+00:00"
+    )
+    newer = _completed_job(
+        store, job_id="newer", completed_at="2026-08-28T11:00:00+00:00"
+    )
+    _older_paths, _older = _write_final(store, storage, older)
+    _newer_paths, _newer = _write_final(store, storage, newer)
+
+    page = service.list_videos(page=2, page_size=10)
+
+    assert page.items == ()
+    assert (page.total_items, page.total_pages) == (2, 1)
+
+
+def test_library_deletion_removes_visible_job_record_and_artifacts(tmp_path):
+    service, store, storage = _library_service(tmp_path)
+    job = _completed_job(
+        store, job_id="visible", completed_at="2026-08-28T12:00:00+00:00"
+    )
+    paths, job = _write_final(store, storage, job)
+
+    service.delete_video(job.id)
+
+    assert store.get_job(job.id) is None
+    assert not paths.job_dir.exists()
+
+
+def test_library_deletion_refuses_noncompleted_job_even_when_final_file_exists(tmp_path):
+    service, store, storage = _library_service(tmp_path)
+    job = _queued_job(store)
+    paths, job = _write_final(store, storage, job)
+
+    with pytest.raises(VideoLibraryNotFoundError):
+        service.delete_video(job.id)
+
+    assert store.get_job(job.id) is not None
+    assert paths.final_file.exists()
+
+
+def test_library_deletion_restores_artifacts_when_record_delete_fails(tmp_path, monkeypatch):
+    service, store, storage = _library_service(tmp_path)
+    job = _completed_job(
+        store, job_id="visible", completed_at="2026-08-28T12:00:00+00:00"
+    )
+    paths, job = _write_final(store, storage, job)
+
+    def fail_delete(_job_id):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(store, "delete_job", fail_delete)
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        service.delete_video(job.id)
+
+    assert store.get_job(job.id) is not None
+    assert paths.final_file.exists()
 
 
 def test_completed_final_candidates_are_sorted_by_completion_then_id(tmp_path):

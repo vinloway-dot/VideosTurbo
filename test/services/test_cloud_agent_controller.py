@@ -41,6 +41,8 @@ EXPECTED_CLOUD_AGENT_PATHS = {
     ("POST", "/api/v1/cloud-agent/jobs/{job_id}/retry"),
     ("POST", "/api/v1/cloud-agent/jobs/{job_id}/cancel"),
     ("GET", "/api/v1/cloud-agent/jobs/{job_id}/final"),
+    ("GET", "/api/v1/cloud-agent/videos"),
+    ("DELETE", "/api/v1/cloud-agent/videos/{job_id}"),
     ("GET", "/api/v1/cloud-agent/tts/providers"),
     ("GET", "/api/v1/cloud-agent/tts/providers/{provider_id}"),
     ("PUT", "/api/v1/cloud-agent/tts/providers/{provider_id}/settings"),
@@ -144,11 +146,62 @@ def _client(tmp_path):
     client = TestClient(app, raise_server_exceptions=False)
     client.app.state.draft_voices = voices
     client.app.state.defaults = defaults
+    client.app.state.cloud_job_storage = storage
     return client, store
 
 
 def _created_job(store: CloudJobStore):
     return store.create_job(CloudJobCreate.model_validate(_request_payload()))
+
+
+def _created_completed_final_job(client, store: CloudJobStore):
+    job = _created_job(store)
+    storage = client.app.state.cloud_job_storage
+    paths = storage.prepare(job.id)
+    paths.final_file.write_bytes(b"mp4")
+    return store.patch_job(
+        job.id,
+        status=CloudJobStatus.COMPLETED,
+        checkpoint=CloudJobCheckpoint.COMPLETED,
+        completed_at="2026-08-28T12:00:00+00:00",
+        final_video=str(paths.final_file),
+    )
+
+
+def test_video_library_api_exposes_no_local_path(tmp_path):
+    client, store = _client(tmp_path)
+    job = _created_completed_final_job(client, store)
+
+    response = client.get("/api/v1/cloud-agent/videos?page=1&page_size=10")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][0] == {
+        "job_id": job.id,
+        "subject": job.subject,
+        "completed_at": job.completed_at,
+        "final_url": f"/api/v1/cloud-agent/jobs/{job.id}/final",
+    }
+    assert str(tmp_path) not in response.text
+
+
+def test_video_delete_api_removes_visible_job(tmp_path):
+    client, store = _client(tmp_path)
+    job = _created_completed_final_job(client, store)
+
+    response = client.delete(f"/api/v1/cloud-agent/videos/{job.id}")
+
+    assert response.status_code == 200
+    assert store.get_job(job.id) is None
+
+
+def test_video_delete_api_hides_nonvisible_job_details(tmp_path):
+    client, store = _client(tmp_path)
+    job = _created_job(store)
+
+    response = client.delete(f"/api/v1/cloud-agent/videos/{job.id}")
+
+    assert response.status_code == 404
+    assert job.id not in response.text
 
 
 def test_cloud_agent_router_contract_is_registered_on_existing_root_router():
