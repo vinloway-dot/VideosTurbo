@@ -103,12 +103,15 @@ final-video endpoint remains the sole media source for playback.
 
 ## Components
 
-- `CloudJobStore`: provides an ordered, paginated query for library-eligible
-  records and a narrowly scoped record deletion operation.
+- `CloudJobStore`: queries completed-final candidates in completion order and
+  provides a narrowly scoped record deletion operation.
 - `CloudJobStorage`: provides safe, job-scoped artifact existence and removal
   methods; it owns filesystem boundary validation.
+- `CloudVideoLibraryService`: combines the store and storage checks to decide
+  library visibility, calculate exact pagination, and coordinate a deletion.
 - Cloud Agent API controller: maps the two library routes, validates inputs,
-  and converts expected problems to typed HTTP errors.
+  serializes public video data, and converts expected problems to typed HTTP
+  errors.
 - `webui/cloud_agent.py`: fetches and renders the paginated library between
   Production status and Job controls, keeps current page in session state, and
   refreshes after status completion/deletion.
