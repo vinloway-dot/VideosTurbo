@@ -84,11 +84,14 @@ class FlowRecoveryCoordinator:
         expected_height: int,
         poll_seconds: float = 1.0,
         reconcile_timeout_seconds: float = 3600.0,
+        max_recovery_attempts: int = 2,
     ):
         if poll_seconds < 0:
             raise ValueError("poll_seconds must be non-negative")
         if reconcile_timeout_seconds <= 0:
             raise ValueError("reconcile_timeout_seconds must be positive")
+        if max_recovery_attempts < 0 or max_recovery_attempts > 2:
+            raise ValueError("max_recovery_attempts must be between 0 and 2")
         self.store = store
         self.reporter = reporter
         self.inventory_loader = inventory_loader
@@ -97,6 +100,7 @@ class FlowRecoveryCoordinator:
         self.expected_height = expected_height
         self.poll_seconds = poll_seconds
         self.reconcile_timeout_seconds = reconcile_timeout_seconds
+        self.max_recovery_attempts = max_recovery_attempts
 
     def _report(self, job_id: str, milestone: str) -> None:
         if self.reporter is not None:
@@ -191,6 +195,10 @@ class FlowRecoveryCoordinator:
     ) -> tuple[Path, ...]:
         current = job
         while True:
+            if current.flow_recovery_attempts >= self.max_recovery_attempts:
+                raise FlowRecoveryExhausted(
+                    "Flow replacement retry budget exhausted"
+                )
             prompt = build_targeted_replacement_prompt(
                 current,
                 inventory.missing_index,
@@ -223,7 +231,7 @@ class FlowRecoveryCoordinator:
                 attempt=current.flow_recovery_attempts,
             )
             if observation.state is FlowRecoveryRemoteState.FAILED:
-                if current.flow_recovery_attempts >= 2:
+                if current.flow_recovery_attempts >= self.max_recovery_attempts:
                     raise FlowRecoveryExhausted(
                         "Flow replacement failed after two attempts"
                     )

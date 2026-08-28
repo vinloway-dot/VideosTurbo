@@ -116,8 +116,7 @@ def test_worker_factory_uses_event_store_but_controller_store_does_not(monkeypat
 
     monkeypatch.setattr(factory, "CloudJobEventDispatcher", lambda **_kw: Sink())
     monkeypatch.setattr(factory, "RequestsJobEventTransport", lambda *args, **kwargs: SimpleNamespace(send=lambda event: None))
-    monkeypatch.setattr(factory, "build_workflow", lambda *, store: SimpleNamespace(store=store))
-    monkeypatch.setattr(factory, "CloudAgentWorker", lambda store, workflow, **kw: store)
+    monkeypatch.setattr(factory, "CloudAgentWorker", lambda store, **kw: store)
 
     worker_store = factory.build_worker()
     controller_store = controller.get_cloud_job_store()

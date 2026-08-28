@@ -1593,6 +1593,7 @@ def test_factory_builds_worker_and_workflow_from_existing_app_config(monkeypatch
     assert workflow.store.db_path == app_config["cloud_agent_db_path"]
     assert workflow.canva_min_playback_speed == 0.85
     assert workflow.final_duration_tolerance_seconds == 1.0
-    assert worker.workflow.store.db_path == app_config["cloud_agent_db_path"]
+    assert worker.process_launcher is not None
+    assert worker.workflow is None
     assert worker.lease_seconds == 90
     assert worker.poll_seconds == 3

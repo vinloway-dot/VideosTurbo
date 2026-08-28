@@ -406,3 +406,19 @@ def test_global_hour_idle_preempts_unused_canva_budget(tmp_path):
     assert termination.calls == [
         TerminationCall(job.id, True, "JOB_STALLED_TIMEOUT", "canva")
     ]
+
+
+def test_factory_builds_parent_supervisor_without_parent_browser(monkeypatch, tmp_path):
+    monkeypatch.setitem(
+        factory.config.app, "cloud_agent_db_path", str(tmp_path / "agent.sqlite3")
+    )
+
+    def fail_parent_browser(*_args, **_kwargs):
+        raise AssertionError("browser must only be built inside the job child")
+
+    monkeypatch.setattr(factory, "PersistentBrowserManager", fail_parent_browser)
+
+    worker = factory.build_worker()
+
+    assert worker.process_launcher is not None
+    assert worker.workflow is None

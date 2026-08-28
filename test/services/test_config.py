@@ -533,6 +533,12 @@ class TestConfigPersistence:
         )
         assert normalized["cloud_agent_event_delivery_timeout_seconds"] == 0.5
         assert normalized["cloud_agent_sse_heartbeat_seconds"] == 25
+        assert normalized["cloud_agent_flow_recovery_retries"] == 2
+        assert normalized["cloud_agent_canva_restart_retries"] == 4
+        assert normalized["cloud_agent_canva_stall_seconds"] == 1200
+        assert normalized["cloud_agent_job_stall_seconds"] == 3600
+        assert normalized["cloud_agent_child_terminate_grace_seconds"] == 15
+        assert normalized["cloud_agent_progress_signal_queue_size"] == 64
         assert normalized["cloud_agent_max_retries"] == 3
         assert normalized["cloud_agent_min_free_disk_gb"] == 10
         assert normalized["cloud_agent_tts_min_duration_seconds"] == 1

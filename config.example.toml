@@ -61,6 +61,12 @@ cloud_agent_event_queue_size = 128
 cloud_agent_event_intake_url = "http://127.0.0.1:8080/api/v1/cloud-agent/internal/events"
 cloud_agent_event_delivery_timeout_seconds = 0.5
 cloud_agent_sse_heartbeat_seconds = 25
+cloud_agent_flow_recovery_retries = 2
+cloud_agent_canva_restart_retries = 4
+cloud_agent_canva_stall_seconds = 1200
+cloud_agent_job_stall_seconds = 3600
+cloud_agent_child_terminate_grace_seconds = 15
+cloud_agent_progress_signal_queue_size = 64
 cloud_agent_max_retries = 3
 cloud_agent_min_free_disk_gb = 10
 # Generated narration must contain a meaningful positive audio duration.

@@ -25,6 +25,13 @@ from app.services.cloud_agent.event_dispatcher import (
     RequestsJobEventTransport,
 )
 from app.services.cloud_agent.job_events import EventPublishingCloudJobStore
+from app.services.cloud_agent.incidents import (
+    CloudJobIncidentStore,
+    JobTerminationService,
+)
+from app.services.cloud_agent.progress import DurableProgressReporter
+from app.services.cloud_agent.worker_process import MultiprocessingJobProcessLauncher
+from app.services.cloud_agent.flow_recovery import FlowRecoveryCoordinator
 from app.services.cloud_agent.workflow import CloudAgentWorkflow
 from app.services.cloud_agent.research.adapters import (
     AIHubMixToolCallingAdapter,
@@ -36,7 +43,9 @@ from app.services.cloud_agent.research.settings import ResearchSettingsService
 from app.services.cloud_agent.research.store import ResearchDraftStore
 
 
-def build_workflow(*, store: CloudJobStore | None = None) -> CloudAgentWorkflow:
+def build_workflow(
+    *, store: CloudJobStore | None = None, progress_sink=None
+) -> CloudAgentWorkflow:
     """Build the Cloud Agent from the process's existing ``config.app`` mapping."""
     app_config = config.app
     storage = CloudJobStorage()
@@ -49,8 +58,7 @@ def build_workflow(*, store: CloudJobStore | None = None) -> CloudAgentWorkflow:
         sessions,
         min_free_disk_gb=float(app_config["cloud_agent_min_free_disk_gb"]),
     )
-
-
+    reporter = DurableProgressReporter(store, sink=progress_sink)
     return CloudAgentWorkflow(
         store,
         storage,
@@ -79,7 +87,41 @@ def build_workflow(*, store: CloudJobStore | None = None) -> CloudAgentWorkflow:
         final_min_size_bytes=int(app_config["cloud_agent_final_min_size_bytes"]),
         expected_width=int(app_config["cloud_agent_expected_width"]),
         expected_height=int(app_config["cloud_agent_expected_height"]),
+        reporter=reporter,
+        flow_recovery=FlowRecoveryCoordinator(
+            store,
+            reporter=reporter,
+            expected_width=int(app_config["cloud_agent_expected_width"]),
+            expected_height=int(app_config["cloud_agent_expected_height"]),
+            max_recovery_attempts=int(
+                app_config.get("cloud_agent_flow_recovery_retries", 2)
+            ),
+        ),
     )
+
+
+def _build_event_dispatcher(app_config):
+    transport = RequestsJobEventTransport(
+        app_config.get(
+            "cloud_agent_event_intake_url",
+            "http://127.0.0.1:8080/api/v1/cloud-agent/internal/events",
+        ),
+        timeout_seconds=float(
+            app_config.get("cloud_agent_event_delivery_timeout_seconds", 0.5)
+        ),
+    )
+    return CloudJobEventDispatcher(
+        transport=transport.send,
+        queue_size=int(app_config.get("cloud_agent_event_queue_size", 128)),
+    )
+
+
+def build_job_child(*, db_path: str, progress_sink) -> CloudAgentWorkflow:
+    """Compose all browser-bound dependencies inside a spawned job child."""
+    app_config = config.app
+    dispatcher = _build_event_dispatcher(app_config)
+    event_store = EventPublishingCloudJobStore(str(db_path), sink=dispatcher)
+    return build_workflow(store=event_store, progress_sink=progress_sink)
 
 
 def build_session_manager(
@@ -153,27 +195,39 @@ def build_research_script_service() -> ResearchScriptService:
 def build_worker() -> CloudAgentWorker:
     """Build one durable worker from the process's existing ``config.app`` mapping."""
     app_config = config.app
-    transport = RequestsJobEventTransport(
-        app_config.get(
-            "cloud_agent_event_intake_url",
-            "http://127.0.0.1:8080/api/v1/cloud-agent/internal/events",
-        ),
-        timeout_seconds=float(
-            app_config.get("cloud_agent_event_delivery_timeout_seconds", 0.5)
-        ),
-    )
-    dispatcher = CloudJobEventDispatcher(
-        transport=transport.send,
-        queue_size=int(app_config.get("cloud_agent_event_queue_size", 128)),
-    )
+    dispatcher = _build_event_dispatcher(app_config)
+    db_path = str(app_config["cloud_agent_db_path"])
     event_store = EventPublishingCloudJobStore(
-        str(app_config["cloud_agent_db_path"]), sink=dispatcher
+        db_path, sink=dispatcher
     )
-    workflow = build_workflow(store=event_store)
+    incidents = CloudJobIncidentStore(db_path)
+    termination = JobTerminationService(
+        event_store,
+        CloudJobStorage(),
+        incidents,
+        event_sink=dispatcher,
+    )
+    launcher = MultiprocessingJobProcessLauncher(
+        db_path=db_path,
+        signal_queue_size=int(
+            app_config.get("cloud_agent_progress_signal_queue_size", 64)
+        ),
+    )
     return CloudAgentWorker(
-        workflow.store,
-        workflow,
+        event_store,
+        process_launcher=launcher,
+        termination_service=termination,
         worker_id=None,
         lease_seconds=int(app_config["cloud_agent_worker_lease_seconds"]),
         poll_seconds=float(app_config["cloud_agent_worker_poll_seconds"]),
+        canva_stall_seconds=float(
+            app_config.get("cloud_agent_canva_stall_seconds", 1200)
+        ),
+        job_stall_seconds=float(app_config.get("cloud_agent_job_stall_seconds", 3600)),
+        child_terminate_grace_seconds=float(
+            app_config.get("cloud_agent_child_terminate_grace_seconds", 15)
+        ),
+        canva_restart_retries=int(
+            app_config.get("cloud_agent_canva_restart_retries", 4)
+        ),
     )

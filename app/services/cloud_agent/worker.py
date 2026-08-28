@@ -36,6 +36,7 @@ class CloudAgentWorker:
         canva_stall_seconds: float = 1200.0,
         job_stall_seconds: float = 3600.0,
         child_terminate_grace_seconds: float = 15.0,
+        canva_restart_retries: int = 4,
         clock: Clock | None = None,
     ):
         if lease_seconds <= 0:
@@ -52,6 +53,8 @@ class CloudAgentWorker:
             raise ValueError("job_stall_seconds must exceed canva_stall_seconds")
         if child_terminate_grace_seconds <= 0:
             raise ValueError("child_terminate_grace_seconds must be positive")
+        if canva_restart_retries < 0 or canva_restart_retries > 4:
+            raise ValueError("canva_restart_retries must be between 0 and 4")
 
         renew_interval = (
             float(lease_renew_interval_seconds)
@@ -74,6 +77,7 @@ class CloudAgentWorker:
         self.canva_stall_seconds = float(canva_stall_seconds)
         self.job_stall_seconds = float(job_stall_seconds)
         self.child_terminate_grace_seconds = float(child_terminate_grace_seconds)
+        self.canva_restart_retries = canva_restart_retries
         self.clock = clock or SystemClock()
 
     def _renew_lease_until_stopped(self, job_id: str, stop: threading.Event) -> None:
@@ -253,6 +257,13 @@ class CloudAgentWorker:
                     if not self._stop_child(job.id, child):
                         return
                     try:
+                        if (
+                            persisted.canva_restart_attempts
+                            >= self.canva_restart_retries
+                        ):
+                            raise RecoveryBudgetExhausted(
+                                "Canva restart budget exhausted"
+                            )
                         self.store.reserve_canva_restart(job.id)
                     except RecoveryBudgetExhausted:
                         exhausted = self.store.patch_job(

@@ -35,6 +35,12 @@ CLOUD_AGENT_DEFAULTS = {
     "cloud_agent_event_intake_url": "http://127.0.0.1:8080/api/v1/cloud-agent/internal/events",
     "cloud_agent_event_delivery_timeout_seconds": 0.5,
     "cloud_agent_sse_heartbeat_seconds": 25,
+    "cloud_agent_flow_recovery_retries": 2,
+    "cloud_agent_canva_restart_retries": 4,
+    "cloud_agent_canva_stall_seconds": 1200,
+    "cloud_agent_job_stall_seconds": 3600,
+    "cloud_agent_child_terminate_grace_seconds": 15,
+    "cloud_agent_progress_signal_queue_size": 64,
     "cloud_agent_max_retries": 3,
     "cloud_agent_min_free_disk_gb": 10,
     "cloud_agent_tts_min_duration_seconds": 1,
@@ -132,7 +138,39 @@ def _apply_cloud_agent_defaults(app_config):
         app_config.setdefault(key, copy.deepcopy(value))
     for key, value in RESEARCH_DEFAULTS.items():
         app_config.setdefault(key, copy.deepcopy(value))
+    _validate_cloud_agent_guardrails(app_config)
     return app_config
+
+
+def _validate_cloud_agent_guardrails(app_config):
+    for key, maximum in (
+        ("cloud_agent_flow_recovery_retries", 2),
+        ("cloud_agent_canva_restart_retries", 4),
+    ):
+        value = app_config[key]
+        if type(value) is not int or value < 0 or value > maximum:
+            raise ValueError(f"{key} must be an integer between 0 and {maximum}")
+
+    positive_keys = (
+        "cloud_agent_canva_stall_seconds",
+        "cloud_agent_job_stall_seconds",
+        "cloud_agent_child_terminate_grace_seconds",
+    )
+    for key in positive_keys:
+        value = app_config[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError(f"{key} must be positive")
+    if (
+        app_config["cloud_agent_canva_stall_seconds"]
+        >= app_config["cloud_agent_job_stall_seconds"]
+    ):
+        raise ValueError("Canva stall timeout must be shorter than job stall timeout")
+
+    queue_size = app_config["cloud_agent_progress_signal_queue_size"]
+    if type(queue_size) is not int or queue_size < 1 or queue_size > 1024:
+        raise ValueError(
+            "cloud_agent_progress_signal_queue_size must be between 1 and 1024"
+        )
 
 
 def _pending_update_key(config_section, key):
