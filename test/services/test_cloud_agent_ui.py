@@ -79,7 +79,10 @@ def test_video_library_renderer_uses_public_video_urls_and_numbered_pages(monkey
 
     cloud_agent_ui.render_video_library(
         view,
-        on_delete=lambda _job_id: None,
+        pending_delete_id="",
+        on_delete_request=lambda _job_id: None,
+        on_delete_confirm=lambda _job_id: None,
+        on_delete_cancel=lambda _job_id: None,
         on_page=lambda _page: None,
     )
 
@@ -100,7 +103,6 @@ def test_video_library_delete_confirmation_limits_scope_to_local_videosturbo_sto
 ):
     class ConfirmationStreamlit:
         def __init__(self):
-            self.session_state = {"cloud_agent_delete_job-1": True}
             self.warnings = []
 
         def container(self, **_kwargs):
@@ -138,7 +140,10 @@ def test_video_library_delete_confirmation_limits_scope_to_local_videosturbo_sto
             total_pages=1,
             total_items=1,
         ),
-        on_delete=lambda _job_id: None,
+        pending_delete_id="job-1",
+        on_delete_request=lambda _job_id: None,
+        on_delete_confirm=lambda _job_id: None,
+        on_delete_cancel=lambda _job_id: None,
         on_page=lambda _page: None,
     )
 

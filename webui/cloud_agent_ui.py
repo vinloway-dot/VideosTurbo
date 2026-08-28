@@ -83,7 +83,10 @@ def video_library_view(payload: Mapping[str, object]) -> VideoLibraryView:
 def render_video_library(
     view: VideoLibraryView,
     *,
-    on_delete: Callable[[str], None],
+    pending_delete_id: str,
+    on_delete_request: Callable[[str], None],
+    on_delete_confirm: Callable[[str], None],
+    on_delete_cancel: Callable[[str], None],
     on_page: Callable[[int], None],
 ) -> None:
     with st.container(key="cloud_agent_video_library"):
@@ -107,12 +110,17 @@ def render_video_library(
                                 '<p class="vt-video-library-card__time">'
                                 f"{escape(card.completed_at)}</p>"
                             )
-                            delete_key = f"cloud_agent_delete_{card.job_id}"
-                            if st.button(
-                                "ลบ", key=delete_key, type="secondary", disabled=False
-                            ):
-                                st.session_state[delete_key] = True
-                            if st.session_state.get(delete_key):
+                            delete_requested = st.button(
+                                "ลบ",
+                                key=f"cloud_agent_delete_{card.job_id}",
+                                type="secondary",
+                                disabled=False,
+                            )
+                            is_pending = pending_delete_id == card.job_id
+                            if delete_requested:
+                                on_delete_request(card.job_id)
+                                is_pending = True
+                            if is_pending:
                                 st.warning(
                                     "การลบนี้จะลบวิดีโอและไฟล์งานของรายการนี้ออกจากที่เก็บข้อมูล "
                                     "VideosTurbo ภายในเครื่องอย่างถาวรเท่านั้น และจะไม่ลบข้อมูลจาก "
@@ -123,8 +131,13 @@ def render_video_library(
                                     key=f"cloud_agent_confirm_delete_{card.job_id}",
                                     type="primary",
                                 ):
-                                    on_delete(card.job_id)
-                                    st.session_state.pop(delete_key, None)
+                                    on_delete_confirm(card.job_id)
+                                if st.button(
+                                    "ยกเลิก",
+                                    key=f"cloud_agent_cancel_delete_{card.job_id}",
+                                    type="secondary",
+                                ):
+                                    on_delete_cancel(card.job_id)
         if view.total_pages > 1:
             with st.container(key="cloud_agent_video_library_pagination"):
                 for page in range(1, view.total_pages + 1):

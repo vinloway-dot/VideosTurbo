@@ -84,3 +84,73 @@ All checks passed!
   retained.  Its public callbacks are used unchanged.
 - The fallback depends on the API's documented post-delete pagination metadata;
   the next app rerun performs the actual prior-page read.
+
+## Review fix: shared deletion state and call-site placement proof
+
+The review identified that the Task 3 renderer kept its own per-button session
+state, so the Task 4 pending ID was not set until an attempted confirmation and
+there was no cancellation path.  The renderer now receives the public pending
+ID and three explicit callbacks: request, confirm, and cancel.  It no longer
+reads or writes renderer-private delete state.  The first delete click records
+the Task 4 key and makes the Thai confirm/cancel controls visible immediately;
+Cancel clears only that key and cannot reach the API; Confirm is the sole path
+that invokes DELETE.
+
+The placement test now extracts `render_cloud_agent_panel` and asserts the
+actual `_render_video_library(ui_state=ui_state)` call lies after the Production
+status slot allocation and before the Job controls expander.  It no longer
+matches the helper definition.
+
+### Review-fix RED evidence
+
+Added real renderer/WebUI click-interaction tests before changing the renderer:
+
+- `test_first_video_delete_click_sets_the_shared_pending_id`
+- `test_video_delete_cancel_clears_only_pending_id_without_delete_api_call`
+- `test_video_delete_confirm_uses_pending_id_then_deletes_and_falls_back`
+
+Command:
+
+```bash
+uv run python -X utf8 -m pytest test/services/test_cloud_agent_webui.py -k 'first_video_delete or video_delete_cancel or video_delete_confirm or requests_ten_items' -v
+```
+
+Output before the fix:
+
+```text
+collected 54 items / 50 deselected / 4 selected
+PASSED test_video_library_requests_ten_items_and_renders_before_job_controls
+FAILED test_first_video_delete_click_sets_the_shared_pending_id
+AssertionError: assert '' == 'job-1'
+FAILED test_video_delete_cancel_clears_only_pending_id_without_delete_api_call
+pending ID remained 'job-1'
+FAILED test_video_delete_confirm_uses_pending_id_then_deletes_and_falls_back
+DELETE videos/job-1 was never called
+================== 3 failed, 1 passed, 50 deselected in 1.07s ==================
+```
+
+### Review-fix GREEN evidence
+
+Focused WebUI interaction suite:
+
+```text
+======================= 4 passed, 50 deselected in 0.61s =======================
+```
+
+Focused renderer suite:
+
+```text
+======================= 4 passed, 23 deselected in 0.69s =======================
+```
+
+Final verification commands:
+
+```bash
+uv run python -X utf8 -m pytest test/services/test_cloud_agent_webui.py -v
+uv run python -X utf8 -m pytest test/services/test_cloud_agent_ui.py -v
+uv run ruff check webui/cloud_agent.py webui/cloud_agent_ui.py test/services/test_cloud_agent_webui.py test/services/test_cloud_agent_ui.py
+git diff --check
+```
+
+Final output: `54 passed`, `27 passed`, `All checks passed!`, and no
+`git diff --check` output.

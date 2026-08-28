@@ -33,6 +33,40 @@ def _video_page(*, page=1, total_pages=1, total_items=1, items=None):
     }
 
 
+class _VideoLibraryStreamlit:
+    def __init__(self, state, pressed_key=""):
+        self.session_state = state
+        self.pressed_key = pressed_key
+        self.buttons = []
+        self.errors = []
+        self.reruns = 0
+
+    def container(self, **_kwargs):
+        return nullcontext()
+
+    def columns(self, count):
+        return [nullcontext() for _ in range(count)]
+
+    def html(self, _body):
+        return None
+
+    def video(self, _url):
+        return None
+
+    def warning(self, _message):
+        return None
+
+    def button(self, _label, *, key, **_kwargs):
+        self.buttons.append(key)
+        return key == self.pressed_key
+
+    def error(self, message):
+        self.errors.append(message)
+
+    def rerun(self):
+        self.reruns += 1
+
+
 def test_video_library_requests_ten_items_and_renders_before_job_controls(monkeypatch):
     calls = []
     monkeypatch.setattr(
@@ -43,10 +77,91 @@ def test_video_library_requests_ten_items_and_renders_before_job_controls(monkey
 
     assert cloud_agent._load_video_library(1)["page_size"] == 10
     assert calls == [("GET", "videos?page=1&page_size=10")]
-    source = Path("webui/cloud_agent.py").read_text(encoding="utf-8")
-    assert source.index("_render_video_library") < source.index(
-        'st.expander("Job controls"'
+    panel_source = Path("webui/cloud_agent.py").read_text(encoding="utf-8").split(
+        "def render_cloud_agent_panel():", maxsplit=1
+    )[1]
+    assert panel_source.index("production_status_slot = st.container") < panel_source.index(
+        "_render_video_library(ui_state=ui_state)"
+    ) < panel_source.index('with st.expander("Job controls"')
+
+
+def test_first_video_delete_click_sets_the_shared_pending_id(monkeypatch):
+    state = {}
+    fake = _VideoLibraryStreamlit(state, "cloud_agent_delete_job-1")
+    calls = []
+    monkeypatch.setattr(cloud_agent, "st", fake)
+    monkeypatch.setattr(cloud_agent.cloud_agent_ui, "st", fake)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_api",
+        lambda method, path, **_kwargs: calls.append((method, path)) or _video_page(),
     )
+
+    cloud_agent._render_video_library(ui_state=state)
+
+    assert state["cloud_agent_video_delete_pending_id"] == "job-1"
+    assert calls == [("GET", "videos?page=1&page_size=10")]
+    assert "cloud_agent_cancel_delete_job-1" in fake.buttons
+
+
+def test_video_delete_cancel_clears_only_pending_id_without_delete_api_call(monkeypatch):
+    state = {
+        "cloud_agent_video_library_page": 1,
+        "cloud_agent_video_delete_pending_id": "job-1",
+        "unrelated": "retained",
+    }
+    fake = _VideoLibraryStreamlit(state, "cloud_agent_cancel_delete_job-1")
+    calls = []
+    monkeypatch.setattr(cloud_agent, "st", fake)
+    monkeypatch.setattr(cloud_agent.cloud_agent_ui, "st", fake)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_api",
+        lambda method, path, **_kwargs: calls.append((method, path)) or _video_page(),
+    )
+
+    cloud_agent._render_video_library(ui_state=state)
+
+    assert state == {
+        "cloud_agent_video_library_page": 1,
+        "cloud_agent_video_delete_pending_id": "",
+        "unrelated": "retained",
+    }
+    assert calls == [("GET", "videos?page=1&page_size=10")]
+
+
+def test_video_delete_confirm_uses_pending_id_then_deletes_and_falls_back(monkeypatch):
+    state = {
+        "cloud_agent_video_library_page": 3,
+        "cloud_agent_video_delete_pending_id": "job-1",
+    }
+    fake = _VideoLibraryStreamlit(state, "cloud_agent_confirm_delete_job-1")
+    calls = []
+
+    def api(method, path, **_kwargs):
+        calls.append((method, path))
+        if method == "DELETE":
+            return {}
+        return _video_page(page=3, total_pages=3) if len(calls) == 1 else _video_page(
+            page=3, total_pages=2, items=[]
+        )
+
+    monkeypatch.setattr(cloud_agent, "st", fake)
+    monkeypatch.setattr(cloud_agent.cloud_agent_ui, "st", fake)
+    monkeypatch.setattr(cloud_agent, "_api", api)
+
+    cloud_agent._render_video_library(ui_state=state)
+
+    assert calls == [
+        ("GET", "videos?page=3&page_size=10"),
+        ("DELETE", "videos/job-1"),
+        ("GET", "videos?page=3&page_size=10"),
+    ]
+    assert state == {
+        "cloud_agent_video_library_page": 2,
+        "cloud_agent_video_delete_pending_id": "",
+    }
+    assert fake.reruns == 1
 
 
 def test_successful_deletion_falls_back_to_previous_valid_page(monkeypatch):

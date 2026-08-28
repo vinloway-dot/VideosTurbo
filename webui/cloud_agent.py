@@ -113,12 +113,18 @@ def _render_video_library(*, ui_state: MutableMapping) -> None:
         st.error(_api_error_message(exc))
         return
 
-    def confirm_delete(job_id: str) -> None:
+    def request_delete(job_id: str) -> None:
         ui_state["cloud_agent_video_delete_pending_id"] = job_id
+
+    def confirm_delete(job_id: str) -> None:
         if _confirm_video_deletion(ui_state=ui_state, job_id=job_id):
             rerun = getattr(st, "rerun", None)
             if callable(rerun):
                 rerun()
+
+    def cancel_delete(job_id: str) -> None:
+        if ui_state.get("cloud_agent_video_delete_pending_id") == job_id:
+            ui_state["cloud_agent_video_delete_pending_id"] = ""
 
     def select_page(selected_page: int) -> None:
         ui_state["cloud_agent_video_library_page"] = selected_page
@@ -128,7 +134,10 @@ def _render_video_library(*, ui_state: MutableMapping) -> None:
 
     cloud_agent_ui.render_video_library(
         cloud_agent_ui.video_library_view(payload),
-        on_delete=confirm_delete,
+        pending_delete_id=str(ui_state["cloud_agent_video_delete_pending_id"]),
+        on_delete_request=request_delete,
+        on_delete_confirm=confirm_delete,
+        on_delete_cancel=cancel_delete,
         on_page=select_page,
     )
 
