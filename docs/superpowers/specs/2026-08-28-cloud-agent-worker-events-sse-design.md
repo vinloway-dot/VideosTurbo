@@ -69,7 +69,9 @@ The job-store completion invariant is:
 The current workflow writes `COMPLETED` but does not populate `completed_at`.
 This design corrects that invariant at the durable store boundary so all
 completion callers receive the same behavior and newest-first ordering is
-reliable.
+reliable. On store initialization, existing `COMPLETED` rows with an empty
+`completed_at` are backfilled once from their durable `updated_at`; no other
+status or timestamp is changed.
 
 Two public event types are sufficient:
 
