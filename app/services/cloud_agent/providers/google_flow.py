@@ -86,6 +86,45 @@ _FATAL_APPLICATION_ERROR_RE = re.compile(
     r"cannot read properties of undefined \(reading ['\"]service['\"]\))",
     re.IGNORECASE,
 )
+_SAFE_ANNOUNCEMENT_BUTTON_NAMES = (
+    "เริ่มต้นใช้งาน",
+    "Get started",
+    "Continue",
+    "ดำเนินการต่อ",
+    "ไปต่อ",
+    "Got it",
+    "รับทราบ",
+    "รับทราบแล้ว",
+    "เข้าใจแล้ว",
+    "OK",
+    "Okay",
+    "Dismiss",
+    "Close",
+    "ปิด",
+    "Not now",
+    "ไม่ใช่ตอนนี้",
+    "Later",
+    "ภายหลัง",
+)
+_DIALOG_INPUT_SELECTOR = (
+    'input:visible, textarea:visible, [contenteditable="true"]:visible, '
+    'select:visible'
+)
+_BLOCKING_DIALOG_RE = re.compile(
+    r"(?:sign\s*in|log\s*in|password|passkey|verify|verification|"
+    r"captcha|2-step|two-factor|security|payment|billing|purchase|"
+    r"delete|remove|move\s+to\s+trash|cancel\s+generation|"
+    r"ลงชื่อเข้าใช้|รหัสผ่าน|ยืนยันตัวตน|ความปลอดภัย|ชำระเงิน|"
+    r"เรียกเก็บเงิน|ลบ|ย้ายลงถังขยะ|ยกเลิกการสร้าง)",
+    re.IGNORECASE,
+)
+_ANNOUNCEMENT_DIALOG_RE = re.compile(
+    r"(?:google\s+flow|flow\s+has|what['’]?s\s+new|new\s+feature|"
+    r"new\s+\d{2,4}p|updated?|release\s+notes?|announcement|welcome|"
+    r"google\s+flow|มีการเพิ่ม|ฟีเจอร์ใหม่|มีอะไรใหม่|อัปเดต|ประกาศ|"
+    r"ยินดีต้อนรับ|\d{2,4}p)",
+    re.IGNORECASE,
+)
 RENAME_CLIPS_INSTRUCTION = "เปลี่ยนชื่อคลิปตามลำดับ ของวีดีโอ"
 _DIRECT_LINK_RECOVERY_CYCLES = 2
 
@@ -244,6 +283,7 @@ class FlowWorkspaceRun:
         if expected_count != 6:
             raise ValueError("Google Flow workspace requires exactly six clips")
 
+        self.client._dismiss_safe_announcement_dialog(self.page)
         self.client._submit_generation(self.page, job.master_prompt)
         self.client._wait_for_generation(self.page, expected_count)
         return self._rename_download_and_materialize(paths, expected_count)
@@ -265,6 +305,7 @@ class FlowWorkspaceRun:
             raise FlowWorkspaceVerificationError(
                 "Google Flow prepared Agent prompt could not be verified"
             )
+        self.client._dismiss_safe_announcement_dialog(self.page)
         self.client._submit_prepared_agent_prompt(
             self.page,
             self._prepared_master_prompt,
@@ -505,6 +546,7 @@ class GoogleFlowClient:
         last_error: FlowWorkspaceVerificationError | None = None
         for recovery_cycle in range(_DIRECT_LINK_RECOVERY_CYCLES + 1):
             try:
+                self._dismiss_safe_announcement_dialog(page)
                 self._wait_for_settled_editor(page)
                 return
             except (_DirectLinkFatalPageError, FlowWorkspaceVerificationError) as exc:
@@ -515,6 +557,59 @@ class GoogleFlowClient:
         raise FlowWorkspaceVerificationError(
             "Google Flow project editor could not be verified"
         ) from last_error
+
+    @staticmethod
+    def _dismiss_safe_announcement_dialog(page: Any) -> None:
+        """Dismiss only a verified passive Flow announcement, never an action dialog."""
+        try:
+            dialog = page.get_by_role("dialog")
+            if dialog.count() == 0:
+                return
+            if dialog.count() != 1 or not dialog.is_visible():
+                raise HumanRequiredError(
+                    "google_flow blocking dialog requires human recovery"
+                )
+
+            dialog_text = str(dialog.inner_text() or "").strip()
+            has_visible_input = dialog.locator(_DIALOG_INPUT_SELECTOR).count() > 0
+            if (
+                not dialog_text
+                or has_visible_input
+                or _BLOCKING_DIALOG_RE.search(dialog_text)
+                or not _ANNOUNCEMENT_DIALOG_RE.search(dialog_text)
+            ):
+                raise HumanRequiredError(
+                    "google_flow blocking dialog requires human recovery"
+                )
+
+            for button_name in _SAFE_ANNOUNCEMENT_BUTTON_NAMES:
+                button = dialog.get_by_role(
+                    "button", name=button_name, exact=True
+                )
+                if (
+                    button.count() == 1
+                    and button.is_visible()
+                    and button.is_enabled()
+                ):
+                    button.click()
+                    wait_for = getattr(dialog, "wait_for", None)
+                    if callable(wait_for):
+                        wait_for(state="hidden", timeout=2_000)
+                    if dialog.count() != 0 and dialog.is_visible():
+                        raise HumanRequiredError(
+                            "google_flow announcement dialog did not close"
+                        )
+                    return
+
+            raise HumanRequiredError(
+                "google_flow blocking dialog requires human recovery"
+            )
+        except HumanRequiredError:
+            raise
+        except PlaywrightError as exc:
+            raise HumanRequiredError(
+                "google_flow blocking dialog requires human recovery"
+            ) from exc
 
     @staticmethod
     def _observable_composer(agent: Any) -> Any:

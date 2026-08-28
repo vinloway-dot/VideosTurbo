@@ -773,6 +773,71 @@ class FakePage:
         return FakeDownloadExpectation(self)
 
 
+class PopupButton:
+    def __init__(self, page, name):
+        self.page = page
+        self.name = str(name)
+
+    def count(self):
+        return int(self.page.visible and self.name in self.page.buttons)
+
+    def is_visible(self):
+        return bool(self.count())
+
+    def is_enabled(self):
+        return bool(self.count())
+
+    def click(self):
+        assert self.count() == 1
+        self.page.clicked.append(self.name)
+        if self.page.dismisses_on_click:
+            self.page.visible = False
+
+
+class PopupDialog:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return int(self.page.visible)
+
+    def is_visible(self):
+        return self.page.visible
+
+    def inner_text(self):
+        return self.page.text
+
+    def locator(self, selector):
+        assert "input:visible" in selector
+        return SimpleNamespace(count=lambda: self.page.visible_input_count)
+
+    def get_by_role(self, role, *, name=None, exact=None):
+        assert role == "button"
+        assert exact is True
+        return PopupButton(self.page, name)
+
+
+class PopupPage:
+    def __init__(
+        self,
+        *,
+        text: str,
+        buttons: set[str],
+        dismisses_on_click: bool = True,
+        visible_input_count: int = 0,
+    ):
+        self.text = text
+        self.buttons = buttons
+        self.dismisses_on_click = dismisses_on_click
+        self.visible_input_count = visible_input_count
+        self.visible = True
+        self.clicked: list[str] = []
+
+    def get_by_role(self, role, **_kwargs):
+        assert role == "dialog"
+        return PopupDialog(self)
+
+
 class FakeCdpSession:
     def __init__(self, page):
         self.page = page
@@ -910,6 +975,46 @@ def _client(
         kwargs["settled_poll_count"] = settled_poll_count
     client = client_cls(FakeBrowserManager(page), sessions, **kwargs)
     return client, sessions
+
+
+def test_google_flow_popup_guard_dismisses_safe_announcement_before_editor_check():
+    client, _ = _client(FakePage(progress_html=["<div>Ready</div>"]))
+    popup = PopupPage(
+        text="Flow has added a new 360p option for Gemini Omni Flash.",
+        buttons={"เริ่มต้นใช้งาน"},
+    )
+
+    client._dismiss_safe_announcement_dialog(popup)
+
+    assert popup.clicked == ["เริ่มต้นใช้งาน"]
+    assert popup.visible is False
+
+
+def test_google_flow_popup_guard_requires_human_for_payment_dialog_even_with_safe_button():
+    client, _ = _client(FakePage(progress_html=["<div>Ready</div>"]))
+    popup = PopupPage(
+        text="Payment required before you can continue.",
+        buttons={"Get started"},
+    )
+
+    with pytest.raises(HumanRequiredError, match="blocking dialog"):
+        client._dismiss_safe_announcement_dialog(popup)
+
+    assert popup.clicked == []
+
+
+def test_google_flow_popup_guard_requires_human_when_safe_click_does_not_close_dialog():
+    client, _ = _client(FakePage(progress_html=["<div>Ready</div>"]))
+    popup = PopupPage(
+        text="New features are available in Google Flow.",
+        buttons={"Get started"},
+        dismisses_on_click=False,
+    )
+
+    with pytest.raises(HumanRequiredError, match="did not close"):
+        client._dismiss_safe_announcement_dialog(popup)
+
+    assert popup.clicked == ["Get started"]
 
 
 def test_google_flow_workspace_context_uses_browser_configuration_and_holds_lock():
