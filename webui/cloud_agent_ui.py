@@ -83,6 +83,7 @@ def video_library_view(payload: Mapping[str, object]) -> VideoLibraryView:
 def render_video_library(
     view: VideoLibraryView,
     *,
+    load_video: Callable[[str], bytes],
     pending_delete_id: str,
     on_delete_request: Callable[[str], None],
     on_delete_confirm: Callable[[str], None],
@@ -97,47 +98,49 @@ def render_video_library(
             )
         else:
             with st.container(key="cloud_agent_video_library_grid"):
-                columns = st.columns(5)
-                for index, card in enumerate(view.items[:10]):
-                    with columns[index % 5]:
-                        with st.container(
-                            key=f"cloud_agent_video_card_{card.job_id}", border=True
-                        ):
-                            st.video(card.final_url)
-                            st.html(
-                                '<p class="vt-video-library-card__subject">'
-                                f"{escape(card.subject)}</p>"
-                                '<p class="vt-video-library-card__time">'
-                                f"{escape(card.completed_at)}</p>"
-                            )
-                            delete_requested = st.button(
-                                "ลบ",
-                                key=f"cloud_agent_delete_{card.job_id}",
-                                type="secondary",
-                                disabled=False,
-                            )
-                            is_pending = pending_delete_id == card.job_id
-                            if delete_requested:
-                                on_delete_request(card.job_id)
-                                is_pending = True
-                            if is_pending:
-                                st.warning(
-                                    "การลบนี้จะลบวิดีโอและไฟล์งานของรายการนี้ออกจากที่เก็บข้อมูล "
-                                    "VideosTurbo ภายในเครื่องอย่างถาวรเท่านั้น และจะไม่ลบข้อมูลจาก "
-                                    "Google Flow หรือ Canva"
+                cards = view.items[:10]
+                for row_start in range(0, len(cards), 5):
+                    columns = st.columns(5)
+                    for column, card in zip(columns, cards[row_start : row_start + 5]):
+                        with column:
+                            with st.container(
+                                key=f"cloud_agent_video_card_{card.job_id}", border=True
+                            ):
+                                st.video(load_video(card.final_url), format="video/mp4")
+                                st.html(
+                                    '<p class="vt-video-library-card__subject">'
+                                    f"{escape(card.subject)}</p>"
+                                    '<p class="vt-video-library-card__time">'
+                                    f"{escape(card.completed_at)}</p>"
                                 )
-                                if st.button(
-                                    "ยืนยันการลบ",
-                                    key=f"cloud_agent_confirm_delete_{card.job_id}",
-                                    type="primary",
-                                ):
-                                    on_delete_confirm(card.job_id)
-                                if st.button(
-                                    "ยกเลิก",
-                                    key=f"cloud_agent_cancel_delete_{card.job_id}",
+                                delete_requested = st.button(
+                                    "ลบ",
+                                    key=f"cloud_agent_delete_{card.job_id}",
                                     type="secondary",
-                                ):
-                                    on_delete_cancel(card.job_id)
+                                    disabled=False,
+                                )
+                                is_pending = pending_delete_id == card.job_id
+                                if delete_requested:
+                                    on_delete_request(card.job_id)
+                                    is_pending = True
+                                if is_pending:
+                                    st.warning(
+                                        "การลบนี้จะลบวิดีโอและไฟล์งานของรายการนี้ออกจากที่เก็บข้อมูล "
+                                        "VideosTurbo ภายในเครื่องอย่างถาวรเท่านั้น และจะไม่ลบข้อมูลจาก "
+                                        "Google Flow หรือ Canva"
+                                    )
+                                    if st.button(
+                                        "ยืนยันการลบ",
+                                        key=f"cloud_agent_confirm_delete_{card.job_id}",
+                                        type="primary",
+                                    ):
+                                        on_delete_confirm(card.job_id)
+                                    if st.button(
+                                        "ยกเลิก",
+                                        key=f"cloud_agent_cancel_delete_{card.job_id}",
+                                        type="secondary",
+                                    ):
+                                        on_delete_cancel(card.job_id)
         if view.total_pages > 1:
             with st.container(key="cloud_agent_video_library_pagination"):
                 for page in range(1, view.total_pages + 1):

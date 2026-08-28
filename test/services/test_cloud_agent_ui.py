@@ -1,8 +1,15 @@
 from contextlib import nullcontext
 from html import unescape
 from pathlib import Path
+from types import SimpleNamespace
 
 from playwright.sync_api import sync_playwright
+import pytest
+from streamlit.elements import media as streamlit_media
+from streamlit.proto.Video_pb2 import Video as VideoProto
+from streamlit.runtime.media_file_storage import MediaFileStorageError
+from streamlit.runtime.media_file_manager import MediaFileManager
+from streamlit.runtime.memory_media_file_storage import MemoryMediaFileStorage
 
 from webui import cloud_agent_ui
 from webui.cloud_agent_ui import build_production_stages, derive_workflow_step
@@ -54,7 +61,7 @@ def test_video_library_renderer_uses_public_video_urls_and_numbered_pages(monkey
         def columns(self, count):
             return [nullcontext() for _ in range(count)]
 
-        def video(self, url):
+        def video(self, url, **_kwargs):
             self.videos.append(url)
 
         def button(self, label, **kwargs):
@@ -79,6 +86,7 @@ def test_video_library_renderer_uses_public_video_urls_and_numbered_pages(monkey
 
     cloud_agent_ui.render_video_library(
         view,
+        load_video=lambda url: url,
         pending_delete_id="",
         on_delete_request=lambda _job_id: None,
         on_delete_confirm=lambda _job_id: None,
@@ -98,6 +106,93 @@ def test_video_library_renderer_uses_public_video_urls_and_numbered_pages(monkey
     assert any(config.get("key") == "cloud_agent_delete_job-1" for _, config in fake.buttons)
 
 
+def test_streamlit_159_treats_api_relative_video_url_as_a_local_filename(monkeypatch):
+    manager = MediaFileManager(MemoryMediaFileStorage("/media"))
+    monkeypatch.setattr(streamlit_media.runtime, "exists", lambda: True)
+    monkeypatch.setattr(
+        streamlit_media.runtime,
+        "get_instance",
+        lambda: SimpleNamespace(media_file_mgr=manager),
+    )
+    with pytest.raises(MediaFileStorageError, match="Error opening"):
+        streamlit_media.marshall_video(
+            SimpleNamespace(),
+            "library-card",
+            VideoProto(),
+            "/api/v1/cloud-agent/jobs/job-1/final",
+        )
+
+
+def test_video_library_server_fetches_bytes_into_streamlit_media_manager(monkeypatch):
+    class MediaManager:
+        def __init__(self):
+            self.calls = []
+
+        def add(self, data, mimetype, coordinates):
+            self.calls.append((data, mimetype, coordinates))
+            return "/media/library-job-1.mp4"
+
+    class MarshallingStreamlit:
+        def __init__(self):
+            self.video_protos = []
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def columns(self, count):
+            return [nullcontext() for _ in range(count)]
+
+        def html(self, _body):
+            return None
+
+        def button(self, _label, **_kwargs):
+            return False
+
+        def video(self, data, *, format="video/mp4"):
+            proto = VideoProto()
+            streamlit_media.marshall_video(
+                SimpleNamespace(), "library-card", proto, data, mimetype=format
+            )
+            self.video_protos.append(proto)
+
+    manager = MediaManager()
+    fake = MarshallingStreamlit()
+    monkeypatch.setattr(cloud_agent_ui, "st", fake)
+    monkeypatch.setattr(streamlit_media.runtime, "exists", lambda: True)
+    monkeypatch.setattr(
+        streamlit_media.runtime,
+        "get_instance",
+        lambda: SimpleNamespace(media_file_mgr=manager),
+    )
+    monkeypatch.setattr(streamlit_media.caching, "save_media_data", lambda *_args: None)
+    final_url = "/api/v1/cloud-agent/jobs/job-1/final"
+
+    cloud_agent_ui.render_video_library(
+        cloud_agent_ui.VideoLibraryView(
+            items=(
+                cloud_agent_ui.VideoCardView(
+                    job_id="job-1",
+                    subject="Newest",
+                    completed_at="2026-08-28T12:00:00+00:00",
+                    final_url=final_url,
+                ),
+            ),
+            page=1,
+            total_pages=1,
+            total_items=1,
+        ),
+        load_video=lambda url: b"mp4-from-api" if url == final_url else b"wrong",
+        pending_delete_id="",
+        on_delete_request=lambda _job_id: None,
+        on_delete_confirm=lambda _job_id: None,
+        on_delete_cancel=lambda _job_id: None,
+        on_page=lambda _page: None,
+    )
+
+    assert manager.calls == [(b"mp4-from-api", "video/mp4", "library-card")]
+    assert fake.video_protos[0].url == "/media/library-job-1.mp4"
+
+
 def test_video_library_delete_confirmation_limits_scope_to_local_videosturbo_storage(
     monkeypatch,
 ):
@@ -114,7 +209,7 @@ def test_video_library_delete_confirmation_limits_scope_to_local_videosturbo_sto
         def html(self, _body):
             return None
 
-        def video(self, _url):
+        def video(self, _url, **_kwargs):
             return None
 
         def button(self, _label, **_kwargs):
@@ -140,6 +235,7 @@ def test_video_library_delete_confirmation_limits_scope_to_local_videosturbo_sto
             total_pages=1,
             total_items=1,
         ),
+        load_video=lambda url: url,
         pending_delete_id="job-1",
         on_delete_request=lambda _job_id: None,
         on_delete_confirm=lambda _job_id: None,
@@ -152,6 +248,122 @@ def test_video_library_delete_confirmation_limits_scope_to_local_videosturbo_sto
         "VideosTurbo ภายในเครื่องอย่างถาวรเท่านั้น และจะไม่ลบข้อมูลจาก "
         "Google Flow หรือ Canva"
     ]
+
+
+def test_video_library_visual_order_stays_newest_first_at_responsive_widths(
+    monkeypatch,
+):
+    class Node:
+        def __init__(self, attributes=""):
+            self.attributes = attributes
+            self.children = []
+
+        def markup(self):
+            children = "".join(child.markup() for child in self.children)
+            return f"<div {self.attributes}>{children}</div>"
+
+    class NodeContext:
+        def __init__(self, fake, node):
+            self.fake = fake
+            self.node = node
+
+        def __enter__(self):
+            self.fake.stack.append(self.node)
+            return self
+
+        def __exit__(self, *_args):
+            self.fake.stack.pop()
+
+    class RenderedGridStreamlit:
+        def __init__(self):
+            self.root = Node()
+            self.stack = [self.root]
+
+        def container(self, *, key, **_kwargs):
+            attributes = f'class="st-key-{key}"'
+            if key.startswith("cloud_agent_video_card_"):
+                attributes += f' data-card="{key.removeprefix("cloud_agent_video_card_")}"'
+            node = Node(attributes)
+            self.stack[-1].children.append(node)
+            return NodeContext(self, node)
+
+        def columns(self, count):
+            row = Node('data-testid="stHorizontalBlock"')
+            self.stack[-1].children.append(row)
+            columns = []
+            for _index in range(count):
+                column = Node('data-testid="stColumn"')
+                row.children.append(column)
+                columns.append(NodeContext(self, column))
+            return columns
+
+        def html(self, _body):
+            return None
+
+        def video(self, _data, **_kwargs):
+            return None
+
+        def button(self, _label, **_kwargs):
+            return False
+
+    fake = RenderedGridStreamlit()
+    monkeypatch.setattr(cloud_agent_ui, "st", fake)
+    cards = tuple(
+        cloud_agent_ui.VideoCardView(
+            job_id=f"job-{index:02d}",
+            subject=f"Video {index}",
+            completed_at=f"2026-08-28T12:{10 - index:02d}:00+00:00",
+            final_url=f"/api/v1/cloud-agent/jobs/job-{index:02d}/final",
+        )
+        for index in range(1, 11)
+    )
+    cloud_agent_ui.render_video_library(
+        cloud_agent_ui.VideoLibraryView(
+            items=cards,
+            page=1,
+            total_pages=1,
+            total_items=10,
+        ),
+        load_video=lambda _url: b"mp4",
+        pending_delete_id="",
+        on_delete_request=lambda _job_id: None,
+        on_delete_confirm=lambda _job_id: None,
+        on_delete_cancel=lambda _job_id: None,
+        on_page=lambda _page: None,
+    )
+    css = Path("webui/cloud_agent.css").read_text(encoding="utf-8")
+    markup = (
+        f"<style>{css}"
+        "[data-card] { min-height: 48px !important; height: 48px; }"
+        "[data-testid='stHorizontalBlock'] { width: 100%; }"
+        "</style>"
+        f"{fake.root.markup()}"
+    )
+    expected = [f"job-{index:02d}" for index in range(1, 11)]
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path="/usr/bin/google-chrome", headless=True
+        )
+        page = browser.new_page(viewport={"width": 1200, "height": 900})
+        page.set_content(markup)
+        for width in (1200, 1000, 700, 400):
+            page.set_viewport_size({"width": width, "height": 900})
+            visual_order = page.locator("[data-card]").evaluate_all(
+                """elements => elements
+                    .map(element => ({
+                        id: element.dataset.card,
+                        box: element.getBoundingClientRect()
+                    }))
+                    .sort((left, right) =>
+                        Math.abs(left.box.top - right.box.top) > 1
+                            ? left.box.top - right.box.top
+                            : left.box.left - right.box.left
+                    )
+                    .map(item => item.id)"""
+            )
+            assert visual_order == expected
+        browser.close()
 
 
 class ShellStreamlit:

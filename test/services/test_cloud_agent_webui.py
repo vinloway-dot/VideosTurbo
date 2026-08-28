@@ -50,7 +50,7 @@ class _VideoLibraryStreamlit:
     def html(self, _body):
         return None
 
-    def video(self, _url):
+    def video(self, _url, **_kwargs):
         return None
 
     def warning(self, _message):
@@ -85,12 +85,53 @@ def test_video_library_requests_ten_items_and_renders_before_job_controls(monkey
     ) < panel_source.index('with st.expander("Job controls"')
 
 
+def test_video_library_media_is_fetched_from_internal_api_as_bytes(monkeypatch):
+    calls = []
+
+    class Response:
+        content = b"final-mp4"
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(
+        cloud_agent.requests,
+        "request",
+        lambda method, url, **kwargs: calls.append((method, url, kwargs)) or Response(),
+    )
+
+    media = cloud_agent._load_video_media(
+        "/api/v1/cloud-agent/jobs/job-1/final"
+    )
+
+    assert media == b"final-mp4"
+    assert calls == [
+        (
+            "GET",
+            "http://127.0.0.1:8080/api/v1/cloud-agent/jobs/job-1/final",
+            {"timeout": cloud_agent.API_TIMEOUT_SECONDS},
+        )
+    ]
+
+
+def test_video_library_media_rejects_non_api_paths_before_request(monkeypatch):
+    monkeypatch.setattr(
+        cloud_agent.requests,
+        "request",
+        lambda *_args, **_kwargs: pytest.fail("invalid media URL must not be fetched"),
+    )
+
+    with pytest.raises(ValueError, match="invalid cloud agent completed-media URL"):
+        cloud_agent._load_video_media("job/final")
+
+
 def test_first_video_delete_click_sets_the_shared_pending_id(monkeypatch):
     state = {}
     fake = _VideoLibraryStreamlit(state, "cloud_agent_delete_job-1")
     calls = []
     monkeypatch.setattr(cloud_agent, "st", fake)
     monkeypatch.setattr(cloud_agent.cloud_agent_ui, "st", fake)
+    monkeypatch.setattr(cloud_agent, "_load_video_media", lambda _url: b"mp4")
     monkeypatch.setattr(
         cloud_agent,
         "_api",
@@ -114,6 +155,7 @@ def test_video_delete_cancel_clears_only_pending_id_without_delete_api_call(monk
     calls = []
     monkeypatch.setattr(cloud_agent, "st", fake)
     monkeypatch.setattr(cloud_agent.cloud_agent_ui, "st", fake)
+    monkeypatch.setattr(cloud_agent, "_load_video_media", lambda _url: b"mp4")
     monkeypatch.setattr(
         cloud_agent,
         "_api",
@@ -128,6 +170,7 @@ def test_video_delete_cancel_clears_only_pending_id_without_delete_api_call(monk
         "unrelated": "retained",
     }
     assert calls == [("GET", "videos?page=1&page_size=10")]
+    assert fake.reruns == 1
 
 
 def test_video_delete_confirm_uses_pending_id_then_deletes_and_falls_back(monkeypatch):
@@ -148,6 +191,7 @@ def test_video_delete_confirm_uses_pending_id_then_deletes_and_falls_back(monkey
 
     monkeypatch.setattr(cloud_agent, "st", fake)
     monkeypatch.setattr(cloud_agent.cloud_agent_ui, "st", fake)
+    monkeypatch.setattr(cloud_agent, "_load_video_media", lambda _url: b"mp4")
     monkeypatch.setattr(cloud_agent, "_api", api)
 
     cloud_agent._render_video_library(ui_state=state)
@@ -181,6 +225,86 @@ def test_successful_deletion_falls_back_to_previous_valid_page(monkeypatch):
         "cloud_agent_video_library_page": 2,
         "cloud_agent_video_delete_pending_id": "",
     }
+
+
+def test_successful_delete_is_not_reported_failed_when_library_refresh_fails(
+    monkeypatch,
+):
+    state = {
+        "cloud_agent_video_library_page": 3,
+        "cloud_agent_video_delete_pending_id": "job-9",
+    }
+    fake = _VideoLibraryStreamlit(state)
+    calls = []
+
+    def api(method, path, **_kwargs):
+        calls.append((method, path))
+        if method == "DELETE":
+            return {}
+        raise requests.ConnectionError("refresh unavailable")
+
+    monkeypatch.setattr(cloud_agent, "st", fake)
+    monkeypatch.setattr(cloud_agent, "_api", api)
+
+    deleted = cloud_agent._confirm_video_deletion(ui_state=state, job_id="job-9")
+
+    assert deleted is True
+    assert calls == [
+        ("DELETE", "videos/job-9"),
+        ("GET", "videos?page=3&page_size=10"),
+    ]
+    assert state == {
+        "cloud_agent_video_library_page": 3,
+        "cloud_agent_video_delete_pending_id": "",
+    }
+    assert fake.errors == [
+        "ลบวิดีโอสำเร็จแล้ว แต่ยังรีเฟรชรายการไม่ได้ กรุณารีเฟรชหน้าอีกครั้ง"
+    ]
+
+
+def test_typed_video_delete_failure_shows_thai_actionable_copy(monkeypatch):
+    state = {
+        "cloud_agent_video_library_page": 1,
+        "cloud_agent_video_delete_pending_id": "job-9",
+    }
+    fake = _VideoLibraryStreamlit(state)
+
+    class Response:
+        def json(self):
+            return {"message": "cloud agent video not found"}
+
+    error = requests.HTTPError("not found", response=Response())
+    monkeypatch.setattr(cloud_agent, "st", fake)
+    monkeypatch.setattr(cloud_agent, "_delete_video", lambda _job_id: (_ for _ in ()).throw(error))
+
+    deleted = cloud_agent._confirm_video_deletion(ui_state=state, job_id="job-9")
+
+    assert deleted is False
+    assert state["cloud_agent_video_delete_pending_id"] == "job-9"
+    assert fake.errors == [
+        "ลบวิดีโอไม่สำเร็จ: cloud agent video not found "
+        "กรุณารีเฟรชรายการแล้วลองอีกครั้ง"
+    ]
+
+
+def test_video_delete_connection_failure_shows_thai_actionable_copy(monkeypatch):
+    state = {
+        "cloud_agent_video_library_page": 1,
+        "cloud_agent_video_delete_pending_id": "job-9",
+    }
+    fake = _VideoLibraryStreamlit(state)
+    error = requests.ConnectionError("offline")
+    monkeypatch.setattr(cloud_agent, "st", fake)
+    monkeypatch.setattr(cloud_agent, "_delete_video", lambda _job_id: (_ for _ in ()).throw(error))
+
+    deleted = cloud_agent._confirm_video_deletion(ui_state=state, job_id="job-9")
+
+    assert deleted is False
+    assert state["cloud_agent_video_delete_pending_id"] == "job-9"
+    assert fake.errors == [
+        "ไม่สามารถเชื่อมต่อเพื่อทำการลบวิดีโอได้ "
+        "กรุณาตรวจสอบการเชื่อมต่อแล้วลองอีกครั้ง"
+    ]
 
 
 class ModeStreamlit:

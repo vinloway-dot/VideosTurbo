@@ -1,3 +1,6 @@
+import os
+import shutil
+
 import pytest
 
 from app.models.cloud_agent import (
@@ -177,6 +180,112 @@ def test_staging_and_purging_reject_symlinked_deleting_root(tmp_path):
     with pytest.raises(ValueError):
         storage.purge_staged_job(deleting / "victim")
     assert (victim / "important.txt").exists()
+
+
+def _swap_deleting_root_to_external(storage, external, original_rename):
+    deleting = storage.root / ".deleting"
+    displaced = storage.root / ".deleting-displaced"
+    original_rename(deleting, displaced)
+    deleting.symlink_to(external, target_is_directory=True)
+
+
+def test_stage_rejects_deleting_root_swapped_to_external_symlink_at_rename(
+    tmp_path, monkeypatch
+):
+    storage = CloudJobStorage(tmp_path / "jobs")
+    paths = storage.prepare("job-a")
+    paths.final_file.write_bytes(b"mp4")
+    (storage.root / ".deleting").mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    sentinel = external / "important.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    original_rename = os.rename
+    swapped = False
+
+    def swap_then_rename(source, destination, *args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            _swap_deleting_root_to_external(storage, external, original_rename)
+        return original_rename(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "rename", swap_then_rename)
+
+    with pytest.raises(ValueError, match="deleting directory changed"):
+        storage.stage_job_artifacts("job-a")
+
+    assert paths.final_file.exists()
+    assert list(external.iterdir()) == [sentinel]
+
+
+def test_restore_does_not_move_external_data_when_deleting_root_is_swapped(
+    tmp_path, monkeypatch
+):
+    storage = CloudJobStorage(tmp_path / "jobs")
+    paths = storage.prepare("job-a")
+    paths.final_file.write_bytes(b"mp4")
+    staged = storage.stage_job_artifacts("job-a")
+    external = tmp_path / "external"
+    external.mkdir()
+    external_victim = external / staged.name
+    external_victim.mkdir()
+    sentinel = external_victim / "important.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    original_rename = os.rename
+    swapped = False
+
+    def swap_then_rename(source, destination, *args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            _swap_deleting_root_to_external(storage, external, original_rename)
+        return original_rename(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "rename", swap_then_rename)
+
+    storage.restore_staged_job("job-a", staged)
+
+    assert paths.final_file.read_bytes() == b"mp4"
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_purge_does_not_delete_external_data_when_deleting_root_is_swapped(
+    tmp_path, monkeypatch
+):
+    storage = CloudJobStorage(tmp_path / "jobs")
+    storage.prepare("job-a").final_file.write_bytes(b"mp4")
+    staged = storage.stage_job_artifacts("job-a")
+    external = tmp_path / "external"
+    external.mkdir()
+    external_victim = external / staged.name
+    external_victim.mkdir()
+    sentinel = external_victim / "important.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    original_rename = os.rename
+    original_rmtree = shutil.rmtree
+    swapped = False
+
+    def swap_then_rmtree(target, *args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            _swap_deleting_root_to_external(storage, external, original_rename)
+        return original_rmtree(target, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", swap_then_rmtree)
+
+    storage.purge_staged_job(staged)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_purge_missing_staged_target_and_storage_root_is_a_no_op(tmp_path):
+    storage = CloudJobStorage(tmp_path / "missing-jobs")
+
+    storage.purge_staged_job(storage.root / ".deleting" / "job-a-staged")
+
+    assert not storage.root.exists()
 
 
 def test_stage_job_artifacts_moves_only_its_job_and_rejects_escape(tmp_path):
