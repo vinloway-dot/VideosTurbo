@@ -12,7 +12,7 @@ export default function(component) {
   if (!parent.__cloudAgentEventSource) {
     const source = new EventSource(component.data.streamUrl);
     const emit = (event) => {
-      try { component.setTriggerValue(JSON.parse(event.data)); } catch (_) {}
+      try { component.setTriggerValue('event', JSON.parse(event.data)); } catch (_) {}
     };
     source.addEventListener('job.updated', emit);
     source.addEventListener('job.completed', emit);
@@ -39,9 +39,12 @@ def render_cloud_job_event_listener(stream_url: str, *, key: str) -> Mapping[str
     result = renderer(
         data={"streamUrl": stream_url},
         key=key,
-        on_trigger=lambda value: value,
+        on_event_change=lambda: None,
     )
-    return result if isinstance(result, Mapping) else None
+    if not isinstance(result, Mapping):
+        return None
+    event = result.get("event")
+    return event if isinstance(event, Mapping) else None
 
 
 def classify_event(event, *, selected_job_id: str, last_event_id: str) -> Literal[
