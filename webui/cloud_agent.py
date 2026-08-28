@@ -7,7 +7,7 @@ from urllib.parse import urljoin, urlsplit
 import requests
 import streamlit as st
 
-from webui import cloud_agent_ui
+from webui import cloud_agent_ui, cloud_agent_events
 
 
 API_PREFIX = "http://127.0.0.1:8080/api/v1/cloud-agent/"
@@ -15,7 +15,6 @@ API_TIMEOUT_SECONDS = 15
 SESSION_CHECK_TIMEOUT_SECONDS = 45
 DRAFT_TIMEOUT_SECONDS = 120
 RESEARCH_DRAFT_TIMEOUT_SECONDS = 300
-LIVE_JOB_REFRESH_SECONDS = 2
 VIDEO_LIBRARY_PAGE_SIZE = 10
 RESEARCH_PROVIDER_OPTIONS = [
     {
@@ -641,7 +640,7 @@ def _selected_job_id(ui_state, entered_job_id):
     ).strip()
 
 
-def _render_live_production_status(*, script_ready, prepared_voice_ready, ui_state):
+def _render_event_driven_production_status(*, script_ready, prepared_voice_ready, ui_state):
     def render(snapshot):
         cloud_agent_ui.render_production_status(
             cloud_agent_ui.build_production_stages(
@@ -654,31 +653,49 @@ def _render_live_production_status(*, script_ready, prepared_voice_ready, ui_sta
 
     snapshot = dict(ui_state.get("cloud_agent_job_snapshot") or {})
     job_id = str(snapshot.get("id") or "").strip()
-    fragment = getattr(st, "fragment", None)
     if (
-        not job_id
-        or not cloud_agent_ui.job_requires_status_refresh(snapshot)
-        or not callable(fragment)
+        getattr(st, "components", None) is None
+        and job_id
+        and cloud_agent_ui.job_requires_status_refresh(snapshot)
     ):
+        try:
+            snapshot = dict(_api("GET", f"jobs/{job_id}"))
+            _store_job_snapshot(snapshot)
+        except requests.RequestException:
+            pass
         render(snapshot)
         return
-
-    @fragment(run_every=LIVE_JOB_REFRESH_SECONDS)
-    def refresh_live_status():
-        latest = snapshot
+    event = cloud_agent_events.render_cloud_job_event_listener(
+        "/api/v1/cloud-agent/events/stream", key="cloud-agent-events"
+    )
+    action = cloud_agent_events.classify_event(
+        event,
+        selected_job_id=job_id,
+        last_event_id=str(ui_state.get("cloud_agent_last_event_id") or ""),
+    )
+    if event and event.get("event_id"):
+        ui_state["cloud_agent_last_event_id"] = event["event_id"]
+    if action in {"refresh_job", "sync"} and job_id:
         try:
             latest = _api("GET", f"jobs/{job_id}")
             _store_job_snapshot(latest)
+            snapshot = dict(latest)
         except requests.RequestException:
-            # Keep the last confirmed state visible during a transient API failure.
             pass
-        render(latest)
-        if not cloud_agent_ui.job_requires_status_refresh(latest):
-            rerun = getattr(st, "rerun", None)
-            if callable(rerun):
-                rerun(scope="app")
+    elif action == "refresh_app":
+        rerun = getattr(st, "rerun", None)
+        if callable(rerun):
+            rerun(scope="app")
+    render(snapshot)
 
-    refresh_live_status()
+
+def _render_live_production_status(*, script_ready, prepared_voice_ready, ui_state):
+    """Compatibility entry point; production panel uses the event-driven renderer."""
+    return _render_event_driven_production_status(
+        script_ready=script_ready,
+        prepared_voice_ready=prepared_voice_ready,
+        ui_state=ui_state,
+    )
 
 
 def _prepared_voice_matches(prepared_voice, *, script, provider, voice, speed):
@@ -1618,7 +1635,7 @@ def render_cloud_agent_panel():
             )
         )
     with production_status_slot:
-        _render_live_production_status(
+        _render_event_driven_production_status(
             script_ready=script_ready,
             prepared_voice_ready=prepared_voice_ready,
             ui_state=ui_state,
