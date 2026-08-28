@@ -193,6 +193,61 @@ div.st-key-cloud_agent_generation_setup_card [data-testid="stExpander"] {
     font-size: 0.85rem;
 }
 
+.vt-production-status__progress {
+    margin-top: 0.9rem;
+    padding: 0.85rem;
+    border: 1px solid var(--vt-border);
+    border-radius: 10px;
+    background: var(--vt-surface-muted);
+}
+
+.vt-production-status__progress-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+    color: var(--vt-text);
+}
+
+.vt-production-status__progress-label { font-weight: 700; }
+
+.vt-production-status__progress-track {
+    height: 0.65rem;
+    margin-top: 0.55rem;
+    overflow: hidden;
+    border-radius: 999px;
+    background: #dfe7f5;
+}
+
+.vt-production-status__progress-track > span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--vt-primary);
+    transition: width 240ms ease;
+}
+
+.vt-production-status__progress > p {
+    margin: 0.45rem 0 0;
+    color: var(--vt-text-muted);
+    font-size: 0.82rem;
+}
+
+.vt-production-status__progress--queued .vt-production-status__progress-track > span,
+.vt-production-status__progress--paused .vt-production-status__progress-track > span,
+.vt-production-status__progress--attention .vt-production-status__progress-track > span {
+    background: #f79009;
+}
+
+.vt-production-status__progress--complete .vt-production-status__progress-track > span {
+    background: var(--vt-success);
+}
+
+.vt-production-status__progress--error .vt-production-status__progress-track > span,
+.vt-production-status__progress--cancelled .vt-production-status__progress-track > span {
+    background: var(--vt-danger);
+}
+
 .vt-production-status__stages {
     display: grid;
     grid-template-columns: repeat(5, minmax(0, 1fr));

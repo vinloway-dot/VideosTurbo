@@ -640,6 +640,89 @@ def test_successful_start_stores_job_for_production_status(monkeypatch):
 
     assert session_state["cloud_agent_job_id"] == "job-123"
     assert session_state["cloud_agent_job_snapshot"]["status"] == "QUEUED"
+    assert session_state["cloud_agent_job_lookup_id"] == "job-123"
+
+
+def test_new_session_restores_the_latest_job_for_controls(monkeypatch):
+    session_state = {}
+    monkeypatch.setattr(cloud_agent.st, "session_state", session_state)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_api",
+        lambda method, path, **_kwargs: [
+            {
+                "id": "job-latest",
+                "status": "FAILED",
+                "checkpoint": "TTS_READY",
+                "current_step": "failed",
+                "progress": 30,
+            }
+        ]
+        if (method, path) == ("GET", "jobs")
+        else pytest.fail(f"unexpected API call: {method} {path}"),
+    )
+
+    restored = cloud_agent._restore_latest_job_if_needed(session_state)
+
+    assert restored["id"] == "job-latest"
+    assert session_state["cloud_agent_job_id"] == "job-latest"
+    assert session_state["cloud_agent_job_lookup_id"] == "job-latest"
+
+
+def test_live_production_status_refreshes_queued_job_and_renders_claimed_state(monkeypatch):
+    class FragmentStreamlit:
+        def __init__(self):
+            self.session_state = {
+                "cloud_agent_job_id": "job-123",
+                "cloud_agent_job_snapshot": {
+                    "id": "job-123",
+                    "status": "QUEUED",
+                    "checkpoint": "NONE",
+                    "current_step": "queued",
+                    "progress": 0,
+                },
+            }
+            self.run_every = []
+
+        def fragment(self, *, run_every):
+            self.run_every.append(run_every)
+
+            def decorate(function):
+                return function
+
+            return decorate
+
+    fake_streamlit = FragmentStreamlit()
+    rendered = []
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_api",
+        lambda method, path, **_kwargs: {
+            "id": "job-123",
+            "status": "TTS_GENERATING",
+            "checkpoint": "PREFLIGHT_PASSED",
+            "current_step": "tts_generating",
+            "progress": 15,
+        }
+        if (method, path) == ("GET", "jobs/job-123")
+        else pytest.fail(f"unexpected API call: {method} {path}"),
+    )
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_ui,
+        "render_production_status",
+        lambda stages, job: rendered.append((stages, job)),
+    )
+
+    cloud_agent._render_live_production_status(
+        script_ready=True,
+        prepared_voice_ready=False,
+        ui_state=fake_streamlit.session_state,
+    )
+
+    assert fake_streamlit.run_every == [2]
+    assert fake_streamlit.session_state["cloud_agent_job_snapshot"]["status"] == "TTS_GENERATING"
+    assert rendered[-1][1]["progress"] == 15
 
 
 def test_pause_refreshes_snapshot_without_mutating_the_lookup_widget(monkeypatch):
@@ -647,7 +730,19 @@ def test_pause_refreshes_snapshot_without_mutating_the_lookup_widget(monkeypatch
 
     class WidgetSessionState(dict):
         def __init__(self):
-            super().__init__({"cloud_agent_job_lookup_id": "job-123"})
+            super().__init__(
+                {
+                    "cloud_agent_job_lookup_id": "",
+                    "cloud_agent_job_id": "job-123",
+                    "cloud_agent_job_snapshot": {
+                        "id": "job-123",
+                        "status": "TTS_GENERATING",
+                        "checkpoint": "TTS_READY",
+                        "current_step": "tts_generating",
+                        "progress": 15,
+                    },
+                }
+            )
             self.instantiated_widget_keys = set()
 
         def __setitem__(self, key, value):
@@ -686,7 +781,7 @@ def test_pause_refreshes_snapshot_without_mutating_the_lookup_widget(monkeypatch
 
         def text_input(self, _label, *, key, **_kwargs):
             self.session_state.instantiated_widget_keys.add(key)
-            return self.session_state.get(key, "job-123")
+            return self.session_state.get(key, "")
 
         def caption(self, *_args, **_kwargs):
             return None

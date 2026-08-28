@@ -222,6 +222,60 @@ def test_production_stages_map_existing_checkpoint_without_new_backend_states():
     ]
 
 
+def test_queued_job_is_presented_as_waiting_without_an_active_production_stage():
+    job = {
+        "id": "job-queued",
+        "status": "QUEUED",
+        "checkpoint": "NONE",
+        "current_step": "queued",
+        "progress": 0,
+    }
+
+    progress = cloud_agent_ui.build_production_progress(job)
+    stages = build_production_stages(
+        script_ready=True,
+        prepared_voice_ready=False,
+        job=job,
+    )
+
+    assert progress.state == "queued"
+    assert progress.label == "รอคิว"
+    assert progress.detail == "รอ Worker รับงานเพื่อเริ่มการผลิต"
+    assert progress.percent == 0
+    assert [stage.state for stage in stages] == [
+        "complete",
+        "pending",
+        "pending",
+        "pending",
+        "pending",
+    ]
+
+
+def test_claimed_job_is_presented_as_working_with_its_persisted_progress():
+    job = {
+        "id": "job-voice",
+        "status": "TTS_GENERATING",
+        "checkpoint": "PREFLIGHT_PASSED",
+        "current_step": "tts_generating",
+        "progress": 15,
+    }
+
+    progress = cloud_agent_ui.build_production_progress(job)
+
+    assert progress.state == "working"
+    assert progress.label == "กำลังทำงาน"
+    assert progress.detail == "กำลังสร้างเสียงบรรยาย"
+    assert progress.percent == 15
+
+
+def test_only_queued_and_claimed_jobs_request_live_status_refreshes():
+    assert cloud_agent_ui.job_requires_status_refresh({"status": "QUEUED"})
+    assert cloud_agent_ui.job_requires_status_refresh({"status": "TTS_GENERATING"})
+    assert not cloud_agent_ui.job_requires_status_refresh({"status": "PAUSED"})
+    assert not cloud_agent_ui.job_requires_status_refresh({"status": "HUMAN_REQUIRED"})
+    assert not cloud_agent_ui.job_requires_status_refresh({"status": "COMPLETED"})
+
+
 def test_failed_job_marks_only_the_current_presentation_stage_as_error():
     stages = build_production_stages(
         script_ready=True,
@@ -265,6 +319,72 @@ def test_production_status_renders_five_fixed_safe_stages(monkeypatch):
     body = " ".join(fake.html_bodies)
     assert all(label in body for label in ("Script", "Voice", "Flow", "Canva", "Export"))
     assert "job-123" in body
+    assert 'role="progressbar"' in body
+    assert 'aria-valuetext="รอคิว: รอ Worker รับงานเพื่อเริ่มการผลิต"' in body
+    assert "0%" in body
+
+
+def test_production_status_explains_the_active_work_and_persisted_percent(monkeypatch):
+    class StatusStreamlit:
+        def __init__(self):
+            self.html_bodies = []
+
+        def html(self, body):
+            self.html_bodies.append(str(body))
+
+    fake = StatusStreamlit()
+    monkeypatch.setattr(cloud_agent_ui, "st", fake)
+    job = {
+        "id": "job-voice",
+        "status": "TTS_GENERATING",
+        "checkpoint": "PREFLIGHT_PASSED",
+        "current_step": "tts_generating",
+        "progress": 15,
+    }
+
+    cloud_agent_ui.render_production_status(
+        cloud_agent_ui.build_production_stages(
+            script_ready=True,
+            prepared_voice_ready=False,
+            job=job,
+        ),
+        job,
+    )
+
+    body = " ".join(fake.html_bodies)
+    assert 'role="progressbar"' in body
+    assert 'aria-valuenow="15"' in body
+    assert 'aria-valuetext="กำลังทำงาน: กำลังสร้างเสียงบรรยาย"' in body
+    assert "15%" in body
+
+
+def test_production_progress_bar_visually_fills_its_persisted_percent():
+    css = Path("webui/cloud_agent.css").read_text(encoding="utf-8")
+    markup = f"""
+        <style>{css}</style>
+        <section class="vt-production-status">
+          <div class="vt-production-status__progress vt-production-status__progress--working">
+            <div class="vt-production-status__progress-track" role="progressbar">
+              <span style="width: 15%"></span>
+            </div>
+          </div>
+        </section>
+    """
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path="/usr/bin/google-chrome", headless=True
+        )
+        page = browser.new_page(viewport={"width": 800, "height": 300})
+        page.set_content(markup)
+        track = page.locator(".vt-production-status__progress-track")
+        fill = track.locator("span")
+        track_box = track.bounding_box()
+        fill_box = fill.bounding_box()
+        browser.close()
+
+    assert track_box is not None and track_box["height"] >= 8
+    assert fill_box is not None and fill_box["width"] >= track_box["width"] * 0.14
 
 
 def test_workflow_and_production_states_have_non_color_semantics(monkeypatch):

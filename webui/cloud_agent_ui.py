@@ -19,6 +19,23 @@ class StageView:
 
 
 @dataclass(frozen=True)
+class ProductionProgressView:
+    percent: int
+    state: Literal[
+        "not_started",
+        "queued",
+        "working",
+        "paused",
+        "attention",
+        "error",
+        "complete",
+        "cancelled",
+    ]
+    label: str
+    detail: str
+
+
+@dataclass(frozen=True)
 class ResearchSummary:
     status: str
     source_count: int
@@ -85,6 +102,38 @@ _PRODUCTION_STATE_PRESENTATION = {
     "active": ("In progress", "▶"),
     "pending": ("Pending", "○"),
     "error": ("Error", "!"),
+}
+
+_PRODUCTION_PROGRESS_BY_STEP = {
+    "preflight": "กำลังตรวจความพร้อมของระบบ",
+    "preflight_passed": "กำลังเตรียมเริ่มการผลิต",
+    "prepared_voice_validating": "กำลังตรวจสอบเสียงที่เตรียมไว้",
+    "tts_generating": "กำลังสร้างเสียงบรรยาย",
+    "tts_ready": "สร้างเสียงบรรยายเสร็จแล้ว",
+    "flow_reconciling": "กำลังตรวจสอบงานใน Google Flow",
+    "flow_generating": "กำลังสร้างคลิปวิดีโอใน Google Flow",
+    "flow_ready": "สร้างคลิปวิดีโอเสร็จแล้ว",
+    "canva_assembling": "กำลังประกอบวิดีโอใน Canva",
+    "validating": "กำลังตรวจสอบวิดีโอสุดท้าย",
+    "final_validated": "ตรวจสอบวิดีโอสุดท้ายเสร็จแล้ว",
+}
+
+_LIVE_PRODUCTION_STATUSES = {
+    "QUEUED",
+    "PREFLIGHT",
+    "PREFLIGHT_PASSED",
+    "TTS_GENERATING",
+    "TTS_READY",
+    "FLOW_GENERATING",
+    "FLOW_DOWNLOADING",
+    "FLOW_READY",
+    "CANVA_UPLOADING",
+    "CANVA_EDITING",
+    "CAPTIONING",
+    "EXPORTING",
+    "DOWNLOADING_FINAL",
+    "VALIDATING",
+    "FINAL_VALIDATED",
 }
 
 _CSS_PATH = Path(__file__).with_name("cloud_agent.css")
@@ -190,6 +239,42 @@ def derive_workflow_step(
     return 3
 
 
+def build_production_progress(job: dict | None) -> ProductionProgressView:
+    snapshot = dict(job or {})
+    status = str(snapshot.get("status") or "").upper()
+    current_step = str(snapshot.get("current_step") or "").lower()
+    try:
+        percent = int(snapshot.get("progress") or 0)
+    except (TypeError, ValueError):
+        percent = 0
+    percent = max(0, min(100, percent))
+
+    if not str(snapshot.get("id") or "").strip():
+        return ProductionProgressView(0, "not_started", "ยังไม่เริ่ม", "สร้างสคริปต์แล้วเริ่มการผลิต")
+    if status == "QUEUED":
+        return ProductionProgressView(0, "queued", "รอคิว", "รอ Worker รับงานเพื่อเริ่มการผลิต")
+    if status == "PAUSED":
+        return ProductionProgressView(percent, "paused", "หยุดชั่วคราว", "งานถูกหยุดชั่วคราว")
+    if status == "HUMAN_REQUIRED":
+        return ProductionProgressView(percent, "attention", "ต้องดำเนินการ", "งานต้องการการตรวจสอบก่อนทำต่อ")
+    if status == "FAILED":
+        return ProductionProgressView(percent, "error", "เกิดข้อผิดพลาด", "งานหยุดเนื่องจากข้อผิดพลาด")
+    if status == "CANCELLED":
+        return ProductionProgressView(percent, "cancelled", "ยกเลิกแล้ว", "งานนี้ถูกยกเลิก")
+    if status == "COMPLETED" or str(snapshot.get("checkpoint") or "").upper() == "COMPLETED":
+        return ProductionProgressView(100, "complete", "เสร็จสมบูรณ์", "วิดีโอพร้อมใช้งาน")
+    return ProductionProgressView(
+        percent,
+        "working",
+        "กำลังทำงาน",
+        _PRODUCTION_PROGRESS_BY_STEP.get(current_step, "กำลังดำเนินการผลิตวิดีโอ"),
+    )
+
+
+def job_requires_status_refresh(job: dict | None) -> bool:
+    return str(dict(job or {}).get("status") or "").upper() in _LIVE_PRODUCTION_STATUSES
+
+
 def build_production_stages(
     *,
     script_ready: bool,
@@ -210,6 +295,15 @@ def build_production_stages(
         "export": checkpoint_rank >= 5,
     }
     order = ("script", "voice", "flow", "canva", "export")
+    if status == "QUEUED":
+        return tuple(
+            StageView(
+                key=key,
+                label=_PRODUCTION_STAGE_LABELS[key],
+                state="complete" if complete[key] else "pending",
+            )
+            for key in order
+        )
     active = next((key for key in order if not complete[key]), "export")
     if status == "FAILED":
         current = str(snapshot.get("current_step") or "")
@@ -239,6 +333,10 @@ def render_production_status(stages: tuple[StageView, ...], job: dict | None) ->
     snapshot = dict(job or {})
     job_id = escape(str(snapshot.get("id") or "Not started"))
     status = escape(str(snapshot.get("status") or "Not started"))
+    progress = build_production_progress(snapshot)
+    progress_label = escape(progress.label)
+    progress_detail = escape(progress.detail)
+    progress_aria = escape(f"{progress.label}: {progress.detail}")
     items = []
     for stage in stages:
         label = _PRODUCTION_STAGE_LABELS.get(stage.key)
@@ -262,5 +360,14 @@ def render_production_status(stages: tuple[StageView, ...], job: dict | None) ->
         '<section class="vt-production-status" aria-label="Production status">'
         '<div class="vt-production-status__header"><strong>Production status</strong>'
         f'<span>Job {job_id} · {status}</span></div>'
+        f'<div class="vt-production-status__progress vt-production-status__progress--{progress.state}">'
+        '<div class="vt-production-status__progress-header">'
+        f'<span class="vt-production-status__progress-label">{progress_label}</span>'
+        f'<strong>{progress.percent}%</strong></div>'
+        f'<div class="vt-production-status__progress-track" role="progressbar" '
+        f'aria-valuemin="0" aria-valuemax="100" aria-valuenow="{progress.percent}" '
+        f'aria-valuetext="{progress_aria}">'
+        f'<span style="width: {progress.percent}%"></span></div>'
+        f'<p>{progress_detail}</p></div>'
         f'<ol class="vt-production-status__stages">{"".join(items)}</ol></section>'
     )

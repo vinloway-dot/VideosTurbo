@@ -13,6 +13,7 @@ API_TIMEOUT_SECONDS = 15
 SESSION_CHECK_TIMEOUT_SECONDS = 45
 DRAFT_TIMEOUT_SECONDS = 120
 RESEARCH_DRAFT_TIMEOUT_SECONDS = 300
+LIVE_JOB_REFRESH_SECONDS = 2
 RESEARCH_PROVIDER_OPTIONS = [
     {
         "id": "openrouter",
@@ -479,7 +480,7 @@ def _start_job(
     )
 
 
-def _store_job_snapshot(job):
+def _store_job_snapshot(job, *, sync_lookup=False):
     safe_fields = (
         "id",
         "status",
@@ -494,12 +495,73 @@ def _store_job_snapshot(job):
     snapshot = {name: job.get(name) for name in safe_fields if name in job}
     st.session_state["cloud_agent_job_id"] = str(snapshot.get("id") or "")
     st.session_state["cloud_agent_job_snapshot"] = snapshot
+    if sync_lookup:
+        st.session_state["cloud_agent_job_lookup_id"] = str(
+            snapshot.get("id") or ""
+        )
 
 
 def _start_and_store_job(inputs):
     job = _start_job(**inputs)
-    _store_job_snapshot(job)
+    _store_job_snapshot(job, sync_lookup=True)
     return job
+
+
+def _restore_latest_job_if_needed(ui_state):
+    if str(ui_state.get("cloud_agent_job_id") or "").strip():
+        return dict(ui_state.get("cloud_agent_job_snapshot") or {})
+    jobs = _api("GET", "jobs")
+    if not jobs:
+        return {}
+    latest = dict(jobs[0])
+    _store_job_snapshot(latest, sync_lookup=True)
+    return latest
+
+
+def _selected_job_id(ui_state, entered_job_id):
+    return str(
+        entered_job_id or ui_state.get("cloud_agent_job_id") or ""
+    ).strip()
+
+
+def _render_live_production_status(*, script_ready, prepared_voice_ready, ui_state):
+    def render(snapshot):
+        cloud_agent_ui.render_production_status(
+            cloud_agent_ui.build_production_stages(
+                script_ready=script_ready,
+                prepared_voice_ready=prepared_voice_ready,
+                job=snapshot,
+            ),
+            snapshot,
+        )
+
+    snapshot = dict(ui_state.get("cloud_agent_job_snapshot") or {})
+    job_id = str(snapshot.get("id") or "").strip()
+    fragment = getattr(st, "fragment", None)
+    if (
+        not job_id
+        or not cloud_agent_ui.job_requires_status_refresh(snapshot)
+        or not callable(fragment)
+    ):
+        render(snapshot)
+        return
+
+    @fragment(run_every=LIVE_JOB_REFRESH_SECONDS)
+    def refresh_live_status():
+        latest = snapshot
+        try:
+            latest = _api("GET", f"jobs/{job_id}")
+            _store_job_snapshot(latest)
+        except requests.RequestException:
+            # Keep the last confirmed state visible during a transient API failure.
+            pass
+        render(latest)
+        if not cloud_agent_ui.job_requires_status_refresh(latest):
+            rerun = getattr(st, "rerun", None)
+            if callable(rerun):
+                rerun(scope="app")
+
+    refresh_live_status()
 
 
 def _prepared_voice_matches(prepared_voice, *, script, provider, voice, speed):
@@ -1321,6 +1383,11 @@ def render_cloud_agent_panel():
         speed=float(ui_state.get("cloud_agent_speed") or 1.0),
     )
     job_snapshot = dict(ui_state.get("cloud_agent_job_snapshot") or {})
+    if hasattr(st, "runtime") and not str(ui_state.get("cloud_agent_job_id") or "").strip():
+        try:
+            job_snapshot = _restore_latest_job_if_needed(ui_state)
+        except requests.RequestException:
+            pass
 
     workflow_slot = st.container(key="cloud_agent_workflow_slot")
     with st.container(key="cloud_agent_workspace"):
@@ -1379,18 +1446,23 @@ def render_cloud_agent_panel():
                 except requests.RequestException as exc:
                     st.error(_api_error_message(exc))
 
-        ui_state.setdefault(
-            "cloud_agent_job_lookup_id",
-            str(ui_state.get("cloud_agent_job_id") or ""),
-        )
+        if not str(ui_state.get("cloud_agent_job_lookup_id") or "").strip():
+            ui_state["cloud_agent_job_lookup_id"] = str(
+                ui_state.get("cloud_agent_job_id") or ""
+            )
         job_id = st.text_input("Job ID", key="cloud_agent_job_lookup_id")
+        selected_job_id = _selected_job_id(ui_state, job_id)
         action_controls = st.columns(4)
         for action, column in zip(
             ("Pause", "Resume", "Retry", "Cancel"), action_controls
         ):
-            if column.button(action, key=f"cloud_agent_{action.lower()}") and job_id:
+            if column.button(
+                action,
+                key=f"cloud_agent_{action.lower()}",
+                disabled=not bool(selected_job_id),
+            ) and selected_job_id:
                 try:
-                    job = _api("POST", f"jobs/{job_id}/{action.lower()}")
+                    job = _api("POST", f"jobs/{selected_job_id}/{action.lower()}")
                     _store_job_snapshot(job)
                     job_snapshot = dict(ui_state.get("cloud_agent_job_snapshot") or {})
                     if action == "Retry":
@@ -1401,9 +1473,13 @@ def render_cloud_agent_panel():
                         st.error(message)
                 except requests.RequestException as exc:
                     st.error(_api_error_message(exc))
-        if st.button("Load job", key="cloud_agent_load_job") and job_id.strip():
+        if st.button(
+            "Load job",
+            key="cloud_agent_load_job",
+            disabled=not bool(selected_job_id),
+        ) and selected_job_id:
             try:
-                job = _api("GET", f"jobs/{job_id.strip()}")
+                job = _api("GET", f"jobs/{selected_job_id}")
                 _store_job_snapshot(job)
                 job_snapshot = dict(ui_state.get("cloud_agent_job_snapshot") or {})
                 if message := _job_error_message(job):
@@ -1422,11 +1498,8 @@ def render_cloud_agent_panel():
             )
         )
     with production_status_slot:
-        cloud_agent_ui.render_production_status(
-            cloud_agent_ui.build_production_stages(
-                script_ready=script_ready,
-                prepared_voice_ready=prepared_voice_ready,
-                job=job_snapshot,
-            ),
-            job_snapshot,
+        _render_live_production_status(
+            script_ready=script_ready,
+            prepared_voice_ready=prepared_voice_ready,
+            ui_state=ui_state,
         )
