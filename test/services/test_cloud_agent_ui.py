@@ -915,6 +915,29 @@ def test_sidebar_settings_is_a_real_page_link(monkeypatch):
     )
 
 
+def test_sidebar_completed_videos_opens_a_dedicated_page(monkeypatch):
+    class SidebarStreamlit:
+        def __init__(self):
+            self.sidebar = nullcontext()
+            self.links = []
+
+        def page_link(self, page, **kwargs):
+            self.links.append((page, kwargs))
+
+        def html(self, *_args, **_kwargs):
+            return None
+
+    fake = SidebarStreamlit()
+    monkeypatch.setattr(cloud_agent_ui, "st", fake)
+
+    cloud_agent_ui.render_sidebar()
+
+    assert (
+        "pages/4_Completed_Videos.py",
+        {"label": "วีดีโอที่สร้าง", "icon": ":material/video_library:"},
+    ) in fake.links
+
+
 def test_settings_page_is_present_and_reuses_cloud_agent_settings_renderer():
     settings_page = Path("webui/pages/3_Settings.py")
     assert settings_page.is_file()

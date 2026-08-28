@@ -84,6 +84,7 @@ def render_video_library(
     view: VideoLibraryView,
     *,
     load_video: Callable[[str], bytes],
+    show_heading: bool = True,
     pending_delete_id: str,
     on_delete_request: Callable[[str], None],
     on_delete_confirm: Callable[[str], None],
@@ -91,7 +92,8 @@ def render_video_library(
     on_page: Callable[[int], None],
 ) -> None:
     with st.container(key="cloud_agent_video_library"):
-        st.html('<h2 class="vt-video-library__title">วีดีโอที่สร้าง</h2>')
+        if show_heading:
+            st.html('<h2 class="vt-video-library__title">วีดีโอที่สร้าง</h2>')
         if not view.items:
             st.html(
                 '<p class="vt-video-library__empty">ยังไม่มีวิดีโอที่สร้างเสร็จ</p>'
@@ -248,6 +250,11 @@ def render_sidebar() -> None:
     with st.sidebar:
         st.html('<div class="vt-wordmark"><span>◆</span> VideosTurbo</div>')
         st.page_link("Main.py", label="Cloud Agent", icon=":material/auto_awesome:")
+        st.page_link(
+            "pages/4_Completed_Videos.py",
+            label="วีดีโอที่สร้าง",
+            icon=":material/video_library:",
+        )
         st.page_link(
             "pages/2_Music_Batch.py",
             label="Music Batch",
