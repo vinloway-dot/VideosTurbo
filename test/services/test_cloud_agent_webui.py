@@ -1383,15 +1383,35 @@ def test_selected_job_event_reads_job_once_and_stores_snapshot(monkeypatch):
 
 
 def test_incident_event_reads_unread_once_and_clears_deleted_selection(monkeypatch):
-    state = {
-        "cloud_agent_job_id": "job-123",
-        "cloud_agent_job_lookup_id": "job-123",
-        "cloud_agent_job_snapshot": {"id": "job-123", "status": "FLOW_GENERATING"},
-        "cloud_agent_last_event_id": "",
-    }
+    class WidgetSessionState(dict):
+        def __init__(self):
+            super().__init__(
+                {
+                    "cloud_agent_job_id": "job-123",
+                    "cloud_agent_job_lookup_id": "job-123",
+                    "cloud_agent_job_snapshot": {
+                        "id": "job-123",
+                        "status": "FLOW_GENERATING",
+                    },
+                    "cloud_agent_last_event_id": "",
+                }
+            )
+            self.instantiated_widget_keys = {"cloud_agent_job_lookup_id"}
+
+        def __setitem__(self, key, value):
+            if key in self.instantiated_widget_keys:
+                raise RuntimeError(f"widget key mutated after instantiation: {key}")
+            super().__setitem__(key, value)
+
+    state = WidgetSessionState()
+    reruns = []
 
     class EventStreamlit:
         session_state = state
+
+        @staticmethod
+        def rerun(*, scope="app"):
+            reruns.append(scope)
 
     calls = []
     monkeypatch.setattr(cloud_agent, "st", EventStreamlit())
@@ -1421,8 +1441,22 @@ def test_incident_event_reads_unread_once_and_clears_deleted_selection(monkeypat
 
     assert calls == [("GET", "incidents?unread=true")]
     assert state["cloud_agent_job_id"] == ""
-    assert state["cloud_agent_job_lookup_id"] == ""
+    assert state["cloud_agent_job_lookup_id"] == "job-123"
     assert state["cloud_agent_job_snapshot"] == {}
+    assert state["cloud_agent_job_lookup_clear_pending"] is True
+    assert reruns == ["app"]
+
+
+def test_pending_job_lookup_clear_is_applied_before_widget_instantiation():
+    state = {
+        "cloud_agent_job_lookup_id": "job-123",
+        "cloud_agent_job_lookup_clear_pending": True,
+    }
+
+    cloud_agent._apply_pending_job_lookup_clear(state)
+
+    assert state["cloud_agent_job_lookup_id"] == ""
+    assert "cloud_agent_job_lookup_clear_pending" not in state
 
 
 def test_pause_refreshes_snapshot_without_mutating_the_lookup_widget(monkeypatch):

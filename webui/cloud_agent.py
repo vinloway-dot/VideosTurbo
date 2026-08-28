@@ -585,10 +585,13 @@ def _render_event_driven_production_status(*, script_ready, prepared_voice_ready
             pass
     if action == "refresh_incidents" and event.get("former_job_id") == job_id:
         ui_state["cloud_agent_job_id"] = ""
-        ui_state["cloud_agent_job_lookup_id"] = ""
+        ui_state["cloud_agent_job_lookup_clear_pending"] = True
         ui_state["cloud_agent_job_snapshot"] = {}
         snapshot = {}
         job_id = ""
+        rerun = getattr(st, "rerun", None)
+        if callable(rerun):
+            rerun(scope="app")
     if action in {"refresh_job", "sync"} and job_id:
         try:
             latest = _api("GET", f"jobs/{job_id}")
@@ -1459,6 +1462,12 @@ def _apply_pending_production_draft(ui_state):
         )
 
 
+def _apply_pending_job_lookup_clear(ui_state):
+    if not ui_state.pop("cloud_agent_job_lookup_clear_pending", False):
+        return
+    ui_state["cloud_agent_job_lookup_id"] = ""
+
+
 def _render_start_action(*, brief, script, master_prompt, generation, ui_state):
     if st.button(
         "Continue to production",
@@ -1527,6 +1536,7 @@ def _render_start_action(*, brief, script, master_prompt, generation, ui_state):
 
 def render_cloud_agent_panel():
     ui_state = getattr(st, "session_state", {})
+    _apply_pending_job_lookup_clear(ui_state)
     _apply_pending_production_draft(ui_state)
     defaults = {
         "tts_provider": "azure-tts-v1",
