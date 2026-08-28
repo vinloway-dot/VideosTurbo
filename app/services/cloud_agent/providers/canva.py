@@ -93,6 +93,8 @@ class CanvaAssemblyClient:
     _AUDIO_PANEL_HYDRATION_SECONDS = 5.0
     _MEDIA_MENU_HYDRATION_SECONDS = 5.0
     _EDITOR_NAVIGATION_TIMEOUT_SECONDS = 180.0
+    _CAPTION_GENERATION_TIMEOUT_SECONDS = 90.0
+    _CAPTION_STABILITY_SECONDS = 5.0
 
     def __init__(
         self,
@@ -997,6 +999,44 @@ class CanvaAssemblyClient:
         )
         all_audio.click()
         page.get_by_role("button", name="Generate captions", exact=True).click()
+        self._wait_for_generated_captions(page)
+
+    def _wait_for_generated_captions(self, page: Any) -> None:
+        deadline = time.monotonic() + self._CAPTION_GENERATION_TIMEOUT_SECONDS
+        stable_signature: tuple[str, ...] = ()
+        stable_since: float | None = None
+
+        while True:
+            now = time.monotonic()
+            signature = self._generated_caption_signature(page)
+            if signature and signature == stable_signature:
+                if stable_since is not None and (
+                    now - stable_since >= self._CAPTION_STABILITY_SECONDS
+                ):
+                    return
+            elif signature:
+                stable_signature = signature
+                stable_since = now
+            else:
+                stable_signature = ()
+                stable_since = None
+
+            if now >= deadline:
+                raise CanvaUIVerificationError(
+                    "Canva generated captions did not become ready before export"
+                )
+            time.sleep(self.poll_seconds)
+
+    def _generated_caption_signature(self, page: Any) -> tuple[str, ...]:
+        starts = page.locator(self._VIDEO_START_EDGE)
+        captions = []
+        for index in range(starts.count()):
+            parent_text = str(
+                starts.nth(index).locator("xpath=..").inner_text() or ""
+            ).strip()
+            if parent_text and not self._VIDEO_DURATION_TEXT.fullmatch(parent_text):
+                captions.append(parent_text)
+        return tuple(captions)
 
     def _export_mp4_1080p(self, page: Any) -> None:
         if hasattr(page, "export_mp4_1080p"):

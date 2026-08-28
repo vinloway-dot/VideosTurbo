@@ -172,11 +172,58 @@ class _CaptionControl:
         return None
 
 
+class _GeneratedCaptionParent:
+    def __init__(self, text):
+        self.text = text
+
+    def inner_text(self):
+        return self.text
+
+
+class _GeneratedCaptionStart:
+    def __init__(self, text):
+        self.text = text
+
+    def locator(self, selector):
+        assert selector == "xpath=.."
+        return _GeneratedCaptionParent(self.text)
+
+
+class _GeneratedCaptionStarts:
+    def __init__(self, page):
+        self.page = page
+
+    def _texts(self):
+        if self.page.elapsed_seconds < self.page.caption_ready_after_seconds:
+            return []
+        if self.page.elapsed_seconds < self.page.caption_growth_after_seconds:
+            return ["First generated caption"]
+        return ["First generated caption", "Second generated caption"]
+
+    def count(self):
+        return len(self._texts())
+
+    def nth(self, index):
+        return _GeneratedCaptionStart(self._texts()[index])
+
+
 class FakeCaptionStylePage:
     """Models Canva's Captions flow ending in an explicit style selection."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        caption_ready_after_seconds=0.0,
+        caption_growth_after_seconds=None,
+    ):
         self.actions = []
+        self.elapsed_seconds = 0.0
+        self.caption_ready_after_seconds = caption_ready_after_seconds
+        self.caption_growth_after_seconds = (
+            caption_ready_after_seconds
+            if caption_growth_after_seconds is None
+            else caption_growth_after_seconds
+        )
 
     def select_video_clip(self, index):
         self.actions.append(("select_clip", index))
@@ -196,6 +243,10 @@ class FakeCaptionStylePage:
 
     def get_by_text(self, name, *, exact):
         raise AssertionError("Classic must be selected through its accessible button role")
+
+    def locator(self, selector):
+        assert selector == canva.CanvaAssemblyClient._VIDEO_START_EDGE
+        return _GeneratedCaptionStarts(self)
 
 
 class FakePreparedCanvaEditorPage(FakeCanvaEditorPage):
@@ -1408,10 +1459,19 @@ def test_canva_does_not_drag_a_confirmed_nonzero_audio_track():
     assert page.mouse.moves == []
 
 
-def test_canva_auto_captions_accepts_all_selected_scope_and_uses_classic_style():
+def test_canva_auto_captions_accepts_all_selected_scope_and_uses_classic_style(
+    monkeypatch,
+):
     """Catches rejecting Canva's current All-selected caption-scope wording."""
     client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 1.0
     page = FakeCaptionStylePage()
+    monkeypatch.setattr(canva.time, "monotonic", lambda: page.elapsed_seconds)
+    monkeypatch.setattr(
+        canva.time,
+        "sleep",
+        lambda seconds: setattr(page, "elapsed_seconds", page.elapsed_seconds + seconds),
+    )
 
     client._generate_auto_captions(page)
 
@@ -1423,6 +1483,48 @@ def test_canva_auto_captions_accepts_all_selected_scope_and_uses_classic_style()
         ("caption_control", "All audio"),
         ("caption_control", "Generate captions"),
     ]
+
+
+def test_canva_waits_for_generated_caption_timeline_to_stabilize_before_returning(
+    monkeypatch,
+):
+    """Catches exporting as soon as Generate captions is clicked."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 1.0
+    page = FakeCaptionStylePage(
+        caption_ready_after_seconds=20.0,
+        caption_growth_after_seconds=22.0,
+    )
+    monkeypatch.setattr(canva.time, "monotonic", lambda: page.elapsed_seconds)
+    monkeypatch.setattr(
+        canva.time,
+        "sleep",
+        lambda seconds: setattr(page, "elapsed_seconds", page.elapsed_seconds + seconds),
+    )
+
+    client._generate_auto_captions(page)
+
+    assert page.elapsed_seconds >= 27.0
+
+
+def test_canva_stops_before_export_when_generated_captions_never_appear(monkeypatch):
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 1.0
+    page = FakeCaptionStylePage(caption_ready_after_seconds=91.0)
+    monkeypatch.setattr(canva.time, "monotonic", lambda: page.elapsed_seconds)
+    monkeypatch.setattr(
+        canva.time,
+        "sleep",
+        lambda seconds: setattr(page, "elapsed_seconds", page.elapsed_seconds + seconds),
+    )
+
+    with pytest.raises(
+        canva.CanvaUIVerificationError,
+        match="generated captions did not become ready before export",
+    ):
+        client._generate_auto_captions(page)
+
+    assert page.elapsed_seconds == 90.0
 
 
 def test_canva_waits_for_final_download_to_become_enabled_after_captions():
