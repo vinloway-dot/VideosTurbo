@@ -44,6 +44,36 @@ def test_video_library_css_declares_a_five_column_desktop_grid():
     )
 
 
+def test_video_card_subject_is_fixed_to_three_lines_and_clips_overflow():
+    css = Path("webui/cloud_agent.css").read_text(encoding="utf-8")
+    markup = f"""
+        <style>{css}</style>
+        <p class="vt-video-library-card__subject" id="short">Short title</p>
+        <p class="vt-video-library-card__subject" id="long">
+          This is a deliberately long video title that must be clipped after three
+          visible lines so it cannot make its card taller than every other card.
+        </p>
+    """
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path="/usr/bin/google-chrome", headless=True
+        )
+        page = browser.new_page(viewport={"width": 320, "height": 300})
+        page.set_content(markup)
+        page.locator("body").evaluate("element => element.style.width = '180px'")
+        short = page.locator("#short").evaluate(
+            "element => ({clientHeight: element.clientHeight, scrollHeight: element.scrollHeight})"
+        )
+        long = page.locator("#long").evaluate(
+            "element => ({clientHeight: element.clientHeight, scrollHeight: element.scrollHeight})"
+        )
+        browser.close()
+
+    assert short["clientHeight"] == long["clientHeight"]
+    assert long["scrollHeight"] > long["clientHeight"]
+
+
 def test_video_library_renderer_uses_public_video_urls_and_numbered_pages(monkeypatch):
     class LibraryStreamlit:
         def __init__(self):
