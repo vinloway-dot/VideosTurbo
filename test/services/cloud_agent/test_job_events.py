@@ -79,6 +79,20 @@ def test_non_progress_and_duplicate_patches_do_not_emit(tmp_path):
     assert sink.events == []
 
 
+def test_timestamp_only_progress_does_not_emit_job_updated(tmp_path):
+    sink = RecordingSink()
+    store = EventPublishingCloudJobStore(str(tmp_path / "agent.sqlite3"), sink=sink)
+    job = store.create_job(_request())
+
+    store.mark_progress(
+        job.id,
+        "canva.audio.inserted",
+        at="2026-08-28T00:00:00+00:00",
+    )
+
+    assert sink.events == []
+
+
 def test_completed_transition_emits_one_completed_event(tmp_path):
     sink = RecordingSink()
     store = EventPublishingCloudJobStore(str(tmp_path / "agent.sqlite3"), sink=sink)
