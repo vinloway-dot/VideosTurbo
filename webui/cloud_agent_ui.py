@@ -107,12 +107,14 @@ def render_sidebar() -> None:
             label="Music Batch",
             icon=":material/music_note:",
         )
+        st.page_link(
+            "pages/3_Settings.py",
+            label="Settings",
+            icon=":material/settings:",
+        )
         st.html(
             '<div class="vt-nav-disabled" aria-disabled="true">'
             '<span class="vt-nav-icon" aria-hidden="true">▦</span> Projects'
-            '</div>'
-            '<div class="vt-nav-disabled" aria-disabled="true">'
-            '<span class="vt-nav-icon" aria-hidden="true">⚙</span> Settings'
             '</div>'
             '<div class="vt-system-status">'
             '<span aria-hidden="true"></span> All systems operational'

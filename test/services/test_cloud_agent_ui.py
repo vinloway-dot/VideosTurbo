@@ -323,9 +323,44 @@ def test_sidebar_disabled_items_use_local_symbols_instead_of_font_ligatures(
     cloud_agent_ui.render_sidebar()
 
     body = " ".join(fake.html_bodies)
-    assert "Projects" in body and "Settings" in body
+    assert "Projects" in body
     assert "material-symbols" not in body
     assert ">folder<" not in body and ">settings<" not in body
+
+
+def test_sidebar_settings_is_a_real_page_link(monkeypatch):
+    class SidebarStreamlit:
+        def __init__(self):
+            self.sidebar = nullcontext()
+            self.links = []
+
+        def page_link(self, page, **kwargs):
+            self.links.append((page, kwargs))
+
+        def html(self, *_args, **_kwargs):
+            return None
+
+    fake = SidebarStreamlit()
+    monkeypatch.setattr(cloud_agent_ui, "st", fake)
+
+    cloud_agent_ui.render_sidebar()
+
+    assert any(
+        page == "pages/3_Settings.py" and kwargs.get("label") == "Settings"
+        for page, kwargs in fake.links
+    )
+
+
+def test_settings_page_is_present_and_reuses_cloud_agent_settings_renderer():
+    settings_page = Path("webui/pages/3_Settings.py")
+    assert settings_page.is_file()
+    source = settings_page.read_text(encoding="utf-8")
+    renderer = Path("webui/cloud_agent.py").read_text(encoding="utf-8")
+    assert "_render_advanced_settings" in source
+    assert "Research Settings" in renderer
+    assert "TTS Provider Settings" in renderer
+    assert "Research API Key" in renderer
+    assert "include_research=True" in source
 
 
 def test_research_summary_never_contains_raw_source_body_or_secret_fields():

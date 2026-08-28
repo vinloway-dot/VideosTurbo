@@ -782,8 +782,9 @@ def _render_advanced_settings(
     research_provider_catalog,
     provider,
     provider_metadata,
+    include_research: bool = False,
 ):
-    if ui_state.get("cloud_agent_script_mode") == "Research Script":
+    if include_research or ui_state.get("cloud_agent_script_mode") == "Research Script":
         research_provider = str(ui_state.get("cloud_agent_research_provider", "") or "")
         research_provider_labels = {
             item["id"]: item["label"] for item in research_provider_catalog
