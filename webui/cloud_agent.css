@@ -329,7 +329,17 @@ div[class*="st-key-cloud_agent_video_card_"] {
     background: var(--vt-surface);
 }
 
-.vt-video-library-card__subject { margin: 0.65rem 0 0.2rem; font-weight: 700; overflow-wrap: anywhere; }
+.vt-video-library-card__subject {
+    margin: 0.65rem 0 0.2rem;
+    font-weight: 700;
+    line-height: 1.45;
+    block-size: 4.35em;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+}
 .vt-video-library-card__time { margin: 0; color: var(--vt-text-muted); font-size: 0.8rem; overflow-wrap: anywhere; }
 .vt-video-library__empty { margin: 0; color: var(--vt-text-muted); }
 
