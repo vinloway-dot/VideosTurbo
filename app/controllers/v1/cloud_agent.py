@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Callable
 
 from fastapi import Depends, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.config import config
@@ -58,11 +58,33 @@ from app.services.cloud_agent.video_library import (
     CloudVideoLibraryService,
     VideoLibraryNotFoundError,
 )
+from app.services.cloud_agent.event_hub import event_hub
+from app.services.cloud_agent.job_events import CloudJobEvent
 from app.utils import utils
 from app.utils.file_security import resolve_path_within_directory
 
 
 router = new_router()
+
+
+@router.post("/cloud-agent/internal/events", status_code=202)
+async def ingest_cloud_agent_event(event: CloudJobEvent):
+    await event_hub.publish(event)
+    return {"accepted": True}
+
+
+@router.get("/cloud-agent/events/stream")
+async def stream_cloud_agent_events():
+    heartbeat = float(config.app.get("cloud_agent_sse_heartbeat_seconds", 25))
+    return StreamingResponse(
+        event_hub.stream(heartbeat_seconds=heartbeat),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 _ACTIVE_JOB_STATUSES = {

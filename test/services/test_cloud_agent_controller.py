@@ -26,6 +26,8 @@ from app.services.cloud_agent.storage import CloudJobStorage
 
 
 EXPECTED_CLOUD_AGENT_PATHS = {
+    ("POST", "/api/v1/cloud-agent/internal/events"),
+    ("GET", "/api/v1/cloud-agent/events/stream"),
     ("GET", "/api/v1/cloud-agent/health"),
     ("GET", "/api/v1/cloud-agent/defaults"),
     ("PUT", "/api/v1/cloud-agent/defaults"),
