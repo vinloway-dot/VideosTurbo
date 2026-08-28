@@ -12,6 +12,62 @@ UI_SOURCE = Path("webui/cloud_agent.py")
 MAIN_SOURCE = Path("webui/Main.py")
 
 
+def _video_page(*, page=1, total_pages=1, total_items=1, items=None):
+    return {
+        "items": (
+            items
+            if items is not None
+            else [
+                {
+                    "job_id": "job-1",
+                    "subject": "Completed video",
+                    "completed_at": "2026-08-28T00:00:00+00:00",
+                    "final_url": "/cloud-agent/jobs/job-1/final",
+                }
+            ]
+        ),
+        "page": page,
+        "page_size": 10,
+        "total_items": total_items,
+        "total_pages": total_pages,
+    }
+
+
+def test_video_library_requests_ten_items_and_renders_before_job_controls(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        cloud_agent,
+        "_api",
+        lambda method, path, **_kwargs: calls.append((method, path)) or _video_page(),
+    )
+
+    assert cloud_agent._load_video_library(1)["page_size"] == 10
+    assert calls == [("GET", "videos?page=1&page_size=10")]
+    source = Path("webui/cloud_agent.py").read_text(encoding="utf-8")
+    assert source.index("_render_video_library") < source.index(
+        'st.expander("Job controls"'
+    )
+
+
+def test_successful_deletion_falls_back_to_previous_valid_page(monkeypatch):
+    state = {
+        "cloud_agent_video_library_page": 3,
+        "cloud_agent_video_delete_pending_id": "job-9",
+    }
+    monkeypatch.setattr(
+        cloud_agent,
+        "_api",
+        lambda method, path, **_kwargs: {"total_pages": 2} if method == "GET" else {},
+    )
+
+    cloud_agent._confirm_video_deletion(ui_state=state, job_id="job-9")
+
+    assert state == {
+        "cloud_agent_video_library_page": 2,
+        "cloud_agent_video_delete_pending_id": "",
+    }
+
+
 class ModeStreamlit:
     def __init__(self):
         self.calls = []
@@ -818,6 +874,7 @@ def test_pause_refreshes_snapshot_without_mutating_the_lookup_widget(monkeypatch
         "render_production_status",
         lambda stages, job: rendered_statuses.append((stages, job)),
     )
+    monkeypatch.setattr(cloud_agent, "_render_video_library", lambda **_kwargs: None)
     monkeypatch.setattr(
         cloud_agent,
         "_api",
@@ -967,6 +1024,7 @@ def test_canva_check_timeout_is_shown_as_a_safe_webui_error(monkeypatch):
         "_render_video_brief",
         lambda **_kwargs: cloud_agent._BriefSelection("", 130, "", "Standard Script", ""),
     )
+    monkeypatch.setattr(cloud_agent, "_render_video_library", lambda **_kwargs: None)
 
     cloud_agent.render_cloud_agent_panel()
 
@@ -1508,6 +1566,7 @@ def test_research_failure_never_stores_draft(monkeypatch):
         "_store_draft",
         lambda _draft: pytest.fail("research failure must preserve the existing editor"),
     )
+    monkeypatch.setattr(cloud_agent, "_render_video_library", lambda **_kwargs: None)
 
     cloud_agent.render_cloud_agent_panel()
 
@@ -1633,6 +1692,7 @@ def test_start_button_forwards_stored_research_draft_id(monkeypatch):
         "render_production_status",
         lambda stages, job: rendered_statuses.append((stages, job)),
     )
+    monkeypatch.setattr(cloud_agent, "_render_video_library", lambda **_kwargs: None)
 
     cloud_agent.render_cloud_agent_panel()
 
