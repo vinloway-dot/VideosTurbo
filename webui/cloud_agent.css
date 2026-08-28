@@ -119,6 +119,11 @@ div[class*="st-key-cloud_agent_research_source_"] input {
     background: var(--vt-surface);
 }
 
+div[class*="st-key-cloud_agent_"] [data-testid="stTextInput"] input,
+div[class*="st-key-cloud_agent_"] [data-testid="stTextArea"] textarea {
+    background: var(--vt-surface) !important;
+}
+
 div.st-key-cloud_agent_brief_card [data-testid="stButtonGroup"] {
     margin: 0.75rem 0;
 }

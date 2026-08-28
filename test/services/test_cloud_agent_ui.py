@@ -63,6 +63,16 @@ def test_cloud_agent_theme_is_a_project_local_css_asset():
     assert "--vt-primary:" in css_path.read_text(encoding="utf-8")
 
 
+def test_cloud_agent_text_entry_fields_use_white_surface():
+    css = Path("webui/cloud_agent.css").read_text(encoding="utf-8")
+
+    assert (
+        'div[class*="st-key-cloud_agent_"] [data-testid="stTextInput"] input,'
+        in css
+    )
+    assert 'background: var(--vt-surface) !important;' in css
+
+
 def test_cloud_agent_theme_includes_responsive_and_reduced_motion_rules():
     css = Path("webui/cloud_agent.css").read_text(encoding="utf-8")
     cloud_agent_source = Path("webui/cloud_agent.py").read_text(encoding="utf-8")
