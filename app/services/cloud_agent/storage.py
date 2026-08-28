@@ -25,6 +25,7 @@ class JobPaths:
     screenshots_dir: Path
     logs_dir: Path
     final_dir: Path
+    final_quarantine_dir: Path
     script_file: Path
     master_prompt_file: Path
     voice_file: Path
@@ -67,6 +68,7 @@ class CloudJobStorage:
         screenshots_dir = job_dir / "screenshots"
         logs_dir = job_dir / "logs"
         final_dir = job_dir / "final"
+        final_quarantine_dir = final_dir / "quarantine"
 
         return JobPaths(
             job_dir=job_dir,
@@ -80,6 +82,7 @@ class CloudJobStorage:
             screenshots_dir=screenshots_dir,
             logs_dir=logs_dir,
             final_dir=final_dir,
+            final_quarantine_dir=final_quarantine_dir,
             script_file=input_dir / "script.txt",
             master_prompt_file=input_dir / "master_prompt.txt",
             voice_file=audio_dir / "voice.mp3",
@@ -158,9 +161,20 @@ class CloudJobStorage:
             paths.screenshots_dir,
             paths.logs_dir,
             paths.final_dir,
+            paths.final_quarantine_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
         return paths
+
+    def quarantine_partial_final(self, job_id: str) -> Path | None:
+        paths = self.prepare(job_id)
+        if not paths.final_file.exists() and not paths.final_file.is_symlink():
+            return None
+        if paths.final_file.is_symlink() or not paths.final_file.is_file():
+            raise ValueError("partial final artifact must be a regular file")
+        destination = paths.final_quarantine_dir / f"{uuid4().hex}.mp4"
+        paths.final_file.replace(destination)
+        return destination
 
     def flow_snapshot_path(
         self,

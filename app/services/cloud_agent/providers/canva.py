@@ -4,7 +4,7 @@ import re
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from loguru import logger
@@ -129,9 +129,16 @@ class CanvaAssemblyClient:
         clips: list[Path],
         audio: Path,
         output: Path,
+        progress: Callable[[str], None] | None = None,
     ) -> Path:
         with self.open_job_session(job) as session:
-            return session.assemble_and_export(job, clips, audio, output)
+            return session.assemble_and_export(
+                job,
+                clips,
+                audio,
+                output,
+                progress=progress,
+            )
 
     def _assemble_open_page(
         self,
@@ -140,7 +147,9 @@ class CanvaAssemblyClient:
         clips: list[Path],
         audio: Path,
         output: Path,
+        progress: Callable[[str], None] | None = None,
     ) -> Path:
+        emit = progress or (lambda _milestone: None)
         clip_paths = [Path(clip) for clip in clips]
         audio_path = Path(audio)
         output_path = Path(output)
@@ -150,16 +159,30 @@ class CanvaAssemblyClient:
         self._clean_uploaded_audio(page, audio_path.name)
         self._clear_video_timeline(page)
         self._clear_audio_timeline(page)
+        emit("canva.timeline.cleared")
         self._upload_media(page, [*clip_paths, audio_path])
+        emit("canva.uploads.ready")
         self._add_uploaded_audio(page, audio_path.name)
         self._verify_narration_starts_at_zero(page, audio_path.name)
-        self._add_uploaded_clips(page, clip_names)
+        emit("canva.audio.inserted")
+        self._add_uploaded_clips(
+            page,
+            clip_names,
+            progress=lambda number: emit(f"canva.video.inserted.{number}"),
+        )
         self._verify_first_video_starts_at_zero(page)
         self._order_clips(page, clip_names)
         self._mute_source_audio(page)
-        self._generate_auto_captions(page)
+        emit("canva.source_audio.muted")
+        self._generate_auto_captions(
+            page,
+            requested=lambda: emit("canva.captions.requested"),
+        )
+        emit("canva.captions.stable")
         self._export_mp4_1080p(page)
+        emit("canva.export.started")
         self._download_export(page, output_path)
+        emit("canva.export.downloaded")
         return output_path
 
     @contextmanager
@@ -584,13 +607,19 @@ class CanvaAssemblyClient:
                     raise CanvaUIVerificationError("Canva audio timeline cannot be cleared")
                 time.sleep(self.poll_seconds)
 
-    def _add_uploaded_clips(self, page: Any, expected_names: list[str]) -> None:
+    def _add_uploaded_clips(
+        self,
+        page: Any,
+        expected_names: list[str],
+        *,
+        progress: Callable[[int], None] | None = None,
+    ) -> None:
         if len(expected_names) != 6:
             raise ValueError("Canva timeline insertion requires exactly six clip names")
         panel = None if hasattr(page, "add_uploaded_clip") else self._open_uploaded_videos(page)
         if panel is None and not hasattr(page, "add_uploaded_clip"):
             raise CanvaUIVerificationError("Canva uploaded Videos panel cannot be found")
-        for name in expected_names:
+        for index, name in enumerate(expected_names, start=1):
             before = self._timeline_video_count(page)
             if hasattr(page, "add_uploaded_clip"):
                 page.add_uploaded_clip(name)
@@ -607,6 +636,8 @@ class CanvaAssemblyClient:
             after = self._timeline_video_count(page)
             if after != before + 1:
                 raise CanvaUIVerificationError("Canva timeline video count did not increase by one")
+            if progress is not None:
+                progress(index)
 
     def _timeline_video_count(self, page: Any) -> int:
         if hasattr(page, "timeline_video_count_value"):
@@ -972,9 +1003,16 @@ class CanvaAssemblyClient:
                 "Canva resulting playback or timeline state cannot be verified"
             )
 
-    def _generate_auto_captions(self, page: Any) -> None:
+    def _generate_auto_captions(
+        self,
+        page: Any,
+        *,
+        requested: Callable[[], None] | None = None,
+    ) -> None:
         if hasattr(page, "generate_auto_captions"):
             page.generate_auto_captions()
+            if requested is not None:
+                requested()
             return
         self._select_video_clip(page, 1)
         page.get_by_role("button", name="Captions", exact=True).click()
@@ -999,6 +1037,8 @@ class CanvaAssemblyClient:
         )
         all_audio.click()
         page.get_by_role("button", name="Generate captions", exact=True).click()
+        if requested is not None:
+            requested()
         self._wait_for_generated_captions(page)
 
     def _wait_for_generated_captions(self, page: Any) -> None:
@@ -1131,8 +1171,16 @@ class _CanvaJobSession:
         clips: list[Path],
         audio: Path,
         output: Path,
+        progress: Callable[[str], None] | None = None,
     ) -> Path:
-        return self.client._assemble_open_page(self.page, job, clips, audio, output)
+        return self.client._assemble_open_page(
+            self.page,
+            job,
+            clips,
+            audio,
+            output,
+            progress=progress,
+        )
 
     def clean_workspace(self, job_id: str) -> None:
         del job_id

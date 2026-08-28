@@ -337,6 +337,7 @@ class RecordingCanva:
         clips: list[Path],
         audio: Path,
         output: Path,
+        progress=None,
     ) -> Path:
         self.calls.append((job.id, clips, audio, output))
         self.job_timings.append(
@@ -347,6 +348,8 @@ class RecordingCanva:
             )
         )
         output.write_bytes(b"final")
+        if progress is not None:
+            progress("canva.export.downloaded")
         return output
 
     def clean_workspace(self, job_id):
@@ -387,8 +390,8 @@ class AudioEvidenceCanva(RecordingCanva):
         super().__init__()
         self.count = count
 
-    def assemble_and_export(self, job, clips, audio, output):
-        del job, clips, audio, output
+    def assemble_and_export(self, job, clips, audio, output, progress=None):
+        del job, clips, audio, output, progress
         raise CanvaUIVerificationError(
             f"Canva narration audio cards: {self.count}",
             audio_card_count=self.count,
@@ -396,8 +399,8 @@ class AudioEvidenceCanva(RecordingCanva):
 
 
 class GenericCanvaVerificationFailure(RecordingCanva):
-    def assemble_and_export(self, job, clips, audio, output):
-        del job, clips, audio, output
+    def assemble_and_export(self, job, clips, audio, output, progress=None):
+        del job, clips, audio, output, progress
         raise CanvaUIVerificationError("Canva Uploads sidebar cannot be verified")
 
 
@@ -406,9 +409,23 @@ class EventRecordingCanva(RecordingCanva):
         super().__init__()
         self.events = events
 
-    def assemble_and_export(self, job, clips, audio, output):
+    def assemble_and_export(self, job, clips, audio, output, progress=None):
         self.events.append("canva")
-        return super().assemble_and_export(job, clips, audio, output)
+        return super().assemble_and_export(
+            job,
+            clips,
+            audio,
+            output,
+            progress=progress,
+        )
+
+
+class RecordingProgressReporter:
+    def __init__(self):
+        self.milestones = []
+
+    def reached(self, job_id, milestone):
+        self.milestones.append((job_id, milestone))
 
 
 class PostCleanRecordingCanva(RecordingCanva):
@@ -435,6 +452,7 @@ def _workflow(
     flow=None,
     canva=None,
     flow_recovery=None,
+    reporter=None,
 ):
     return CloudAgentWorkflow(
         store,
@@ -450,6 +468,7 @@ def _workflow(
         expected_width=1080,
         expected_height=1920,
         flow_recovery=flow_recovery,
+        reporter=reporter,
     )
 
 
@@ -1224,6 +1243,49 @@ def test_flow_ready_checkpoint_skips_tts_and_flow_then_calls_canva(monkeypatch, 
     assert result.status is CloudJobStatus.COMPLETED
     assert result.checkpoint is CloudJobCheckpoint.COMPLETED
     assert result.final_video == str(paths.final_file)
+
+
+def test_canva_resume_from_flow_ready_reuses_sources_and_reports_milestones(
+    monkeypatch,
+    tmp_path,
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    paths = storage.prepare(job.id)
+    paths.voice_file.write_bytes(b"voice")
+    for path in paths.flow_files:
+        path.write_bytes(b"clip")
+    paths.final_file.write_bytes(b"stale-partial")
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.FLOW_READY,
+        checkpoint=CloudJobCheckpoint.FLOW_READY,
+        current_step="flow_ready",
+        voice_file=str(paths.voice_file),
+        canva_restart_attempts=1,
+    )
+    tts = RecordingTTS()
+    flow = RecordingFlow()
+    canva_client = RecordingCanva()
+    reporter = RecordingProgressReporter()
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        tts=tts,
+        flow=flow,
+        canva=canva_client,
+        reporter=reporter,
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert tts.calls == []
+    assert flow.calls == []
+    assert len(canva_client.calls) == 1
+    assert result.status is CloudJobStatus.COMPLETED
+    assert reporter.milestones
+    assert list(paths.final_quarantine_dir.iterdir())
 
 
 def test_workflow_post_cleans_canva_only_after_final_validated(monkeypatch, tmp_path):

@@ -65,6 +65,18 @@ def test_flow_snapshot_paths_are_attempt_scoped_and_bounded(tmp_path):
         storage.flow_snapshot_path("job-123", phase="partial", attempt=3)
 
 
+def test_stale_partial_final_is_quarantined_before_canva_retry(tmp_path):
+    storage = CloudJobStorage(tmp_path)
+    paths = storage.prepare("job-123")
+    paths.final_file.write_bytes(b"partial")
+
+    quarantined = storage.quarantine_partial_final("job-123")
+
+    assert quarantined.is_file()
+    assert quarantined.read_bytes() == b"partial"
+    assert not paths.final_file.exists()
+
+
 def test_write_inputs_writes_utf8_script_and_master_prompt(tmp_path):
     storage = CloudJobStorage(tmp_path)
 

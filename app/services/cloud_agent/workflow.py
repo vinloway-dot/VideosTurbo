@@ -31,6 +31,7 @@ from app.services.cloud_agent.flow_archive import (
 from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.media_probe import MediaProbe, validate_audio, validate_video
 from app.services.cloud_agent.providers.canva import CanvaUIVerificationError
+from app.services.cloud_agent.progress import ProgressReporter
 from app.services.cloud_agent.storage import CloudJobStorage, JobPaths
 from app.services.cloud_agent.timing import calculate_adaptive_timing
 
@@ -97,6 +98,7 @@ class CanvaClient(Protocol):
         clips: list[Path],
         audio: Path,
         output: Path,
+        progress=None,
     ) -> Path: ...
 
     def clean_workspace(self, job_id: str) -> None: ...
@@ -131,6 +133,7 @@ class CloudAgentWorkflow:
         expected_width: int,
         expected_height: int,
         flow_recovery: FlowRecoveryCoordinator | None = None,
+        reporter: ProgressReporter | None = None,
     ):
         self.store = store
         self.storage = storage
@@ -144,8 +147,10 @@ class CloudAgentWorkflow:
         self.final_min_size_bytes = final_min_size_bytes
         self.expected_width = expected_width
         self.expected_height = expected_height
+        self.reporter = reporter
         self.flow_recovery = flow_recovery or FlowRecoveryCoordinator(
             store,
+            reporter=reporter,
             expected_width=expected_width,
             expected_height=expected_height,
         )
@@ -439,6 +444,7 @@ class CloudAgentWorkflow:
 
             job = self._get_job(job.id)
             if job.checkpoint is CloudJobCheckpoint.FLOW_READY:
+                self.storage.quarantine_partial_final(job.id)
                 with self._open_canva_job_session(job) as canva:
                     stopped = self._control_boundary(job.id)
                     if stopped is not None:
@@ -460,6 +466,14 @@ class CloudAgentWorkflow:
                         list(paths.flow_files),
                         paths.voice_file,
                         paths.final_file,
+                        progress=(
+                            None
+                            if self.reporter is None
+                            else lambda milestone: self.reporter.reached(
+                                job.id,
+                                milestone,
+                            )
+                        ),
                     )
                     if not paths.final_file.is_file():
                         raise MediaValidationError("Canva step did not produce the canonical final artifact")

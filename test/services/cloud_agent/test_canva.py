@@ -1414,6 +1414,62 @@ def test_canva_assembly_adds_audio_before_videos_without_timing_adjustment(tmp_p
     ]
 
 
+def test_canva_reports_only_verified_postconditions(tmp_path):
+    page = FakeCanvaEditorPage()
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+    milestones = []
+
+    client.assemble_and_export(
+        _assembly_job(),
+        clips,
+        audio,
+        output,
+        progress=milestones.append,
+    )
+
+    assert milestones == [
+        "canva.timeline.cleared",
+        "canva.uploads.ready",
+        "canva.audio.inserted",
+        *[f"canva.video.inserted.{number}" for number in range(1, 7)],
+        "canva.source_audio.muted",
+        "canva.captions.requested",
+        "canva.captions.stable",
+        "canva.export.started",
+        "canva.export.downloaded",
+    ]
+
+
+def test_failed_caption_postcondition_does_not_emit_stable_milestone(
+    monkeypatch,
+    tmp_path,
+):
+    page = FakeCanvaEditorPage()
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+    milestones = []
+
+    def fail_captions(_page, *, requested):
+        requested()
+        raise canva.CanvaUIVerificationError("captions never stabilized")
+
+    monkeypatch.setattr(client, "_generate_auto_captions", fail_captions)
+
+    with pytest.raises(canva.CanvaUIVerificationError, match="never stabilized"):
+        client.assemble_and_export(
+            _assembly_job(),
+            clips,
+            audio,
+            output,
+            progress=milestones.append,
+        )
+
+    assert "canva.captions.requested" in milestones
+    assert "canva.captions.stable" not in milestones
+    assert "canva.export.started" not in milestones
+
+
 def test_canva_assembly_continues_when_timeline_starts_are_unobservable(tmp_path):
     page = FakeUnobservableTimelineStartsPage()
     client, _ = _assembly_client(page)
