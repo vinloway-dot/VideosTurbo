@@ -226,23 +226,6 @@ _PRODUCTION_PROGRESS_BY_STEP = {
     "final_validated": "ตรวจสอบวิดีโอสุดท้ายเสร็จแล้ว",
 }
 
-_LIVE_PRODUCTION_STATUSES = {
-    "QUEUED",
-    "PREFLIGHT",
-    "PREFLIGHT_PASSED",
-    "TTS_GENERATING",
-    "TTS_READY",
-    "FLOW_GENERATING",
-    "FLOW_DOWNLOADING",
-    "FLOW_READY",
-    "CANVA_UPLOADING",
-    "CANVA_EDITING",
-    "CAPTIONING",
-    "EXPORTING",
-    "DOWNLOADING_FINAL",
-    "VALIDATING",
-    "FINAL_VALIDATED",
-}
 
 _CSS_PATH = Path(__file__).with_name("cloud_agent.css")
 
@@ -377,10 +360,6 @@ def build_production_progress(job: dict | None) -> ProductionProgressView:
         "กำลังทำงาน",
         _PRODUCTION_PROGRESS_BY_STEP.get(current_step, "กำลังดำเนินการผลิตวิดีโอ"),
     )
-
-
-def job_requires_status_refresh(job: dict | None) -> bool:
-    return str(dict(job or {}).get("status") or "").upper() in _LIVE_PRODUCTION_STATUSES
 
 
 def build_production_stages(

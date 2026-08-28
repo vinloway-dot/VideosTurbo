@@ -653,18 +653,6 @@ def _render_event_driven_production_status(*, script_ready, prepared_voice_ready
 
     snapshot = dict(ui_state.get("cloud_agent_job_snapshot") or {})
     job_id = str(snapshot.get("id") or "").strip()
-    if (
-        getattr(st, "components", None) is None
-        and job_id
-        and cloud_agent_ui.job_requires_status_refresh(snapshot)
-    ):
-        try:
-            snapshot = dict(_api("GET", f"jobs/{job_id}"))
-            _store_job_snapshot(snapshot)
-        except requests.RequestException:
-            pass
-        render(snapshot)
-        return
     event = cloud_agent_events.render_cloud_job_event_listener(
         "/api/v1/cloud-agent/events/stream", key="cloud-agent-events"
     )
@@ -687,15 +675,6 @@ def _render_event_driven_production_status(*, script_ready, prepared_voice_ready
         if callable(rerun):
             rerun(scope="app")
     render(snapshot)
-
-
-def _render_live_production_status(*, script_ready, prepared_voice_ready, ui_state):
-    """Compatibility entry point; production panel uses the event-driven renderer."""
-    return _render_event_driven_production_status(
-        script_ready=script_ready,
-        prepared_voice_ready=prepared_voice_ready,
-        ui_state=ui_state,
-    )
 
 
 def _prepared_voice_matches(prepared_voice, *, script, provider, voice, speed):

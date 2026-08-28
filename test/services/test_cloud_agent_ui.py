@@ -626,14 +626,6 @@ def test_claimed_job_is_presented_as_working_with_its_persisted_progress():
     assert progress.percent == 15
 
 
-def test_only_queued_and_claimed_jobs_request_live_status_refreshes():
-    assert cloud_agent_ui.job_requires_status_refresh({"status": "QUEUED"})
-    assert cloud_agent_ui.job_requires_status_refresh({"status": "TTS_GENERATING"})
-    assert not cloud_agent_ui.job_requires_status_refresh({"status": "PAUSED"})
-    assert not cloud_agent_ui.job_requires_status_refresh({"status": "HUMAN_REQUIRED"})
-    assert not cloud_agent_ui.job_requires_status_refresh({"status": "COMPLETED"})
-
-
 def test_failed_job_marks_only_the_current_presentation_stage_as_error():
     stages = build_production_stages(
         script_ready=True,

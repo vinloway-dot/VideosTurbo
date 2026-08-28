@@ -964,8 +964,8 @@ def test_new_session_restores_the_latest_job_for_controls(monkeypatch):
     assert session_state["cloud_agent_job_lookup_id"] == "job-latest"
 
 
-def test_live_production_status_refreshes_queued_job_and_renders_claimed_state(monkeypatch):
-    class FragmentStreamlit:
+def test_event_driven_status_does_not_read_job_without_event(monkeypatch):
+    class EventStreamlit:
         def __init__(self):
             self.session_state = {
                 "cloud_agent_job_id": "job-123",
@@ -977,31 +977,19 @@ def test_live_production_status_refreshes_queued_job_and_renders_claimed_state(m
                     "progress": 0,
                 },
             }
-            self.run_every = []
-
-        def fragment(self, *, run_every):
-            self.run_every.append(run_every)
-
-            def decorate(function):
-                return function
-
-            return decorate
-
-    fake_streamlit = FragmentStreamlit()
+    fake_streamlit = EventStreamlit()
     rendered = []
+    calls = []
     monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_events,
+        "render_cloud_job_event_listener",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(
         cloud_agent,
         "_api",
-        lambda method, path, **_kwargs: {
-            "id": "job-123",
-            "status": "TTS_GENERATING",
-            "checkpoint": "PREFLIGHT_PASSED",
-            "current_step": "tts_generating",
-            "progress": 15,
-        }
-        if (method, path) == ("GET", "jobs/job-123")
-        else pytest.fail(f"unexpected API call: {method} {path}"),
+        lambda method, path, **_kwargs: calls.append((method, path)),
     )
     monkeypatch.setattr(
         cloud_agent.cloud_agent_ui,
@@ -1009,14 +997,61 @@ def test_live_production_status_refreshes_queued_job_and_renders_claimed_state(m
         lambda stages, job: rendered.append((stages, job)),
     )
 
-    cloud_agent._render_live_production_status(
+    cloud_agent._render_event_driven_production_status(
         script_ready=True,
         prepared_voice_ready=False,
         ui_state=fake_streamlit.session_state,
     )
 
-    assert fake_streamlit.run_every == [2]
-    assert fake_streamlit.session_state["cloud_agent_job_snapshot"]["status"] == "TTS_GENERATING"
+    assert calls == []
+    assert rendered[-1][1]["status"] == "QUEUED"
+
+
+def test_selected_job_event_reads_job_once_and_stores_snapshot(monkeypatch):
+    state = {
+        "cloud_agent_job_id": "job-123",
+        "cloud_agent_job_snapshot": {
+            "id": "job-123", "status": "QUEUED", "checkpoint": "NONE",
+            "current_step": "queued", "progress": 0,
+        },
+        "cloud_agent_last_event_id": "",
+    }
+
+    class EventStreamlit:
+        session_state = state
+
+    calls = []
+    rendered = []
+    monkeypatch.setattr(cloud_agent, "st", EventStreamlit())
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_events,
+        "render_cloud_job_event_listener",
+        lambda *_args, **_kwargs: {
+            "event_id": "event-1", "type": "job.updated", "job_id": "job-123"
+        },
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_api",
+        lambda method, path, **_kwargs: calls.append((method, path)) or {
+            "id": "job-123", "status": "TTS_GENERATING",
+            "checkpoint": "PREFLIGHT_PASSED", "current_step": "tts_generating",
+            "progress": 15,
+        },
+    )
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_ui,
+        "render_production_status",
+        lambda stages, job: rendered.append((stages, job)),
+    )
+
+    cloud_agent._render_event_driven_production_status(
+        script_ready=True, prepared_voice_ready=False, ui_state=state
+    )
+
+    assert calls == [("GET", "jobs/job-123")]
+    assert state["cloud_agent_last_event_id"] == "event-1"
+    assert state["cloud_agent_job_snapshot"]["status"] == "TTS_GENERATING"
     assert rendered[-1][1]["progress"] == 15
 
 
