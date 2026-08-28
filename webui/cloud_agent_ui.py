@@ -106,7 +106,13 @@ def render_video_library(
                             with st.container(
                                 key=f"cloud_agent_video_card_{card.job_id}", border=True
                             ):
-                                st.video(load_video(card.final_url), format="video/mp4")
+                                try:
+                                    media = load_video(card.final_url)
+                                    if not media:
+                                        raise ValueError("empty video media")
+                                    st.video(media, format="video/mp4")
+                                except Exception:
+                                    st.warning("วิดีโอนี้ยังเปิดไม่ได้ กรุณาลองใหม่ภายหลัง")
                                 st.html(
                                     '<p class="vt-video-library-card__subject">'
                                     f"{escape(card.subject)}</p>"

@@ -1,6 +1,7 @@
 import ast
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import requests
@@ -123,6 +124,28 @@ def test_video_library_media_rejects_non_api_paths_before_request(monkeypatch):
 
     with pytest.raises(ValueError, match="invalid cloud agent completed-media URL"):
         cloud_agent._load_video_media("job/final")
+
+
+def test_video_library_renderer_failure_does_not_hide_job_controls(monkeypatch):
+    errors = []
+    monkeypatch.setattr(
+        cloud_agent,
+        "st",
+        SimpleNamespace(
+            error=errors.append,
+            rerun=lambda: None,
+        ),
+    )
+    monkeypatch.setattr(cloud_agent, "_load_video_library", lambda _page: _video_page())
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_ui,
+        "render_video_library",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("renderer failed")),
+    )
+
+    cloud_agent._render_video_library(ui_state={})
+
+    assert errors == ["ไม่สามารถแสดงวิดีโอที่สร้างได้ชั่วคราว กรุณารีเฟรชหน้าอีกครั้ง"]
 
 
 def test_first_video_delete_click_sets_the_shared_pending_id(monkeypatch):

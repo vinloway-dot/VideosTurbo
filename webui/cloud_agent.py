@@ -176,15 +176,18 @@ def _render_video_library(*, ui_state: MutableMapping) -> None:
         if callable(rerun):
             rerun()
 
-    cloud_agent_ui.render_video_library(
-        cloud_agent_ui.video_library_view(payload),
-        load_video=_load_video_media,
-        pending_delete_id=str(ui_state["cloud_agent_video_delete_pending_id"]),
-        on_delete_request=request_delete,
-        on_delete_confirm=confirm_delete,
-        on_delete_cancel=cancel_delete,
-        on_page=select_page,
-    )
+    try:
+        cloud_agent_ui.render_video_library(
+            cloud_agent_ui.video_library_view(payload),
+            load_video=_load_video_media,
+            pending_delete_id=str(ui_state["cloud_agent_video_delete_pending_id"]),
+            on_delete_request=request_delete,
+            on_delete_confirm=confirm_delete,
+            on_delete_cancel=cancel_delete,
+            on_page=select_page,
+        )
+    except Exception:
+        st.error("ไม่สามารถแสดงวิดีโอที่สร้างได้ชั่วคราว กรุณารีเฟรชหน้าอีกครั้ง")
 
 
 def _load_tts_provider_catalog():

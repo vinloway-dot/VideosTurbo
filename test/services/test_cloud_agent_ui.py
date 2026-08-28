@@ -106,6 +106,60 @@ def test_video_library_renderer_uses_public_video_urls_and_numbered_pages(monkey
     assert any(config.get("key") == "cloud_agent_delete_job-1" for _, config in fake.buttons)
 
 
+def test_video_library_media_failure_isolated_to_one_card(monkeypatch):
+    class IsolatedStreamlit:
+        def __init__(self):
+            self.videos = []
+            self.warnings = []
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def columns(self, count):
+            return [nullcontext() for _ in range(count)]
+
+        def html(self, _body):
+            return None
+
+        def video(self, value, **_kwargs):
+            self.videos.append(value)
+
+        def warning(self, message):
+            self.warnings.append(message)
+
+        def button(self, _label, **_kwargs):
+            return False
+
+    fake = IsolatedStreamlit()
+    monkeypatch.setattr(cloud_agent_ui, "st", fake)
+    view = cloud_agent_ui.VideoLibraryView(
+        items=tuple(
+            cloud_agent_ui.VideoCardView(
+                job_id=f"job-{index}", subject=f"Video {index}",
+                completed_at="2026-08-28T12:00:00+00:00",
+                final_url=f"/api/v1/cloud-agent/jobs/job-{index}/final",
+            ) for index in (1, 2)
+        ),
+        page=1, total_pages=1, total_items=2,
+    )
+
+    def load_video(url):
+        if "job-1" in url:
+            raise OSError("temporary media failure")
+        return b"second-video"
+
+    cloud_agent_ui.render_video_library(
+        view, load_video=load_video, pending_delete_id="",
+        on_delete_request=lambda _job_id: None,
+        on_delete_confirm=lambda _job_id: None,
+        on_delete_cancel=lambda _job_id: None,
+        on_page=lambda _page: None,
+    )
+
+    assert fake.videos == [b"second-video"]
+    assert any("เปิดไม่ได้" in message for message in fake.warnings)
+
+
 def test_streamlit_159_treats_api_relative_video_url_as_a_local_filename(monkeypatch):
     manager = MediaFileManager(MemoryMediaFileStorage("/media"))
     monkeypatch.setattr(streamlit_media.runtime, "exists", lambda: True)
