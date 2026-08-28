@@ -47,10 +47,18 @@ class PreFlowRetryService:
             return True
         if paths.flow_archive_file.exists() or paths.flow_archive_file.is_symlink():
             return True
+        try:
+            download_entries = tuple(paths.flow_downloads_dir.iterdir())
+        except OSError as exc:
+            raise PreFlowRetryEligibilityError(
+                "Flow artifact state cannot be verified safely"
+            ) from exc
+        if any(entry != paths.flow_snapshots_dir for entry in download_entries):
+            return True
         return any(
             self._directory_has_entries(directory)
             for directory in (
-                paths.flow_downloads_dir,
+                paths.flow_snapshots_dir,
                 paths.flow_staging_dir,
                 paths.flow_quarantine_dir,
             )
