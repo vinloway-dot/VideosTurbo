@@ -20,8 +20,9 @@ from app.services.cloud_agent.errors import (
     MediaValidationError,
 )
 from app.services.cloud_agent.flow_archive import (
-    FlowPartialInventory,
-    inspect_partial_flow_archive,
+    FlowRecoveryCapture,
+    FlowRecoveryMaterialization,
+    inspect_recovery_flow_archive,
     materialize_flow_archive,
 )
 from app.services.cloud_agent.providers._browser_session import BrowserSessionProvider
@@ -353,7 +354,7 @@ class FlowWorkspaceRun:
         paths: JobPaths,
         *,
         attempt: int,
-    ) -> FlowPartialInventory:
+    ) -> FlowRecoveryCapture:
         response_count = self.client._agent_response_count(self.page)
         self.client._submit_agent_prompt(
             self.page,
@@ -362,11 +363,16 @@ class FlowWorkspaceRun:
         self._wait_for_rename_response_then_refresh(response_count)
         snapshot = paths.flow_snapshots_dir / f"partial-{attempt}.zip"
         self._download_project_archive_to(snapshot)
-        inventory = inspect_partial_flow_archive(
+        capture = inspect_recovery_flow_archive(
             snapshot,
             paths,
             min_size_bytes=1,
+            expected_width=self.client.expected_width,
+            expected_height=self.client.expected_height,
         )
+        if isinstance(capture, FlowRecoveryMaterialization):
+            return capture
+        inventory = capture
         if self._semantic_name_numbers() != inventory.semantic_numbers:
             raise FlowWorkspaceVerificationError(
                 "Google Flow missing clip position could not be corroborated"

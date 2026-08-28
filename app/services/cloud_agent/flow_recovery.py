@@ -7,6 +7,7 @@ from app.models.cloud_agent import CloudJobRecord, FlowRecoveryState
 from app.services.cloud_agent.errors import RecoveryBudgetExhausted
 from app.services.cloud_agent.flow_archive import (
     FlowPartialInventory,
+    FlowRecoveryCapture,
     FlowRecoveryMaterialization,
     inspect_partial_flow_archive,
     materialize_latest_or_merge_recovery,
@@ -31,7 +32,7 @@ class FlowRecoveryExhausted(RuntimeError):
 class FlowRecoveryWorkspace(Protocol):
     def capture_partial_inventory(
         self, paths: JobPaths, *, attempt: int
-    ) -> FlowPartialInventory: ...
+    ) -> FlowRecoveryCapture: ...
 
     def prepare_targeted_replacement(
         self, prompt: str, *, missing_index: int
@@ -117,7 +118,17 @@ class FlowRecoveryCoordinator:
             flow_generation_unresolved=False,
             flow_recovery_state=FlowRecoveryState.INVENTORY_PENDING,
         )
-        inventory = workspace.capture_partial_inventory(paths, attempt=0)
+        capture = workspace.capture_partial_inventory(paths, attempt=0)
+        if isinstance(capture, FlowRecoveryMaterialization):
+            self.store.patch_job(
+                current.id,
+                flow_recovery_state=FlowRecoveryState.NONE,
+                flow_missing_clip_index=0,
+                flow_recovery_baseline="",
+            )
+            self._report(current.id, "flow.inventory.6")
+            return capture.paths
+        inventory = capture
         current = self.store.patch_job(
             current.id,
             flow_missing_clip_index=inventory.missing_index,
@@ -139,7 +150,17 @@ class FlowRecoveryCoordinator:
         if current.flow_recovery_state is FlowRecoveryState.NONE:
             raise FlowRecoveryMappingError("no durable Flow recovery is pending")
         if current.flow_recovery_state is FlowRecoveryState.INVENTORY_PENDING:
-            inventory = workspace.capture_partial_inventory(paths, attempt=0)
+            capture = workspace.capture_partial_inventory(paths, attempt=0)
+            if isinstance(capture, FlowRecoveryMaterialization):
+                self.store.patch_job(
+                    current.id,
+                    flow_recovery_state=FlowRecoveryState.NONE,
+                    flow_missing_clip_index=0,
+                    flow_recovery_baseline="",
+                )
+                self._report(current.id, "flow.inventory.6")
+                return capture.paths
+            inventory = capture
             current = self.store.patch_job(
                 current.id,
                 flow_missing_clip_index=inventory.missing_index,

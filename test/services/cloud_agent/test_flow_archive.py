@@ -441,6 +441,36 @@ def test_five_semantic_clips_produce_one_missing_index(monkeypatch, tmp_path):
     ]
 
 
+def test_recovery_archive_with_all_six_clips_materializes_without_replacement(
+    monkeypatch, tmp_path
+):
+    flow_archive = _flow_archive_module()
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    snapshot = paths.flow_snapshots_dir / "partial-0.zip"
+    _write_archive(
+        snapshot,
+        [
+            (f"CLIP_{number}_title_timestamp.mp4", f"video-{number}".encode())
+            for number in range(1, 7)
+        ],
+    )
+    _accept_video(monkeypatch, flow_archive)
+
+    result = flow_archive.inspect_recovery_flow_archive(
+        snapshot,
+        paths,
+        min_size_bytes=1,
+        expected_width=1080,
+        expected_height=1920,
+    )
+
+    assert result.source == "latest_complete_archive"
+    assert result.paths == paths.flow_files
+    assert [path.read_bytes() for path in result.paths] == [
+        f"video-{number}".encode() for number in range(1, 7)
+    ]
+
+
 @pytest.mark.parametrize(
     "numbers",
     [(1, 2, 3, 4), (1, 2, 2, 4, 5), (1, 2, 3, 4, 7)],

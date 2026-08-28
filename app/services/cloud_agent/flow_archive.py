@@ -44,6 +44,9 @@ class FlowRecoveryMaterialization:
     source: Literal["latest_complete_archive", "merged_replacement_only"]
 
 
+FlowRecoveryCapture = FlowPartialInventory | FlowRecoveryMaterialization
+
+
 def validate_flow_source_video(path: Path, *, min_size_bytes: int):
     """Validate a Flow source without weakening the final-video contract."""
     probe = validate_video(path, min_size_bytes=min_size_bytes)
@@ -171,6 +174,44 @@ def inspect_partial_flow_archive(
         missing_index=missing[0],
         staged_files=staged_tuple,
         baseline_digest=_baseline_digest(numbers, staged_tuple),
+    )
+
+
+def inspect_recovery_flow_archive(
+    archive_path: Path,
+    paths: JobPaths,
+    *,
+    min_size_bytes: int,
+    expected_width: int,
+    expected_height: int,
+) -> FlowRecoveryCapture:
+    """Accept a completed six-clip recovery snapshot or inventory an exact five."""
+    archive_path = Path(archive_path)
+    try:
+        with ZipFile(archive_path) as archive:
+            numbers = tuple(sorted(_collect_semantic_members(archive)))
+    except FlowArchiveValidationError:
+        raise
+    except (BadZipFile, LargeZipFile, OSError, RuntimeError) as exc:
+        raise FlowArchiveValidationError(
+            f"invalid Flow recovery archive: {exc}"
+        ) from exc
+
+    if numbers == tuple(range(1, 7)):
+        return FlowRecoveryMaterialization(
+            paths=materialize_flow_archive(
+                archive_path,
+                paths,
+                min_size_bytes=min_size_bytes,
+                expected_width=expected_width,
+                expected_height=expected_height,
+            ),
+            source="latest_complete_archive",
+        )
+    return inspect_partial_flow_archive(
+        archive_path,
+        paths,
+        min_size_bytes=min_size_bytes,
     )
 
 

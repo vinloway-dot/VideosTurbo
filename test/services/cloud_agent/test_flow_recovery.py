@@ -147,6 +147,26 @@ def test_attempt_is_durable_before_paid_submit(tmp_path):
     assert store.get_job(job.id).flow_recovery_attempts == 1
 
 
+def test_complete_capture_skips_paid_replacement_and_clears_recovery_state(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _job_with_prompts(store)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare(job.id)
+    for path in paths.flow_files:
+        path.write_bytes(b"complete")
+    complete = FlowRecoveryMaterialization(
+        paths=paths.flow_files,
+        source="latest_complete_archive",
+    )
+    workspace = RecoveryWorkspace(store, job.id, complete, [])
+    coordinator = _coordinator(store, _inventory(paths), paths.flow_files)
+
+    result = coordinator.recover_incomplete_batch(job, workspace, paths)
+
+    assert result == paths.flow_files
+    assert workspace.submit_calls == 0
+    assert store.get_job(job.id).flow_recovery_state is FlowRecoveryState.NONE
+
+
 def test_unresolved_attempt_reconciles_without_second_submit(tmp_path):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     job = _job_with_prompts(store)
