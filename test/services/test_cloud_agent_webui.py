@@ -961,6 +961,316 @@ def test_successful_start_stores_job_for_production_status(monkeypatch):
     assert session_state["cloud_agent_job_lookup_id"] == "job-123"
 
 
+class _StartActionStreamlit:
+    def __init__(self, state):
+        self.session_state = state
+        self.errors = []
+        self.spinners = []
+
+    def button(self, _label, **_kwargs):
+        return True
+
+    def error(self, message):
+        self.errors.append(message)
+
+    def spinner(self, message):
+        self.spinners.append(message)
+        return nullcontext()
+
+
+def _queued_job():
+    return {
+        "id": "job-123",
+        "status": "QUEUED",
+        "checkpoint": "NONE",
+        "current_step": "queued",
+        "progress": 0,
+    }
+
+
+def test_continue_generates_missing_standard_draft_before_starting_job(monkeypatch):
+    state = {}
+    fake_streamlit = _StartActionStreamlit(state)
+    started = {}
+    prepared = {}
+    generated_plan = {
+        "target_words": 130,
+        "segments": [{"index": index} for index in range(1, 7)],
+    }
+
+    def prepare_draft(**kwargs):
+        prepared.update(kwargs)
+        return {
+            "script": "Generated narration",
+            "master_prompt": "Generated master prompt",
+            "clip_plan": generated_plan,
+        }
+
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(cloud_agent, "_prepare_draft", prepare_draft)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_start_and_store_job",
+        lambda inputs: started.update(inputs) or _queued_job(),
+    )
+
+    job = cloud_agent._render_start_action(
+        brief=cloud_agent._BriefSelection(
+            "Saturn's hexagon", 130, "English", "Standard Script", "Documentary"
+        ),
+        script="",
+        master_prompt="",
+        generation=cloud_agent._GenerationSelection(
+            "elevenlabs", "voice-1", 1.0, None
+        ),
+        ui_state=state,
+    )
+
+    assert job["status"] == "QUEUED"
+    assert prepared == {
+        "subject": "Saturn's hexagon",
+        "language": "English",
+        "target_words": 130,
+        "script": "",
+        "custom_system_prompt": "Documentary",
+    }
+    assert started["script"] == "Generated narration"
+    assert started["master_prompt"] == "Generated master prompt"
+    assert started["clip_plan"] == generated_plan
+    assert started["prepared_voice_fingerprint"] == ""
+    assert state["cloud_agent_pending_production_draft"]["script"] == (
+        "Generated narration"
+    )
+    assert fake_streamlit.errors == []
+
+
+def test_auto_preparation_defers_editor_widget_updates_until_next_run(monkeypatch):
+    state = {}
+    fake_streamlit = _StartActionStreamlit(state)
+    generated_plan = {
+        "target_words": 130,
+        "segments": [{"index": index} for index in range(1, 7)],
+    }
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_prepare_draft",
+        lambda **_kwargs: {
+            "script": "Generated narration",
+            "master_prompt": "Generated master prompt",
+            "clip_plan": generated_plan,
+        },
+    )
+
+    draft = cloud_agent._prepare_production_draft(
+        brief=cloud_agent._BriefSelection(
+            "Saturn's hexagon", 130, "English", "Standard Script", ""
+        ),
+        script="",
+        master_prompt="",
+        ui_state=state,
+    )
+
+    assert draft["script"] == "Generated narration"
+    assert "cloud_agent_script" not in state
+    assert "cloud_agent_master_prompt" not in state
+
+
+def test_continue_rebuilds_plan_from_edited_script_and_discards_stale_voice(monkeypatch):
+    state = {
+        "cloud_agent_script": "Edited narration",
+        "cloud_agent_draft_script": "Original narration",
+        "cloud_agent_master_prompt": "Original master prompt",
+        "cloud_agent_clip_plan": {
+            "target_words": 130,
+            "segments": [{"index": index} for index in range(1, 7)],
+        },
+        "cloud_agent_research_draft_id": "research-1",
+        "cloud_agent_research_sources": [{"url": "https://example.com"}],
+        "cloud_agent_research_accounting": {"provider_rounds": 2},
+    }
+    fake_streamlit = _StartActionStreamlit(state)
+    started = {}
+    refreshed_plan = {
+        "target_words": 130,
+        "segments": [{"index": index} for index in range(1, 7)],
+    }
+
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_prepare_draft",
+        lambda **kwargs: {
+            "script": kwargs["script"],
+            "master_prompt": "Refreshed master prompt",
+            "clip_plan": refreshed_plan,
+        },
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_start_and_store_job",
+        lambda inputs: started.update(inputs) or _queued_job(),
+    )
+
+    job = cloud_agent._render_start_action(
+        brief=cloud_agent._BriefSelection(
+            "Saturn's hexagon", 130, "English", "Research Script", ""
+        ),
+        script="Edited narration",
+        master_prompt="Original master prompt",
+        generation=cloud_agent._GenerationSelection(
+            "elevenlabs",
+            "voice-1",
+            1.0,
+            {
+                "fingerprint": "f" * 64,
+                "script": "Original narration",
+                "tts_provider": "elevenlabs",
+                "voice_id": "voice-1",
+                "voice_speed": 1.0,
+            },
+        ),
+        ui_state=state,
+    )
+
+    assert job["status"] == "QUEUED"
+    assert started["script"] == "Edited narration"
+    assert started["master_prompt"] == "Refreshed master prompt"
+    assert started["prepared_voice_fingerprint"] == ""
+    assert started["research_draft_id"] == ""
+    assert state["cloud_agent_pending_production_draft"]["research_draft_id"] == ""
+    cloud_agent._apply_pending_production_draft(state)
+    assert "cloud_agent_research_draft_id" not in state
+    assert state["cloud_agent_script"] == "Edited narration"
+
+
+def test_continue_reuses_matching_draft_and_prepared_voice(monkeypatch):
+    plan = {
+        "target_words": 130,
+        "segments": [{"index": index} for index in range(1, 7)],
+    }
+    state = {
+        "cloud_agent_draft_script": "Ready narration",
+        "cloud_agent_master_prompt": "Ready master prompt",
+        "cloud_agent_clip_plan": plan,
+        "cloud_agent_research_draft_id": "research-1",
+    }
+    fake_streamlit = _StartActionStreamlit(state)
+    started = {}
+    prepared_voice = {
+        "fingerprint": "f" * 64,
+        "script": "Ready narration",
+        "tts_provider": "elevenlabs",
+        "voice_id": "voice-1",
+        "voice_speed": 1.0,
+    }
+
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_prepare_draft",
+        lambda **_kwargs: pytest.fail("matching draft must be reused"),
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_start_and_store_job",
+        lambda inputs: started.update(inputs) or _queued_job(),
+    )
+
+    job = cloud_agent._render_start_action(
+        brief=cloud_agent._BriefSelection(
+            "Saturn's hexagon", 130, "English", "Research Script", ""
+        ),
+        script="Ready narration",
+        master_prompt="Ready master prompt",
+        generation=cloud_agent._GenerationSelection(
+            "elevenlabs", "voice-1", 1.0, prepared_voice
+        ),
+        ui_state=state,
+    )
+
+    assert job["status"] == "QUEUED"
+    assert started["prepared_voice_fingerprint"] == "f" * 64
+    assert started["research_draft_id"] == "research-1"
+
+
+def test_continue_generates_missing_research_draft_before_starting_job(monkeypatch):
+    state = {
+        "cloud_agent_research_source_url_count": 2,
+        "cloud_agent_research_source_url_1": "https://example.com/one",
+        "cloud_agent_research_source_url_2": "https://example.com/two.pdf",
+        "cloud_agent_research_openrouter_model": "Custom Model ID",
+        "cloud_agent_research_openrouter_custom_model_id": "openai/gpt-test",
+        "cloud_agent_research_custom_system_prompt": "Cite reliable facts.",
+        "cloud_agent_research_allow_citations": True,
+    }
+    fake_streamlit = _StartActionStreamlit(state)
+    researched = {}
+    started = {}
+    plan = {
+        "target_words": 130,
+        "segments": [{"index": index} for index in range(1, 7)],
+    }
+
+    def prepare_research_draft(**kwargs):
+        researched.update(kwargs)
+        return {
+            "research_draft_id": "research-1",
+            "script": "Research narration",
+            "master_prompt": "Research master prompt",
+            "clip_plan": plan,
+            "sources": [{"url": "https://example.com/one"}],
+            "accounting": {"provider_rounds": 2},
+        }
+
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(
+        cloud_agent, "_prepare_research_draft", prepare_research_draft
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_start_and_store_job",
+        lambda inputs: started.update(inputs) or _queued_job(),
+    )
+
+    job = cloud_agent._render_start_action(
+        brief=cloud_agent._BriefSelection(
+            "Enceladus",
+            130,
+            "English",
+            "Research Script",
+            "",
+            "openrouter",
+            "Custom Model ID",
+        ),
+        script="",
+        master_prompt="",
+        generation=cloud_agent._GenerationSelection(
+            "elevenlabs", "voice-1", 1.0, None
+        ),
+        ui_state=state,
+    )
+
+    assert job["status"] == "QUEUED"
+    assert researched == {
+        "subject": "Enceladus",
+        "language": "English",
+        "target_words": 130,
+        "provider": "openrouter",
+        "model_choice": "Custom Model ID",
+        "custom_model_id": "openai/gpt-test",
+        "source_urls": [
+            "https://example.com/one",
+            "https://example.com/two.pdf",
+        ],
+        "custom_system_prompt": "Cite reliable facts.",
+        "allow_citations": True,
+    }
+    assert started["script"] == "Research narration"
+    assert started["research_draft_id"] == "research-1"
+    assert started["prepared_voice_fingerprint"] == ""
+
+
 def test_new_session_restores_the_latest_job_for_controls(monkeypatch):
     session_state = {}
     monkeypatch.setattr(cloud_agent.st, "session_state", session_state)

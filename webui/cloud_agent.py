@@ -1396,6 +1396,142 @@ def _render_generation_setup(
         )
 
 
+def _production_draft_is_current(*, brief, script, master_prompt, ui_state):
+    clip_plan = ui_state.get("cloud_agent_clip_plan")
+    try:
+        plan_target_words = int((clip_plan or {}).get("target_words"))
+    except (TypeError, ValueError):
+        plan_target_words = 0
+    return bool(
+        script
+        and master_prompt.strip()
+        and clip_plan
+        and str(ui_state.get("cloud_agent_draft_script", "")).strip() == script
+        and plan_target_words == brief.words
+    )
+
+
+def _prepare_production_draft(*, brief, script, master_prompt, ui_state):
+    normalized_script = str(script or "").strip()
+    if _production_draft_is_current(
+        brief=brief,
+        script=normalized_script,
+        master_prompt=master_prompt,
+        ui_state=ui_state,
+    ):
+        return {
+            "script": normalized_script,
+            "master_prompt": master_prompt,
+            "clip_plan": ui_state["cloud_agent_clip_plan"],
+            "research_draft_id": str(
+                ui_state.get("cloud_agent_research_draft_id", "") or ""
+            ),
+            "pending_state": None,
+        }
+
+    with st.spinner("กำลังเตรียมสคริปต์และแผนการผลิต..."):
+        if normalized_script:
+            draft = _prepare_draft(
+                subject=brief.subject,
+                language=brief.language,
+                target_words=brief.words,
+                script=normalized_script,
+                custom_system_prompt=brief.custom_system_prompt,
+            )
+            retain_research = (
+                str(draft.get("script", "")).strip()
+                == str(ui_state.get("cloud_agent_draft_script", "")).strip()
+            )
+            research_draft_id = (
+                str(ui_state.get("cloud_agent_research_draft_id", "") or "")
+                if retain_research
+                else ""
+            )
+        elif brief.script_mode == "Research Script":
+            source_count = _research_url_row_count(
+                ui_state.get("cloud_agent_research_source_url_count", 1)
+            )
+            source_urls = _research_source_urls(
+                [
+                    ui_state.get(f"cloud_agent_research_source_url_{index}", "")
+                    for index in range(1, source_count + 1)
+                ]
+            )
+            draft = _prepare_research_draft(
+                subject=brief.subject,
+                language=brief.language,
+                target_words=brief.words,
+                provider=brief.research_provider,
+                model_choice=brief.research_model,
+                custom_model_id=_research_custom_model_id(
+                    brief.research_provider, ui_state
+                ),
+                source_urls=source_urls,
+                custom_system_prompt=str(
+                    ui_state.get("cloud_agent_research_custom_system_prompt", "")
+                    or ""
+                ),
+                allow_citations=bool(
+                    ui_state.get("cloud_agent_research_allow_citations", False)
+                ),
+            )
+            research_draft_id = str(draft["research_draft_id"])
+        else:
+            draft = _prepare_draft(
+                subject=brief.subject,
+                language=brief.language,
+                target_words=brief.words,
+                script="",
+                custom_system_prompt=brief.custom_system_prompt,
+            )
+            research_draft_id = ""
+
+    research_sources = []
+    research_accounting = {}
+    if research_draft_id:
+        research_sources = list(
+            draft.get("sources")
+            if "sources" in draft
+            else ui_state.get("cloud_agent_research_sources")
+            or []
+        )
+        research_accounting = dict(
+            draft.get("accounting")
+            if "accounting" in draft
+            else ui_state.get("cloud_agent_research_accounting")
+            or {}
+        )
+    pending_state = {
+        "script": str(draft["script"]).strip(),
+        "master_prompt": str(draft["master_prompt"]).strip(),
+        "clip_plan": draft["clip_plan"],
+        "research_draft_id": research_draft_id,
+        "research_sources": research_sources,
+        "research_accounting": research_accounting,
+    }
+
+    return {
+        **pending_state,
+        "pending_state": pending_state,
+    }
+
+
+def _apply_pending_production_draft(ui_state):
+    pending = ui_state.pop("cloud_agent_pending_production_draft", None)
+    if not isinstance(pending, dict):
+        return
+    _store_draft(pending)
+    research_draft_id = str(pending.get("research_draft_id", "") or "")
+    if research_draft_id:
+        ui_state["cloud_agent_research_draft_id"] = research_draft_id
+        ui_state["cloud_agent_research_sources"] = list(
+            pending.get("research_sources") or []
+        )
+        ui_state["cloud_agent_research_accounting"] = dict(
+            pending.get("research_accounting") or {}
+        )
+
+
 def _render_start_action(*, brief, script, master_prompt, generation, ui_state):
     if st.button(
         "Continue to production",
@@ -1405,38 +1541,40 @@ def _render_start_action(*, brief, script, master_prompt, generation, ui_state):
         icon_position="right",
         width="stretch",
     ):
-        clip_plan = ui_state.get("cloud_agent_clip_plan")
-        draft_script = str(ui_state.get("cloud_agent_draft_script", ""))
-        research_draft_id = str(
-            ui_state.get("cloud_agent_research_draft_id", "") or ""
-        )
         provider = generation.provider
         voice = generation.voice
         speed = generation.speed
         prepared_voice = generation.prepared_voice
-        if not clip_plan or draft_script != script.strip():
-            st.error("Generate or refresh the draft before starting the job.")
+        if not brief.subject.strip():
+            st.error("Video Subject is required before starting the job.")
         elif not voice.strip():
             st.error("Voice is required before starting the job.")
         else:
             try:
+                draft = _prepare_production_draft(
+                    brief=brief,
+                    script=script,
+                    master_prompt=master_prompt,
+                    ui_state=ui_state,
+                )
+                resolved_script = draft["script"]
                 job = _start_and_store_job(
                     {
                         "subject": brief.subject,
                         "target_words": brief.words,
                         "language": brief.language,
-                        "script": script,
-                        "master_prompt": master_prompt,
-                        "clip_plan": clip_plan,
+                        "script": resolved_script,
+                        "master_prompt": draft["master_prompt"],
+                        "clip_plan": draft["clip_plan"],
                         "tts_provider": provider,
                         "voice_id": voice,
                         "voice_speed": speed,
-                        "research_draft_id": research_draft_id,
+                        "research_draft_id": draft["research_draft_id"],
                         "prepared_voice_fingerprint": (
                             str(prepared_voice.get("fingerprint") or "")
                             if _prepared_voice_matches(
                                 prepared_voice,
-                                script=script,
+                                script=resolved_script,
                                 provider=provider,
                                 voice=voice,
                                 speed=speed,
@@ -1447,6 +1585,13 @@ def _render_start_action(*, brief, script, master_prompt, generation, ui_state):
                 )
                 if message := _job_error_message(job):
                     st.error(message)
+                if draft["pending_state"]:
+                    ui_state["cloud_agent_pending_production_draft"] = draft[
+                        "pending_state"
+                    ]
+                    rerun = getattr(st, "rerun", None)
+                    if callable(rerun):
+                        rerun()
                 return job
             except requests.RequestException as exc:
                 st.error(_api_error_message(exc))
@@ -1455,6 +1600,7 @@ def _render_start_action(*, brief, script, master_prompt, generation, ui_state):
 
 def render_cloud_agent_panel():
     ui_state = getattr(st, "session_state", {})
+    _apply_pending_production_draft(ui_state)
     defaults = {
         "tts_provider": "azure-tts-v1",
         "voice_id": "",
