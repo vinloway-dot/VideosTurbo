@@ -14,6 +14,7 @@ def test_prepare_creates_expected_directories_without_placeholder_media(tmp_path
     assert paths.audio_dir == tmp_path / "job-123" / "audio"
     assert paths.flow_dir == tmp_path / "job-123" / "flow"
     assert paths.flow_downloads_dir == paths.flow_dir / "downloads"
+    assert paths.flow_snapshots_dir == paths.flow_downloads_dir / "snapshots"
     assert paths.flow_staging_dir == paths.flow_dir / "staging"
     assert paths.flow_quarantine_dir == paths.flow_dir / "quarantine"
     assert paths.screenshots_dir == tmp_path / "job-123" / "screenshots"
@@ -38,6 +39,7 @@ def test_prepare_creates_expected_directories_without_placeholder_media(tmp_path
     assert paths.audio_dir.is_dir()
     assert paths.flow_dir.is_dir()
     assert paths.flow_downloads_dir.is_dir()
+    assert paths.flow_snapshots_dir.is_dir()
     assert paths.flow_staging_dir.is_dir()
     assert paths.flow_quarantine_dir.is_dir()
     assert paths.screenshots_dir.is_dir()
@@ -46,6 +48,21 @@ def test_prepare_creates_expected_directories_without_placeholder_media(tmp_path
     assert not paths.voice_file.exists()
     assert not paths.final_file.exists()
     assert all(not path.exists() for path in paths.flow_files)
+
+
+def test_flow_snapshot_paths_are_attempt_scoped_and_bounded(tmp_path):
+    storage = CloudJobStorage(tmp_path)
+    paths = storage.prepare("job-123")
+
+    assert storage.flow_snapshot_path(
+        "job-123", phase="partial", attempt=0
+    ) == paths.flow_snapshots_dir / "partial-0.zip"
+    assert storage.flow_snapshot_path(
+        "job-123", phase="replacement", attempt=2
+    ) == paths.flow_snapshots_dir / "replacement-2.zip"
+
+    with pytest.raises(ValueError):
+        storage.flow_snapshot_path("job-123", phase="partial", attempt=3)
 
 
 def test_write_inputs_writes_utf8_script_and_master_prompt(tmp_path):

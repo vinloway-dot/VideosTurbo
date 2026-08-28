@@ -410,6 +410,182 @@ def test_archive_media_failure_is_typed_and_exposes_no_canonical_set(monkeypatch
     assert all(not path.exists() for path in paths.flow_files)
 
 
+def test_five_semantic_clips_produce_one_missing_index(monkeypatch, tmp_path):
+    flow_archive = _flow_archive_module()
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    snapshot = paths.flow_snapshots_dir / "partial-0.zip"
+    _write_archive(
+        snapshot,
+        [
+            (f"clip {number}.mp4", f"video-{number}".encode())
+            for number in (1, 3, 4, 5, 6)
+        ],
+    )
+    _accept_video(monkeypatch, flow_archive)
+
+    result = flow_archive.inspect_partial_flow_archive(
+        snapshot,
+        paths,
+        min_size_bytes=1,
+    )
+
+    assert result.missing_index == 2
+    assert result.semantic_numbers == (1, 3, 4, 5, 6)
+    assert len(result.baseline_digest) == 64
+    assert [path.read_bytes() for path in result.staged_files] == [
+        b"video-1",
+        b"video-3",
+        b"video-4",
+        b"video-5",
+        b"video-6",
+    ]
+
+
+@pytest.mark.parametrize(
+    "numbers",
+    [(1, 2, 3, 4), (1, 2, 2, 4, 5), (1, 2, 3, 4, 7)],
+)
+def test_partial_inventory_rejects_non_exact_safe_five(
+    monkeypatch, tmp_path, numbers
+):
+    flow_archive = _flow_archive_module()
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    snapshot = paths.flow_snapshots_dir / "partial-0.zip"
+    seen = set()
+    members = []
+    for position, number in enumerate(numbers):
+        name = (
+            f"CLIP_{number}_duplicate.mp4"
+            if number in seen
+            else f"clip {number}.mp4"
+        )
+        members.append((name, f"video-{position}".encode()))
+        seen.add(number)
+    _write_archive(
+        snapshot,
+        members,
+    )
+    _accept_video(monkeypatch, flow_archive)
+
+    with pytest.raises(FlowArchiveValidationError):
+        flow_archive.inspect_partial_flow_archive(
+            snapshot,
+            paths,
+            min_size_bytes=1,
+        )
+
+
+def test_complete_second_archive_wins_without_merge(monkeypatch, tmp_path):
+    flow_archive = _flow_archive_module()
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    partial = paths.flow_snapshots_dir / "partial-0.zip"
+    latest = paths.flow_snapshots_dir / "replacement-1.zip"
+    _write_archive(
+        partial,
+        [(f"clip {n}.mp4", f"old-{n}".encode()) for n in (1, 3, 4, 5, 6)],
+    )
+    _write_archive(
+        latest,
+        [(f"clip {n}.mp4", f"new-{n}".encode()) for n in range(1, 7)],
+    )
+    _accept_video(monkeypatch, flow_archive)
+    inventory = flow_archive.inspect_partial_flow_archive(
+        partial, paths, min_size_bytes=1
+    )
+    for path in inventory.staged_files:
+        path.unlink()
+
+    result = flow_archive.materialize_latest_or_merge_recovery(
+        latest,
+        inventory,
+        paths,
+        min_size_bytes=1,
+        expected_width=1080,
+        expected_height=1920,
+    )
+
+    assert result.source == "latest_complete_archive"
+    assert [path.read_bytes() for path in paths.flow_files] == [
+        f"new-{n}".encode() for n in range(1, 7)
+    ]
+
+
+def test_replacement_only_archive_merges_with_immutable_survivors(
+    monkeypatch, tmp_path
+):
+    flow_archive = _flow_archive_module()
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    partial = paths.flow_snapshots_dir / "partial-0.zip"
+    replacement = paths.flow_snapshots_dir / "replacement-1.zip"
+    _write_archive(
+        partial,
+        [(f"clip {n}.mp4", f"old-{n}".encode()) for n in (1, 3, 4, 5, 6)],
+    )
+    _write_archive(replacement, [("clip 2.mp4", b"new-2")])
+    _accept_video(monkeypatch, flow_archive)
+    inventory = flow_archive.inspect_partial_flow_archive(
+        partial, paths, min_size_bytes=1
+    )
+
+    result = flow_archive.materialize_latest_or_merge_recovery(
+        replacement,
+        inventory,
+        paths,
+        min_size_bytes=1,
+        expected_width=1080,
+        expected_height=1920,
+    )
+
+    assert result.source == "merged_replacement_only"
+    assert [path.read_bytes() for path in paths.flow_files] == [
+        b"old-1",
+        b"new-2",
+        b"old-3",
+        b"old-4",
+        b"old-5",
+        b"old-6",
+    ]
+
+
+def test_replacement_validation_failure_keeps_existing_canonical_files(
+    monkeypatch, tmp_path
+):
+    flow_archive = _flow_archive_module()
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    partial = paths.flow_snapshots_dir / "partial-0.zip"
+    replacement = paths.flow_snapshots_dir / "replacement-1.zip"
+    _write_archive(
+        partial,
+        [(f"clip {n}.mp4", f"old-{n}".encode()) for n in (1, 3, 4, 5, 6)],
+    )
+    _write_archive(replacement, [("clip 2.mp4", b"invalid")])
+    _accept_video(monkeypatch, flow_archive)
+    inventory = flow_archive.inspect_partial_flow_archive(
+        partial, paths, min_size_bytes=1
+    )
+    for path in paths.flow_files:
+        path.write_bytes(b"canonical-original")
+
+    def reject_replacement(path, **_kwargs):
+        if Path(path).read_bytes() == b"invalid":
+            raise MediaValidationError("invalid replacement")
+        return _video_probe(Path(path))
+
+    monkeypatch.setattr(flow_archive, "validate_video", reject_replacement)
+
+    with pytest.raises(FlowArchiveValidationError):
+        flow_archive.materialize_latest_or_merge_recovery(
+            replacement,
+            inventory,
+            paths,
+            min_size_bytes=1,
+            expected_width=1080,
+            expected_height=1920,
+        )
+
+    assert all(path.read_bytes() == b"canonical-original" for path in paths.flow_files)
+
+
 def test_recovery_prefers_complete_valid_canonical_set(monkeypatch, tmp_path):
     flow_archive = _flow_archive_module()
     storage = CloudJobStorage(tmp_path / "jobs")

@@ -5,6 +5,8 @@ import re
 import shutil
 import stat
 import unicodedata
+from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal, NamedTuple
 from uuid import uuid4
@@ -25,6 +27,21 @@ _VENDOR_SEMANTIC_CLIP_RE = re.compile(r"^clip_([1-6])_.+\.mp4$", re.IGNORECASE)
 class FlowArtifactRecovery(NamedTuple):
     paths: tuple[Path, ...]
     source: Literal["canonical", "archive", "staging"]
+
+
+@dataclass(frozen=True)
+class FlowPartialInventory:
+    snapshot_path: Path
+    semantic_numbers: tuple[int, ...]
+    missing_index: int
+    staged_files: tuple[Path, ...]
+    baseline_digest: str
+
+
+@dataclass(frozen=True)
+class FlowRecoveryMaterialization:
+    paths: tuple[Path, ...]
+    source: Literal["latest_complete_archive", "merged_replacement_only"]
 
 
 def validate_flow_source_video(path: Path, *, min_size_bytes: int):
@@ -64,7 +81,7 @@ def _validate_member_safety(member: ZipInfo) -> None:
         raise FlowArchiveValidationError("unsafe Flow archive member")
 
 
-def _semantic_members(archive: ZipFile) -> dict[int, ZipInfo]:
+def _collect_semantic_members(archive: ZipFile) -> dict[int, ZipInfo]:
     semantic_members = {}
     for member in archive.infolist():
         _validate_member_safety(member)
@@ -84,9 +101,77 @@ def _semantic_members(archive: ZipFile) -> dict[int, ZipInfo]:
             raise FlowArchiveValidationError(f"duplicate semantic clip {number}")
         semantic_members[number] = member
 
+    return semantic_members
+
+
+def _semantic_members(archive: ZipFile) -> dict[int, ZipInfo]:
+    semantic_members = _collect_semantic_members(archive)
     if set(semantic_members) != set(range(1, 7)):
         raise FlowArchiveValidationError("archive must contain semantic clips 1 through 6")
     return semantic_members
+
+
+def _baseline_digest(numbers: tuple[int, ...], files: tuple[Path, ...]) -> str:
+    if len(numbers) != len(files):
+        raise FlowArchiveValidationError("partial inventory is inconsistent")
+    digest = sha256()
+    for number, path in zip(numbers, files, strict=True):
+        if path.is_symlink() or not path.is_file():
+            raise FlowArchiveValidationError("partial survivor is unavailable")
+        digest.update(f"clip:{number}\0".encode())
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def inspect_partial_flow_archive(
+    archive_path: Path,
+    paths: JobPaths,
+    *,
+    min_size_bytes: int,
+) -> FlowPartialInventory:
+    archive_path = Path(archive_path)
+    if archive_path.is_symlink() or not archive_path.is_file():
+        raise FlowArchiveValidationError("partial Flow archive is unavailable")
+    staging_dir = paths.flow_staging_dir / f"partial-{uuid4().hex}"
+    try:
+        with ZipFile(archive_path) as archive:
+            semantic_members = _collect_semantic_members(archive)
+            numbers = tuple(sorted(semantic_members))
+            if len(numbers) != 5 or not set(numbers) < set(range(1, 7)):
+                raise FlowArchiveValidationError(
+                    "partial archive must contain exactly five unique clips"
+                )
+            missing = tuple(set(range(1, 7)) - set(numbers))
+            if len(missing) != 1:
+                raise FlowArchiveValidationError("partial archive has an ambiguous gap")
+            staging_dir.mkdir(parents=True, exist_ok=False)
+            staged_files = []
+            for number in numbers:
+                staged_path = staging_dir / f"clip {number}.mp4"
+                with (
+                    archive.open(semantic_members[number]) as source,
+                    staged_path.open("wb") as target,
+                ):
+                    shutil.copyfileobj(source, target)
+                validate_flow_source_video(staged_path, min_size_bytes=min_size_bytes)
+                staged_files.append(staged_path)
+    except FlowArchiveValidationError:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    except (BadZipFile, LargeZipFile, MediaValidationError, OSError, RuntimeError) as exc:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise FlowArchiveValidationError(f"invalid partial Flow archive: {exc}") from exc
+
+    staged_tuple = tuple(staged_files)
+    return FlowPartialInventory(
+        snapshot_path=archive_path,
+        semantic_numbers=numbers,
+        missing_index=missing[0],
+        staged_files=staged_tuple,
+        baseline_digest=_baseline_digest(numbers, staged_tuple),
+    )
 
 
 def _materialize_staged_files(
@@ -144,6 +229,87 @@ def materialize_flow_archive(
         raise FlowArchiveValidationError(f"invalid Flow archive: {exc}") from exc
 
     return _materialize_staged_files(staged_files, paths)
+
+
+def materialize_latest_or_merge_recovery(
+    archive_path: Path,
+    prior_inventory: FlowPartialInventory,
+    paths: JobPaths,
+    *,
+    min_size_bytes: int,
+    expected_width: int,
+    expected_height: int,
+) -> FlowRecoveryMaterialization:
+    validation = {
+        "min_size_bytes": min_size_bytes,
+        "expected_width": expected_width,
+        "expected_height": expected_height,
+    }
+    try:
+        materialized = materialize_flow_archive(archive_path, paths, **validation)
+    except FlowArchiveValidationError:
+        pass
+    else:
+        return FlowRecoveryMaterialization(
+            paths=materialized,
+            source="latest_complete_archive",
+        )
+
+    if (
+        _baseline_digest(
+            prior_inventory.semantic_numbers,
+            prior_inventory.staged_files,
+        )
+        != prior_inventory.baseline_digest
+    ):
+        raise FlowArchiveValidationError("partial survivor baseline changed")
+
+    replacement_dir = paths.flow_staging_dir / f"replacement-{uuid4().hex}"
+    try:
+        with ZipFile(archive_path) as archive:
+            semantic_members = _collect_semantic_members(archive)
+            if set(semantic_members) != {prior_inventory.missing_index}:
+                raise FlowArchiveValidationError(
+                    "replacement archive must contain only the missing clip"
+                )
+            replacement_dir.mkdir(parents=True, exist_ok=False)
+            replacement_path = (
+                replacement_dir / f"clip {prior_inventory.missing_index}.mp4"
+            )
+            with (
+                archive.open(semantic_members[prior_inventory.missing_index]) as source,
+                replacement_path.open("wb") as target,
+            ):
+                shutil.copyfileobj(source, target)
+            validate_flow_source_video(
+                replacement_path,
+                min_size_bytes=min_size_bytes,
+            )
+
+        survivors = dict(
+            zip(
+                prior_inventory.semantic_numbers,
+                prior_inventory.staged_files,
+                strict=True,
+            )
+        )
+        staged_files = [
+            replacement_path if number == prior_inventory.missing_index else survivors[number]
+            for number in range(1, 7)
+        ]
+        if not _validate_video_set(staged_files, **validation):
+            raise FlowArchiveValidationError("merged Flow recovery set is invalid")
+        materialized = _materialize_staged_files(staged_files, paths)
+    except FlowArchiveValidationError:
+        shutil.rmtree(replacement_dir, ignore_errors=True)
+        raise
+    except (BadZipFile, LargeZipFile, MediaValidationError, OSError, RuntimeError) as exc:
+        shutil.rmtree(replacement_dir, ignore_errors=True)
+        raise FlowArchiveValidationError(f"invalid Flow replacement archive: {exc}") from exc
+    return FlowRecoveryMaterialization(
+        paths=materialized,
+        source="merged_replacement_only",
+    )
 
 
 def _validate_video_set(

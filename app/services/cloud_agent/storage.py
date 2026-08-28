@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
-from typing import Iterator
+from typing import Iterator, Literal
 from uuid import uuid4
 
 from app.utils import utils
@@ -19,6 +19,7 @@ class JobPaths:
     audio_dir: Path
     flow_dir: Path
     flow_downloads_dir: Path
+    flow_snapshots_dir: Path
     flow_staging_dir: Path
     flow_quarantine_dir: Path
     screenshots_dir: Path
@@ -60,6 +61,7 @@ class CloudJobStorage:
         audio_dir = job_dir / "audio"
         flow_dir = job_dir / "flow"
         flow_downloads_dir = flow_dir / "downloads"
+        flow_snapshots_dir = flow_downloads_dir / "snapshots"
         flow_staging_dir = flow_dir / "staging"
         flow_quarantine_dir = flow_dir / "quarantine"
         screenshots_dir = job_dir / "screenshots"
@@ -72,6 +74,7 @@ class CloudJobStorage:
             audio_dir=audio_dir,
             flow_dir=flow_dir,
             flow_downloads_dir=flow_downloads_dir,
+            flow_snapshots_dir=flow_snapshots_dir,
             flow_staging_dir=flow_staging_dir,
             flow_quarantine_dir=flow_quarantine_dir,
             screenshots_dir=screenshots_dir,
@@ -149,6 +152,7 @@ class CloudJobStorage:
             paths.audio_dir,
             paths.flow_dir,
             paths.flow_downloads_dir,
+            paths.flow_snapshots_dir,
             paths.flow_staging_dir,
             paths.flow_quarantine_dir,
             paths.screenshots_dir,
@@ -157,6 +161,19 @@ class CloudJobStorage:
         ):
             directory.mkdir(parents=True, exist_ok=True)
         return paths
+
+    def flow_snapshot_path(
+        self,
+        job_id: str,
+        *,
+        phase: Literal["partial", "replacement"],
+        attempt: int,
+    ) -> Path:
+        if phase not in {"partial", "replacement"}:
+            raise ValueError("invalid Flow snapshot phase")
+        if attempt < 0 or attempt > 2:
+            raise ValueError("invalid Flow snapshot attempt")
+        return self.prepare(job_id).flow_snapshots_dir / f"{phase}-{attempt}.zip"
 
     def write_inputs(self, job_id: str, script: str, master_prompt: str) -> JobPaths:
         paths = self.prepare(job_id)
