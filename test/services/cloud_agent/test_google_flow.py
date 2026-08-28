@@ -2495,6 +2495,27 @@ def test_google_flow_submits_rename_from_fallback_composer_without_agent_button(
     assert ("click", "fallback_generate") in page.actions
 
 
+def test_google_flow_submits_rename_from_fallback_when_agent_panel_composer_is_missing():
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        agent_pressed=True,
+        agent_prompt_count=0,
+        fallback_composer_available=True,
+    )
+    client, _ = _client(page)
+
+    client._submit_agent_prompt(page, google_flow.RENAME_CLIPS_INSTRUCTION)
+
+    assert (
+        "fill",
+        "fallback_prompt",
+        google_flow.RENAME_CLIPS_INSTRUCTION,
+    ) in page.actions
+    assert ("click", "fallback_generate") in page.actions
+    assert not any(action[0] == "fill" and action[1] == "prompt" for action in page.actions)
+    assert page.actions.count(("click", "fallback_generate")) == 1
+
+
 def test_ensure_agent_active_fails_closed_for_unknown_toggle_state():
     page = FakePage(
         progress_html=["<div>Generation progress 6 / 6</div>"],

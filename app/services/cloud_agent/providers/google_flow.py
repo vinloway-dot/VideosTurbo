@@ -885,10 +885,12 @@ class GoogleFlowClient:
     @classmethod
     def _active_or_fallback_command_composer(cls, page: Any) -> AgentComposer:
         try:
-            cls._agent_control(page)
-        except FlowWorkspaceVerificationError:
-            return cls._fallback_command_composer(page)
-        return cls._active_agent_composer(page)
+            return cls._active_agent_composer(page)
+        except FlowWorkspaceVerificationError as active_error:
+            try:
+                return cls._fallback_command_composer(page)
+            except FlowWorkspaceVerificationError as fallback_error:
+                raise active_error from fallback_error
 
     def _ensure_agent_active(self, page: Any) -> AgentComposer:
         """Return a verified Agent composer without toggling an active Agent off."""
@@ -904,7 +906,7 @@ class GoogleFlowClient:
             ) from exc
 
         if state == "true":
-            return self._active_agent_composer(page)
+            return self._active_or_fallback_command_composer(page)
         if state != "false":
             raise FlowWorkspaceVerificationError(
                 "Google Flow Agent state is unknown"
@@ -914,7 +916,7 @@ class GoogleFlowClient:
         deadline = time.monotonic() + self.editor_ready_timeout_seconds
         while True:
             try:
-                return self._active_agent_composer(page)
+                return self._active_or_fallback_command_composer(page)
             except FlowWorkspaceVerificationError:
                 pass
             if time.monotonic() >= deadline:
