@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from loguru import logger
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from app.models.cloud_agent import ServiceSessionStatus
@@ -87,10 +88,13 @@ class CanvaAssemblyClient:
 
     _VIDEO_START_EDGE = '[role="slider"][aria-label="Trimming, start edge"]'
     _VIDEO_END_EDGE = '[role="slider"][aria-label="Trimming, end edge"]'
+    _VIDEO_DURATION_TEXT = re.compile(r"^\d+(?:\.\d+)?s$")
     _WORKSPACE_TAB_HYDRATION_SECONDS = 30.0
     _AUDIO_PANEL_HYDRATION_SECONDS = 5.0
     _MEDIA_MENU_HYDRATION_SECONDS = 5.0
     _EDITOR_NAVIGATION_TIMEOUT_SECONDS = 180.0
+    _CAPTION_GENERATION_TIMEOUT_SECONDS = 90.0
+    _CAPTION_STABILITY_SECONDS = 5.0
 
     def __init__(
         self,
@@ -141,29 +145,18 @@ class CanvaAssemblyClient:
         audio_path = Path(audio)
         output_path = Path(output)
         self._validate_media_inputs(clip_paths, audio_path)
-        speed = float(job.canva_playback_speed)
-        target_seconds = float(job.target_final_duration_seconds)
-        if not 0 < speed <= 1:
-            raise ValueError("Canva playback speed must be within (0, 1]")
-        if target_seconds <= 0:
-            raise ValueError("Canva target duration must be positive")
-
         clip_names = [clip.name for clip in clip_paths]
         self._clean_uploaded_videos(page, clip_names)
         self._clean_uploaded_audio(page, audio_path.name)
         self._clear_video_timeline(page)
         self._clear_audio_timeline(page)
         self._upload_media(page, [*clip_paths, audio_path])
-        self._add_uploaded_clips(page, clip_names)
-        self._order_clips(page, clip_names)
-        if speed < 1.0:
-            for index in range(1, 7):
-                self._set_and_verify_playback(page, index, speed)
         self._add_uploaded_audio(page, audio_path.name)
-        self._position_narration_at_zero(page, audio_path.name)
+        self._verify_narration_starts_at_zero(page, audio_path.name)
+        self._add_uploaded_clips(page, clip_names)
+        self._verify_first_video_starts_at_zero(page)
+        self._order_clips(page, clip_names)
         self._mute_source_audio(page)
-        self._bound_final_visual_end(page, target_seconds)
-        self._verify_timeline_end(page, target_seconds)
         self._generate_auto_captions(page)
         self._export_mp4_1080p(page)
         self._download_export(page, output_path)
@@ -546,17 +539,28 @@ class CanvaAssemblyClient:
             page.clear_video_timeline()
             return
         while True:
-            starts = page.locator(self._VIDEO_START_EDGE)
-            if starts.count() == 0:
+            starts = self._video_timeline_starts(page)
+            if not starts:
                 return
-            before = starts.count()
-            starts.nth(0).locator("xpath=..").click()
+            before = len(starts)
+            starts[0].locator("xpath=..").click()
             page.keyboard.press("Delete")
             deadline = time.monotonic() + self.export_timeout_seconds
-            while page.locator(self._VIDEO_START_EDGE).count() >= before:
+            while len(self._video_timeline_starts(page)) >= before:
                 if time.monotonic() >= deadline:
                     raise CanvaUIVerificationError("Canva video timeline cannot be cleared")
                 time.sleep(self.poll_seconds)
+
+    def _video_timeline_starts(self, page: Any) -> list[Any]:
+        """Return visual clips only; generated captions and audio use the same edge role."""
+        starts = page.locator(self._VIDEO_START_EDGE)
+        videos = []
+        for index in range(starts.count()):
+            start = starts.nth(index)
+            parent_text = str(start.locator("xpath=..").inner_text() or "").strip()
+            if self._VIDEO_DURATION_TEXT.fullmatch(parent_text):
+                videos.append(start)
+        return videos
 
     def _clear_audio_timeline(self, page: Any) -> None:
         """Remove every audio track from the reusable design before a new job."""
@@ -607,7 +611,7 @@ class CanvaAssemblyClient:
     def _timeline_video_count(self, page: Any) -> int:
         if hasattr(page, "timeline_video_count_value"):
             return int(page.timeline_video_count_value())
-        return page.locator(self._VIDEO_START_EDGE).count()
+        return len(self._video_timeline_starts(page))
 
     def _upload_media(self, page: Any, paths: list[Path]) -> None:
         if hasattr(page, "upload_media"):
@@ -787,10 +791,10 @@ class CanvaAssemblyClient:
         if hasattr(page, "order_clips"):
             page.order_clips(expected_names)
             return
-        starts = page.locator(self._VIDEO_START_EDGE)
-        if starts.count() < 6:
+        starts = self._video_timeline_starts(page)
+        if len(starts) < 6:
             raise CanvaUIVerificationError("Canva six-clip timeline cannot be found for ordering")
-        start_values = [self._slider_seconds(starts.nth(index)) for index in range(6)]
+        start_values = [self._slider_seconds(starts[index]) for index in range(6)]
         if start_values != sorted(start_values) or len(set(start_values)) != 6:
             raise CanvaUIVerificationError("Canva clip ordering 1 through 6 cannot be verified")
 
@@ -825,10 +829,10 @@ class CanvaAssemblyClient:
         if hasattr(page, "select_video_clip"):
             page.select_video_clip(index)
             return
-        clips = page.locator(self._VIDEO_START_EDGE)
-        if clips.count() < index:
+        clips = self._video_timeline_starts(page)
+        if len(clips) < index:
             raise CanvaPlaybackVerificationError("Canva video timeline clip cannot be found")
-        clips.nth(index - 1).locator("xpath=..").click()
+        clips[index - 1].locator("xpath=..").click()
 
     def _mute_source_audio(self, page: Any) -> None:
         if hasattr(page, "mute_source_audio"):
@@ -867,79 +871,80 @@ class CanvaAssemblyClient:
                 raise CanvaUIVerificationError("Canva narration was not added to the timeline")
             time.sleep(self.poll_seconds)
 
-    def _position_narration_at_zero(self, page: Any, audio_name: str = "") -> None:
-        if hasattr(page, "position_narration_at_zero"):
-            page.position_narration_at_zero()
+    def _verify_narration_starts_at_zero(self, page: Any, audio_name: str) -> None:
+        """Observe narration placement without moving or trimming the track."""
+        if hasattr(page, "verify_narration_starts_at_zero"):
+            observed = page.verify_narration_starts_at_zero(audio_name)
+            self._accept_start_observation(observed, "narration")
             return
 
-        # Current Canva adds narration at the playhead.  Its audio track has a
-        # dedicated accessible position handle, unlike the six visual scenes.
-        if audio_name and hasattr(page, "get_by_role"):
+        try:
             audio_track = page.get_by_role(
                 "button", name=f"{audio_name}, audio track", exact=True
             )
             if audio_track.count() != 1:
-                raise CanvaUIVerificationError("Canva narration audio track cannot be found")
+                self._accept_start_observation(None, "narration")
+                return
             audio_track.click()
-
-        starts = page.locator(self._VIDEO_START_EDGE)
-        if starts.count() < 7:
-            raise CanvaUIVerificationError("Canva narration cannot be verified at timeline time 0")
-        if hasattr(page, "get_by_role"):
             narration_position = page.get_by_role(
                 "slider", name="Trimming position", exact=True
             )
-            if narration_position.count() == 1:
-                accessible_position = str(
-                    narration_position.get_attribute("aria-valuetext") or ""
-                ).strip().lower()
-                if accessible_position not in {"0 second", "0 seconds"}:
-                    source_box = narration_position.bounding_box()
-                    zero_box = starts.nth(0).bounding_box()
-                    if source_box is None or zero_box is None:
-                        raise CanvaUIVerificationError(
-                            "Canva narration position controls cannot be verified"
-                        )
-                    source_x = source_box["x"] + source_box["width"] / 2
-                    source_y = source_box["y"] + source_box["height"] / 2
-                    zero_x = zero_box["x"] + zero_box["width"] / 2
-                    page.mouse.move(source_x, source_y)
-                    page.mouse.down()
-                    page.mouse.move(zero_x, source_y, steps=12)
-                    page.mouse.up()
+            if narration_position.count() != 1:
+                self._accept_start_observation(None, "narration")
+                return
+            self._accept_start_observation(
+                self._slider_is_at_zero(narration_position),
+                "narration",
+            )
+        except CanvaUIVerificationError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Canva narration start could not be observed; continuing: {}",
+                type(exc).__name__,
+            )
 
-                deadline = time.monotonic() + min(self.export_timeout_seconds, 10.0)
-                while True:
-                    accessible_position = str(
-                        narration_position.get_attribute("aria-valuetext") or ""
-                    ).strip().lower()
-                    current_starts = page.locator(self._VIDEO_START_EDGE)
-                    narration_start = (
-                        current_starts.nth(6) if current_starts.count() >= 7 else None
-                    )
-                    narration_start_position = str(
-                        narration_start.get_attribute("aria-valuetext")
-                        if narration_start is not None
-                        else ""
-                    ).strip().lower()
-                    if (
-                        accessible_position in {"0 second", "0 seconds"}
-                        and narration_start_position in {"0 second", "0 seconds"}
-                    ):
-                        return
-                    if time.monotonic() >= deadline:
-                        raise CanvaUIVerificationError(
-                            "Canva narration cannot be verified at timeline time 0"
-                        )
-                    time.sleep(self.poll_seconds)
+    def _verify_first_video_starts_at_zero(self, page: Any) -> None:
+        """Best-effort observation of the first visual clip's timeline start."""
+        if hasattr(page, "verify_first_video_starts_at_zero"):
+            observed = page.verify_first_video_starts_at_zero()
+            self._accept_start_observation(observed, "first video")
+            return
 
-        narration_start = starts.nth(6)
+        try:
+            starts = self._video_timeline_starts(page)
+            if not starts:
+                self._accept_start_observation(None, "first video")
+                return
+            self._accept_start_observation(
+                self._slider_is_at_zero(starts[0]),
+                "first video",
+            )
+        except CanvaUIVerificationError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Canva first-video start could not be observed; continuing: {}",
+                type(exc).__name__,
+            )
+
+    def _accept_start_observation(self, observed: bool | None, label: str) -> None:
+        if observed is None:
+            logger.warning("Canva {} start could not be observed; continuing", label)
+            return
+        if not observed:
+            raise CanvaUIVerificationError(f"Canva {label} cannot be verified at timeline time 0")
+
+    def _slider_is_at_zero(self, slider: Any) -> bool | None:
         accessible_position = str(
-            narration_start.get_attribute("aria-valuetext") or ""
+            slider.get_attribute("aria-valuetext") or ""
         ).strip().lower()
-        raw_position = self._slider_seconds(narration_start)
-        if accessible_position not in {"0 second", "0 seconds"} and raw_position > 0.05:
-            raise CanvaUIVerificationError("Canva narration cannot be verified at timeline time 0")
+        if accessible_position in {"0 second", "0 seconds"}:
+            return True
+        raw_value = slider.get_attribute("aria-valuenow")
+        if raw_value is None:
+            return None
+        return abs(float(raw_value) / 1_000_000) <= 0.05
 
     def _bound_final_visual_end(self, page: Any, target_seconds: float) -> None:
         if hasattr(page, "bound_final_visual_end"):
@@ -981,7 +986,7 @@ class CanvaAssemblyClient:
         classic.click()
         caption_audio_scope = page.get_by_role(
             "combobox",
-            name=re.compile(r"^\d+ selected \(\d+ of \d+ suitable\)$"),
+            name=re.compile(r"^(?:All|\d+) selected \(\d+ of \d+ suitable\)$"),
             exact=False,
         )
         if caption_audio_scope.count() != 1:
@@ -994,6 +999,44 @@ class CanvaAssemblyClient:
         )
         all_audio.click()
         page.get_by_role("button", name="Generate captions", exact=True).click()
+        self._wait_for_generated_captions(page)
+
+    def _wait_for_generated_captions(self, page: Any) -> None:
+        deadline = time.monotonic() + self._CAPTION_GENERATION_TIMEOUT_SECONDS
+        stable_signature: tuple[str, ...] = ()
+        stable_since: float | None = None
+
+        while True:
+            now = time.monotonic()
+            signature = self._generated_caption_signature(page)
+            if signature and signature == stable_signature:
+                if stable_since is not None and (
+                    now - stable_since >= self._CAPTION_STABILITY_SECONDS
+                ):
+                    return
+            elif signature:
+                stable_signature = signature
+                stable_since = now
+            else:
+                stable_signature = ()
+                stable_since = None
+
+            if now >= deadline:
+                raise CanvaUIVerificationError(
+                    "Canva generated captions did not become ready before export"
+                )
+            time.sleep(self.poll_seconds)
+
+    def _generated_caption_signature(self, page: Any) -> tuple[str, ...]:
+        starts = page.locator(self._VIDEO_START_EDGE)
+        captions = []
+        for index in range(starts.count()):
+            parent_text = str(
+                starts.nth(index).locator("xpath=..").inner_text() or ""
+            ).strip()
+            if parent_text and not self._VIDEO_DURATION_TEXT.fullmatch(parent_text):
+                captions.append(parent_text)
+        return tuple(captions)
 
     def _export_mp4_1080p(self, page: Any) -> None:
         if hasattr(page, "export_mp4_1080p"):

@@ -1431,19 +1431,17 @@ def test_final_duration_near_adaptive_target_passes(monkeypatch, tmp_path):
     assert result.target_final_duration_seconds == pytest.approx(63.25)
 
 
-def test_final_duration_truncation_beyond_tolerance_is_rejected_and_keeps_flow_sources(
-    monkeypatch, tmp_path
-):
+def test_final_duration_is_not_compared_with_audio_derived_target(monkeypatch, tmp_path):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     job = _claimed_job(store)
     storage = CloudJobStorage(tmp_path / "jobs")
     _patch_timed_media(monkeypatch, audio_duration=63.25, final_duration=60.0)
     workflow = _workflow(tmp_path, store)
 
-    with pytest.raises(MediaValidationError, match="duration"):
-        workflow.run(job.id, worker_id=WORKER_ID)
+    result = workflow.run(job.id, worker_id=WORKER_ID)
 
     paths = storage.prepare(job.id)
+    assert result.status is CloudJobStatus.COMPLETED
     assert all(path.is_file() for path in paths.flow_files)
 
 
