@@ -25,3 +25,7 @@ class HumanRequiredError(RuntimeError):
 
 class PreFlowRetryEligibilityError(ValueError):
     """Raised when a failed TTS_READY job cannot safely re-enter Flow."""
+
+
+class RecoveryBudgetExhausted(RuntimeError):
+    """Raised before a recovery attempt could exceed its durable budget."""

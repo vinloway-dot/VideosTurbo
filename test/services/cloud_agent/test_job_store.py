@@ -7,9 +7,11 @@ from app.models.cloud_agent import (
     CloudJobCheckpoint,
     CloudJobCreate,
     CloudJobStatus,
+    FlowRecoveryState,
 )
 from app.models.six_clip import empty_six_clip_plan
 from app.services.cloud_agent.job_store import CloudJobStore
+from app.services.cloud_agent.errors import RecoveryBudgetExhausted
 
 
 def _request(subject: str = "Why Saturn Has a Hexagon") -> CloudJobCreate:
@@ -196,6 +198,13 @@ def test_pre_v22_database_is_migrated_without_losing_job(tmp_path):
     assert migrated.target_final_duration_seconds == 60.0
     assert migrated.flow_generation_unresolved is False
     assert migrated.flow_cleanup_unresolved is False
+    assert migrated.flow_recovery_state is FlowRecoveryState.NONE
+    assert migrated.flow_recovery_attempts == 0
+    assert migrated.flow_missing_clip_index == 0
+    assert migrated.flow_recovery_baseline == ""
+    assert migrated.canva_restart_attempts == 0
+    assert migrated.last_progress_at == ""
+    assert migrated.last_progress_milestone == ""
     with sqlite3.connect(db_path) as connection:
         columns = {
             row[1]
@@ -203,7 +212,19 @@ def test_pre_v22_database_is_migrated_without_losing_job(tmp_path):
                 "PRAGMA table_info(cloud_agent_jobs)"
             ).fetchall()
         }
-    assert {"flow_generation_unresolved", "flow_cleanup_unresolved"} <= columns
+    assert {
+        "flow_generation_unresolved",
+        "flow_cleanup_unresolved",
+        "flow_recovery_state",
+        "flow_recovery_attempts",
+        "flow_missing_clip_index",
+        "flow_recovery_baseline",
+        "canva_restart_attempts",
+        "last_progress_at",
+        "last_progress_milestone",
+        "stage_started_at",
+        "canva_attempt_started_at",
+    } <= columns
 
     updated = store.patch_job(
         migrated.id,
@@ -413,3 +434,62 @@ def test_worker_heartbeat_persists_and_can_return_latest_worker(tmp_path):
     reopened = CloudJobStore(str(db_path))
     assert reopened.get_worker_last_seen("worker-a") == "2026-08-22T06:30:00+00:00"
     assert reopened.get_worker_last_seen() == "2026-08-22T06:31:00+00:00"
+
+
+def test_flow_attempt_is_reserved_before_caller_can_submit(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+
+    reserved = store.reserve_flow_recovery_attempt(job.id, missing_index=2)
+
+    assert reserved.flow_recovery_attempts == 1
+    assert reserved.flow_missing_clip_index == 2
+    assert reserved.flow_recovery_state is FlowRecoveryState.SUBMISSION_UNRESOLVED
+    assert store.get_job(job.id) == reserved
+
+
+def test_flow_attempt_budget_stops_after_two(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+
+    store.reserve_flow_recovery_attempt(job.id, missing_index=2)
+    store.patch_job(job.id, flow_recovery_state=FlowRecoveryState.READY_TO_SUBMIT)
+    store.reserve_flow_recovery_attempt(job.id, missing_index=2)
+
+    with pytest.raises(RecoveryBudgetExhausted):
+        store.reserve_flow_recovery_attempt(job.id, missing_index=2)
+
+
+def test_canva_restart_budget_stops_after_four(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.FLOW_READY,
+        checkpoint=CloudJobCheckpoint.FLOW_READY,
+    )
+
+    for expected in range(1, 5):
+        assert store.reserve_canva_restart(job.id).canva_restart_attempts == expected
+
+    with pytest.raises(RecoveryBudgetExhausted):
+        store.reserve_canva_restart(job.id)
+
+
+def test_mark_progress_only_advances_for_a_new_milestone(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+
+    first = store.mark_progress(
+        job.id,
+        "flow.inventory.5",
+        at="2026-08-28T00:00:00+00:00",
+    )
+    repeated = store.mark_progress(
+        job.id,
+        "flow.inventory.5",
+        at="2026-08-28T00:01:00+00:00",
+    )
+
+    assert first.last_progress_at == "2026-08-28T00:00:00+00:00"
+    assert repeated.last_progress_at == first.last_progress_at

@@ -7,7 +7,9 @@ from app.models.cloud_agent import (
     CloudJobCheckpoint,
     CloudJobCreate,
     CloudJobRecord,
+    CloudJobIncident,
     CloudJobStatus,
+    FlowRecoveryState,
     ServiceSessionStatus,
     SessionCheckResult,
 )
@@ -145,6 +147,37 @@ def test_cloud_job_record_has_restart_safe_flow_cleanup_state():
 
     assert default_record.flow_cleanup_unresolved is False
     assert unresolved_record.flow_cleanup_unresolved is True
+
+
+def test_cloud_job_record_has_safe_recovery_defaults():
+    record = CloudJobRecord(**_valid_record())
+
+    assert record.flow_recovery_state is FlowRecoveryState.NONE
+    assert record.flow_recovery_attempts == 0
+    assert record.flow_missing_clip_index == 0
+    assert record.flow_recovery_baseline == ""
+    assert record.canva_restart_attempts == 0
+    assert record.last_progress_at == ""
+    assert record.last_progress_milestone == ""
+    assert record.stage_started_at == ""
+    assert record.canva_attempt_started_at == ""
+
+
+def test_incident_rejects_sensitive_extra_fields():
+    values = {
+        "id": "incident-1",
+        "former_job_id": "job-1",
+        "subject": "Safe subject",
+        "stage": "google_flow",
+        "reason_code": "FLOW_RECOVERY_EXHAUSTED",
+        "flow_attempts": 2,
+        "canva_attempts": 0,
+        "message_th": "สร้างคลิปทดแทนไม่สำเร็จ",
+        "created_at": "2026-08-28T00:00:00+00:00",
+    }
+
+    with pytest.raises(ValidationError):
+        CloudJobIncident.model_validate({**values, "script": "secret"})
 
 
 def test_cloud_job_record_rejects_progress_outside_zero_to_one_hundred():

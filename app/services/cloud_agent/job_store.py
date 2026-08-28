@@ -10,8 +10,10 @@ from app.models.cloud_agent import (
     CloudJobCreate,
     CloudJobRecord,
     CloudJobStatus,
+    FlowRecoveryState,
 )
 from app.models.six_clip import SixClipPlan
+from app.services.cloud_agent.errors import RecoveryBudgetExhausted
 
 
 _CLAIMABLE_STATUSES = (
@@ -40,6 +42,15 @@ _COMPATIBLE_COLUMNS = {
     "flow_cleanup_unresolved": "INTEGER NOT NULL DEFAULT 0",
     "canva_design_url": "TEXT NOT NULL DEFAULT ''",
     "canva_audio_card_count": "INTEGER NOT NULL DEFAULT -1",
+    "last_progress_at": "TEXT NOT NULL DEFAULT ''",
+    "last_progress_milestone": "TEXT NOT NULL DEFAULT ''",
+    "stage_started_at": "TEXT NOT NULL DEFAULT ''",
+    "flow_recovery_attempts": "INTEGER NOT NULL DEFAULT 0",
+    "flow_missing_clip_index": "INTEGER NOT NULL DEFAULT 0",
+    "flow_recovery_state": "TEXT NOT NULL DEFAULT 'NONE'",
+    "flow_recovery_baseline": "TEXT NOT NULL DEFAULT ''",
+    "canva_restart_attempts": "INTEGER NOT NULL DEFAULT 0",
+    "canva_attempt_started_at": "TEXT NOT NULL DEFAULT ''",
 }
 
 _MUTABLE_COLUMNS = {
@@ -58,6 +69,15 @@ _MUTABLE_COLUMNS = {
     "flow_cleanup_unresolved",
     "canva_design_url",
     "canva_audio_card_count",
+    "last_progress_at",
+    "last_progress_milestone",
+    "stage_started_at",
+    "flow_recovery_attempts",
+    "flow_missing_clip_index",
+    "flow_recovery_state",
+    "flow_recovery_baseline",
+    "canva_restart_attempts",
+    "canva_attempt_started_at",
     "final_video",
     "error_code",
     "error_message",
@@ -127,6 +147,15 @@ class CloudJobStore:
                     flow_cleanup_unresolved INTEGER NOT NULL DEFAULT 0,
                     canva_design_url TEXT NOT NULL DEFAULT '',
                     canva_audio_card_count INTEGER NOT NULL DEFAULT -1,
+                    last_progress_at TEXT NOT NULL DEFAULT '',
+                    last_progress_milestone TEXT NOT NULL DEFAULT '',
+                    stage_started_at TEXT NOT NULL DEFAULT '',
+                    flow_recovery_attempts INTEGER NOT NULL DEFAULT 0,
+                    flow_missing_clip_index INTEGER NOT NULL DEFAULT 0,
+                    flow_recovery_state TEXT NOT NULL DEFAULT 'NONE',
+                    flow_recovery_baseline TEXT NOT NULL DEFAULT '',
+                    canva_restart_attempts INTEGER NOT NULL DEFAULT 0,
+                    canva_attempt_started_at TEXT NOT NULL DEFAULT '',
                     final_video TEXT NOT NULL,
                     error_code TEXT NOT NULL,
                     error_message TEXT NOT NULL,
@@ -193,6 +222,15 @@ class CloudJobStore:
             flow_cleanup_unresolved=bool(row["flow_cleanup_unresolved"]),
             canva_design_url=row["canva_design_url"],
             canva_audio_card_count=row["canva_audio_card_count"],
+            last_progress_at=row["last_progress_at"],
+            last_progress_milestone=row["last_progress_milestone"],
+            stage_started_at=row["stage_started_at"],
+            flow_recovery_attempts=row["flow_recovery_attempts"],
+            flow_missing_clip_index=row["flow_missing_clip_index"],
+            flow_recovery_state=FlowRecoveryState(row["flow_recovery_state"]),
+            flow_recovery_baseline=row["flow_recovery_baseline"],
+            canva_restart_attempts=row["canva_restart_attempts"],
+            canva_attempt_started_at=row["canva_attempt_started_at"],
             final_video=row["final_video"],
             error_code=row["error_code"],
             error_message=row["error_message"],
@@ -244,12 +282,17 @@ class CloudJobStore:
                     canva_playback_speed, target_final_duration_seconds,
                     flow_generation_unresolved, flow_cleanup_unresolved,
                     canva_design_url, canva_audio_card_count,
+                    last_progress_at, last_progress_milestone, stage_started_at,
+                    flow_recovery_attempts, flow_missing_clip_index,
+                    flow_recovery_state, flow_recovery_baseline,
+                    canva_restart_attempts, canva_attempt_started_at,
                     final_video, error_code,
                     error_message, worker_id, lease_until, created_at, started_at,
                     completed_at, updated_at
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -278,6 +321,15 @@ class CloudJobStore:
                     record.flow_cleanup_unresolved,
                     record.canva_design_url,
                     record.canva_audio_card_count,
+                    record.last_progress_at,
+                    record.last_progress_milestone,
+                    record.stage_started_at,
+                    record.flow_recovery_attempts,
+                    record.flow_missing_clip_index,
+                    record.flow_recovery_state.value,
+                    record.flow_recovery_baseline,
+                    record.canva_restart_attempts,
+                    record.canva_attempt_started_at,
                     record.final_video,
                     record.error_code,
                     record.error_message,
@@ -380,6 +432,130 @@ class CloudJobStore:
                 (*values, job_id),
             )
         return candidate
+
+    def mark_progress(
+        self,
+        job_id: str,
+        milestone: str,
+        *,
+        at: str | datetime | None = None,
+    ) -> CloudJobRecord:
+        normalized = str(milestone or "").strip()
+        if not normalized:
+            raise ValueError("milestone must not be blank")
+        if len(normalized) > 128:
+            raise ValueError("milestone is too long")
+        if isinstance(at, datetime):
+            occurred_at = at.astimezone(timezone.utc).isoformat(timespec="microseconds")
+        else:
+            occurred_at = str(at or _utc_now())
+
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM cloud_agent_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if row["last_progress_milestone"] != normalized:
+                connection.execute(
+                    """
+                    UPDATE cloud_agent_jobs
+                    SET last_progress_at = ?, last_progress_milestone = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (occurred_at, normalized, _utc_now(), job_id),
+                )
+            updated = connection.execute(
+                "SELECT * FROM cloud_agent_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            connection.commit()
+            return self._row_to_record(updated)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def reserve_flow_recovery_attempt(
+        self, job_id: str, *, missing_index: int
+    ) -> CloudJobRecord:
+        if missing_index < 1 or missing_index > 6:
+            raise ValueError("missing_index must be between 1 and 6")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM cloud_agent_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if row["flow_recovery_attempts"] >= 2:
+                raise RecoveryBudgetExhausted("Flow recovery budget exhausted")
+            if row["flow_missing_clip_index"] not in (0, missing_index):
+                raise ValueError("missing clip index changed during recovery")
+            now = _utc_now()
+            connection.execute(
+                """
+                UPDATE cloud_agent_jobs
+                SET flow_recovery_attempts = flow_recovery_attempts + 1,
+                    flow_missing_clip_index = ?, flow_recovery_state = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    missing_index,
+                    FlowRecoveryState.SUBMISSION_UNRESOLVED.value,
+                    now,
+                    job_id,
+                ),
+            )
+            updated = connection.execute(
+                "SELECT * FROM cloud_agent_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            connection.commit()
+            return self._row_to_record(updated)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def reserve_canva_restart(self, job_id: str) -> CloudJobRecord:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM cloud_agent_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if CloudJobCheckpoint(row["checkpoint"]) is not CloudJobCheckpoint.FLOW_READY:
+                raise ValueError("Canva restart requires FLOW_READY checkpoint")
+            if row["canva_restart_attempts"] >= 4:
+                raise RecoveryBudgetExhausted("Canva restart budget exhausted")
+            now = _utc_now()
+            connection.execute(
+                """
+                UPDATE cloud_agent_jobs
+                SET canva_restart_attempts = canva_restart_attempts + 1,
+                    canva_attempt_started_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (now, now, job_id),
+            )
+            updated = connection.execute(
+                "SELECT * FROM cloud_agent_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            connection.commit()
+            return self._row_to_record(updated)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def claim_next_job(
         self, worker_id: str, lease_seconds: int

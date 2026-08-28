@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.six_clip import SixClipPlan
 
@@ -39,6 +39,14 @@ class CloudJobCheckpoint(str, Enum):
     FLOW_READY = "FLOW_READY"
     FINAL_VALIDATED = "FINAL_VALIDATED"
     COMPLETED = "COMPLETED"
+
+
+class FlowRecoveryState(str, Enum):
+    NONE = "NONE"
+    INVENTORY_PENDING = "INVENTORY_PENDING"
+    READY_TO_SUBMIT = "READY_TO_SUBMIT"
+    SUBMISSION_UNRESOLVED = "SUBMISSION_UNRESOLVED"
+    VERIFICATION_PENDING = "VERIFICATION_PENDING"
 
 
 class CloudControlRequest(str, Enum):
@@ -158,6 +166,15 @@ class CloudJobRecord(CloudJobCreate):
     flow_cleanup_unresolved: bool = False
     canva_design_url: str = ""
     canva_audio_card_count: int = -1
+    last_progress_at: str = ""
+    last_progress_milestone: str = ""
+    stage_started_at: str = ""
+    flow_recovery_attempts: int = Field(default=0, ge=0, le=2)
+    flow_missing_clip_index: int = Field(default=0, ge=0, le=6)
+    flow_recovery_state: FlowRecoveryState = FlowRecoveryState.NONE
+    flow_recovery_baseline: str = ""
+    canva_restart_attempts: int = Field(default=0, ge=0, le=4)
+    canva_attempt_started_at: str = ""
     final_video: str
     error_code: str
     error_message: str
@@ -167,6 +184,22 @@ class CloudJobRecord(CloudJobCreate):
     started_at: str
     completed_at: str
     updated_at: str
+
+
+class CloudJobIncident(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=64)
+    former_job_id: str = Field(min_length=1, max_length=64)
+    subject: str = Field(max_length=500)
+    stage: str = Field(min_length=1, max_length=64)
+    reason_code: str = Field(min_length=1, max_length=64)
+    flow_attempts: int = Field(ge=0, le=2)
+    canva_attempts: int = Field(ge=0, le=4)
+    message_th: str = Field(min_length=1, max_length=1000)
+    created_at: str
+    dismissed_at: str = ""
+    finalized: bool = False
 
 
 class SessionCheckResult(BaseModel):
