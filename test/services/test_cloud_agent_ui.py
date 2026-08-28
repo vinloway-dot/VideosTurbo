@@ -8,6 +8,93 @@ from webui import cloud_agent_ui
 from webui.cloud_agent_ui import build_production_stages, derive_workflow_step
 
 
+def test_video_library_view_keeps_only_public_card_fields():
+    view = cloud_agent_ui.video_library_view(
+        {
+            "items": [
+                {
+                    "job_id": "job-1",
+                    "subject": "Newest",
+                    "completed_at": "2026-08-28T12:00:00+00:00",
+                    "final_url": "/api/v1/cloud-agent/jobs/job-1/final",
+                    "final_video": "/private/cloud-agent/job-1/final.mp4",
+                }
+            ],
+            "page": 1,
+            "total_pages": 3,
+            "total_items": 21,
+        }
+    )
+
+    assert (view.page, view.total_pages, view.items[0].job_id) == (1, 3, "job-1")
+    assert not hasattr(view.items[0], "final_video")
+
+
+def test_video_library_css_declares_a_five_column_desktop_grid():
+    assert (
+        ".vt-video-library-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }"
+        in Path("webui/cloud_agent.css").read_text(encoding="utf-8")
+    )
+
+
+def test_video_library_renderer_uses_public_video_urls_and_numbered_pages(monkeypatch):
+    class LibraryStreamlit:
+        def __init__(self):
+            self.session_state = {}
+            self.html_bodies = []
+            self.videos = []
+            self.buttons = []
+
+        def html(self, body):
+            self.html_bodies.append(str(body))
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def columns(self, count):
+            return [nullcontext() for _ in range(count)]
+
+        def video(self, url):
+            self.videos.append(url)
+
+        def button(self, label, **kwargs):
+            self.buttons.append((label, kwargs))
+            return False
+
+    fake = LibraryStreamlit()
+    monkeypatch.setattr(cloud_agent_ui, "st", fake)
+    view = cloud_agent_ui.VideoLibraryView(
+        items=(
+            cloud_agent_ui.VideoCardView(
+                job_id="job-1",
+                subject='<img src=x onerror="alert(1)">',
+                completed_at="2026-08-28T12:00:00+00:00",
+                final_url="/cloud-agent/jobs/job-1/final",
+            ),
+        ),
+        page=2,
+        total_pages=3,
+        total_items=21,
+    )
+
+    cloud_agent_ui.render_video_library(
+        view,
+        on_delete=lambda _job_id: None,
+        on_page=lambda _page: None,
+    )
+
+    assert fake.videos == ["/cloud-agent/jobs/job-1/final"]
+    assert "&lt;img" in " ".join(fake.html_bodies)
+    assert all("/private/" not in body for body in fake.html_bodies)
+    assert [(label, config.get("disabled")) for label, config in fake.buttons] == [
+        ("ลบ", False),
+        ("1", False),
+        ("2", True),
+        ("3", False),
+    ]
+    assert any(config.get("key") == "cloud_agent_delete_job-1" for _, config in fake.buttons)
+
+
 class ShellStreamlit:
     def __init__(self):
         self.html_bodies = []

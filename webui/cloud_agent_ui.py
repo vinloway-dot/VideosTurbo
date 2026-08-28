@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal, Mapping
 
 import streamlit as st
 
@@ -42,6 +42,94 @@ class ResearchSummary:
     source_links: tuple[tuple[str, str], ...]
     provider_rounds: int | None
     tool_calls: int | None
+
+
+@dataclass(frozen=True)
+class VideoCardView:
+    job_id: str
+    subject: str
+    completed_at: str
+    final_url: str
+
+
+@dataclass(frozen=True)
+class VideoLibraryView:
+    items: tuple[VideoCardView, ...]
+    page: int
+    total_pages: int
+    total_items: int
+
+
+def video_library_view(payload: Mapping[str, object]) -> VideoLibraryView:
+    items = tuple(
+        VideoCardView(
+            job_id=str(item.get("job_id") or ""),
+            subject=str(item.get("subject") or ""),
+            completed_at=str(item.get("completed_at") or ""),
+            final_url=str(item.get("final_url") or ""),
+        )
+        for value in payload.get("items") or ()
+        if isinstance(value, Mapping)
+        for item in (value,)
+    )
+    return VideoLibraryView(
+        items=items,
+        page=max(1, int(payload.get("page") or 1)),
+        total_pages=max(1, int(payload.get("total_pages") or 1)),
+        total_items=max(0, int(payload.get("total_items") or 0)),
+    )
+
+
+def render_video_library(
+    view: VideoLibraryView,
+    *,
+    on_delete: Callable[[str], None],
+    on_page: Callable[[int], None],
+) -> None:
+    with st.container(key="cloud_agent_video_library"):
+        st.html('<h2 class="vt-video-library__title">วีดีโอที่สร้าง</h2>')
+        if not view.items:
+            st.html(
+                '<p class="vt-video-library__empty">ยังไม่มีวิดีโอที่สร้างเสร็จ</p>'
+            )
+        else:
+            with st.container(key="cloud_agent_video_library_grid"):
+                columns = st.columns(5)
+                for index, card in enumerate(view.items[:10]):
+                    with columns[index % 5]:
+                        with st.container(
+                            key=f"cloud_agent_video_card_{card.job_id}", border=True
+                        ):
+                            st.video(card.final_url)
+                            st.html(
+                                '<p class="vt-video-library-card__subject">'
+                                f"{escape(card.subject)}</p>"
+                                '<p class="vt-video-library-card__time">'
+                                f"{escape(card.completed_at)}</p>"
+                            )
+                            delete_key = f"cloud_agent_delete_{card.job_id}"
+                            if st.button(
+                                "ลบ", key=delete_key, type="secondary", disabled=False
+                            ):
+                                st.session_state[delete_key] = True
+                            if st.session_state.get(delete_key):
+                                st.warning("การลบนี้ถาวรภายใน VideosTurbo cloud")
+                                if st.button(
+                                    "ยืนยันการลบ",
+                                    key=f"cloud_agent_confirm_delete_{card.job_id}",
+                                    type="primary",
+                                ):
+                                    on_delete(card.job_id)
+                                    st.session_state.pop(delete_key, None)
+        if view.total_pages > 1:
+            with st.container(key="cloud_agent_video_library_pagination"):
+                for page in range(1, view.total_pages + 1):
+                    if st.button(
+                        str(page),
+                        key=f"cloud_agent_video_page_{page}",
+                        disabled=page == view.page,
+                    ):
+                        on_page(page)
 
 
 def research_summary(*, research_draft_id, sources, accounting) -> ResearchSummary:
