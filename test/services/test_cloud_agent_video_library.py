@@ -23,11 +23,17 @@ def _request() -> CloudJobCreate:
     )
 
 
-def _completed_job(store: CloudJobStore, *, job_id: str, completed_at: str):
+def _completed_job(
+    store: CloudJobStore,
+    *,
+    job_id: str,
+    completed_at: str,
+    checkpoint: CloudJobCheckpoint = CloudJobCheckpoint.COMPLETED,
+):
     job = store.create_job(_request(), status=CloudJobStatus.COMPLETED)
     store.patch_job(
         job.id,
-        checkpoint=CloudJobCheckpoint.COMPLETED,
+        checkpoint=checkpoint,
         completed_at=completed_at,
         final_video="final.mp4",
     )
@@ -49,13 +55,37 @@ def test_completed_final_candidates_are_sorted_by_completion_then_id(tmp_path):
         store, job_id="a", completed_at="2026-08-28T10:00:00+00:00"
     )
     newer = _completed_job(
-        store, job_id="b", completed_at="2026-08-28T11:00:00+00:00"
+        store, job_id="b", completed_at="2026-08-28T10:00:00+00:00"
+    )
+    _completed_job(
+        store,
+        job_id="not-final",
+        completed_at="2026-08-28T12:00:00+00:00",
+        checkpoint=CloudJobCheckpoint.TTS_READY,
     )
     _queued_job(store)
     assert [job.id for job in store.list_completed_final_candidates()] == [
         newer.id,
         older.id,
     ]
+
+
+def test_staging_and_purging_reject_symlinked_deleting_root(tmp_path):
+    storage = CloudJobStorage(tmp_path / "jobs")
+    storage.prepare("job-a")
+    external = tmp_path / "external"
+    external.mkdir()
+    victim = external / "victim"
+    victim.mkdir()
+    (victim / "important.txt").write_text("keep", encoding="utf-8")
+    deleting = storage.root / ".deleting"
+    deleting.symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(ValueError):
+        storage.stage_job_artifacts("job-a")
+    with pytest.raises(ValueError):
+        storage.purge_staged_job(deleting / "victim")
+    assert (victim / "important.txt").exists()
 
 
 def test_stage_job_artifacts_moves_only_its_job_and_rejects_escape(tmp_path):

@@ -80,6 +80,18 @@ class CloudJobStorage:
             final_file=final_dir / "final.mp4",
         )
 
+    @staticmethod
+    def _validated_deleting_root(root: Path) -> Path:
+        deleting_root = root / ".deleting"
+        if deleting_root.is_symlink():
+            raise ValueError("deleting directory must not be a symlink")
+        if deleting_root.exists() and not deleting_root.is_dir():
+            raise ValueError("deleting path must be a directory")
+        deleting_root.mkdir(parents=False, exist_ok=True)
+        if deleting_root.is_symlink() or deleting_root.parent != root:
+            raise ValueError("deleting directory is outside storage root")
+        return deleting_root
+
     def prepare(self, job_id: str) -> JobPaths:
         paths = self._paths(job_id)
         for directory in (
@@ -156,8 +168,7 @@ class CloudJobStorage:
             raise ValueError("reserved storage directory")
         if not paths.job_dir.is_dir():
             raise FileNotFoundError(paths.job_dir)
-        deleting_root = root / ".deleting"
-        deleting_root.mkdir(parents=True, exist_ok=True)
+        deleting_root = self._validated_deleting_root(root)
         staged = (deleting_root / f"{paths.job_dir.name}-{uuid4().hex}").resolve()
         if staged.parent != deleting_root.resolve():
             raise ValueError("staged path is outside storage root")
@@ -167,7 +178,7 @@ class CloudJobStorage:
     def restore_staged_job(self, job_id: str, staged_dir: Path) -> None:
         paths = self._paths(job_id)
         root = self.root.resolve()
-        deleting_root = (root / ".deleting").resolve()
+        deleting_root = self._validated_deleting_root(root).resolve()
         staged = Path(staged_dir).resolve()
         if paths.job_dir.parent != root or staged.parent != deleting_root:
             raise ValueError("staged path is outside storage root")
@@ -179,7 +190,7 @@ class CloudJobStorage:
 
     def purge_staged_job(self, staged_dir: Path) -> None:
         root = self.root.resolve()
-        deleting_root = (root / ".deleting").resolve()
+        deleting_root = self._validated_deleting_root(root).resolve()
         staged = Path(staged_dir).resolve()
         if staged.parent != deleting_root:
             raise ValueError("staged path is outside storage root")

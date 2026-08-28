@@ -45,3 +45,23 @@ Result: 5 passed.
 The storage operations derive all job paths through `_paths`, resolve paths before boundary comparisons, avoid `prepare()` during staging, and leave the original directory untouched if validation fails before rename. Restore refuses to overwrite an existing job directory, and purge rejects paths outside the dedicated staging directory. No provider, worker, session, Flow, Canva, or unrelated behavior was changed.
 
 No task-specific concerns remain. The controller test suite emits only existing upstream deprecation warnings.
+
+## Review fix follow-up
+
+Addressed review findings C1 and M1.
+
+- `CloudJobStorage` now validates the unresolved `<root>/.deleting` entry before every stage, restore, or purge operation. Symlinks and non-directory entries are rejected before resolving children, preventing staging or `rmtree` from escaping the storage root.
+- Added a symlink-escape regression test that confirms both staging and purging reject a symlinked `.deleting` directory and that the external sentinel remains intact.
+- Strengthened candidate ordering/filtering coverage with equal completion timestamps (asserting ID descending) and a completed job at a non-final checkpoint (asserting exclusion).
+
+Fix verification:
+
+- RED: the new symlink regression initially failed because staging did not reject the symlinked `.deleting` root.
+- `uv run python -X utf8 -m pytest test/services/test_cloud_agent_video_library.py -v` — 6 passed.
+- `uv run ruff check app/services/cloud_agent/job_store.py app/services/cloud_agent/storage.py test/services/test_cloud_agent_video_library.py` — clean.
+
+Files changed in the fix commit:
+
+- `app/services/cloud_agent/storage.py`
+- `test/services/test_cloud_agent_video_library.py`
+- `.superpowers/sdd/2026-08-28-cloud-agent-video-library/task-1-report.md`
