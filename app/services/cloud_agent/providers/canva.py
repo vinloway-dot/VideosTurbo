@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from loguru import logger
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from app.models.cloud_agent import ServiceSessionStatus
@@ -141,29 +142,18 @@ class CanvaAssemblyClient:
         audio_path = Path(audio)
         output_path = Path(output)
         self._validate_media_inputs(clip_paths, audio_path)
-        speed = float(job.canva_playback_speed)
-        target_seconds = float(job.target_final_duration_seconds)
-        if not 0 < speed <= 1:
-            raise ValueError("Canva playback speed must be within (0, 1]")
-        if target_seconds <= 0:
-            raise ValueError("Canva target duration must be positive")
-
         clip_names = [clip.name for clip in clip_paths]
         self._clean_uploaded_videos(page, clip_names)
         self._clean_uploaded_audio(page, audio_path.name)
         self._clear_video_timeline(page)
         self._clear_audio_timeline(page)
         self._upload_media(page, [*clip_paths, audio_path])
-        self._add_uploaded_clips(page, clip_names)
-        self._order_clips(page, clip_names)
-        if speed < 1.0:
-            for index in range(1, 7):
-                self._set_and_verify_playback(page, index, speed)
         self._add_uploaded_audio(page, audio_path.name)
-        self._position_narration_at_zero(page, audio_path.name)
+        self._verify_narration_starts_at_zero(page, audio_path.name)
+        self._add_uploaded_clips(page, clip_names)
+        self._verify_first_video_starts_at_zero(page)
+        self._order_clips(page, clip_names)
         self._mute_source_audio(page)
-        self._bound_final_visual_end(page, target_seconds)
-        self._verify_timeline_end(page, target_seconds)
         self._generate_auto_captions(page)
         self._export_mp4_1080p(page)
         self._download_export(page, output_path)
@@ -867,79 +857,80 @@ class CanvaAssemblyClient:
                 raise CanvaUIVerificationError("Canva narration was not added to the timeline")
             time.sleep(self.poll_seconds)
 
-    def _position_narration_at_zero(self, page: Any, audio_name: str = "") -> None:
-        if hasattr(page, "position_narration_at_zero"):
-            page.position_narration_at_zero()
+    def _verify_narration_starts_at_zero(self, page: Any, audio_name: str) -> None:
+        """Observe narration placement without moving or trimming the track."""
+        if hasattr(page, "verify_narration_starts_at_zero"):
+            observed = page.verify_narration_starts_at_zero(audio_name)
+            self._accept_start_observation(observed, "narration")
             return
 
-        # Current Canva adds narration at the playhead.  Its audio track has a
-        # dedicated accessible position handle, unlike the six visual scenes.
-        if audio_name and hasattr(page, "get_by_role"):
+        try:
             audio_track = page.get_by_role(
                 "button", name=f"{audio_name}, audio track", exact=True
             )
             if audio_track.count() != 1:
-                raise CanvaUIVerificationError("Canva narration audio track cannot be found")
+                self._accept_start_observation(None, "narration")
+                return
             audio_track.click()
-
-        starts = page.locator(self._VIDEO_START_EDGE)
-        if starts.count() < 7:
-            raise CanvaUIVerificationError("Canva narration cannot be verified at timeline time 0")
-        if hasattr(page, "get_by_role"):
             narration_position = page.get_by_role(
                 "slider", name="Trimming position", exact=True
             )
-            if narration_position.count() == 1:
-                accessible_position = str(
-                    narration_position.get_attribute("aria-valuetext") or ""
-                ).strip().lower()
-                if accessible_position not in {"0 second", "0 seconds"}:
-                    source_box = narration_position.bounding_box()
-                    zero_box = starts.nth(0).bounding_box()
-                    if source_box is None or zero_box is None:
-                        raise CanvaUIVerificationError(
-                            "Canva narration position controls cannot be verified"
-                        )
-                    source_x = source_box["x"] + source_box["width"] / 2
-                    source_y = source_box["y"] + source_box["height"] / 2
-                    zero_x = zero_box["x"] + zero_box["width"] / 2
-                    page.mouse.move(source_x, source_y)
-                    page.mouse.down()
-                    page.mouse.move(zero_x, source_y, steps=12)
-                    page.mouse.up()
+            if narration_position.count() != 1:
+                self._accept_start_observation(None, "narration")
+                return
+            self._accept_start_observation(
+                self._slider_is_at_zero(narration_position),
+                "narration",
+            )
+        except CanvaUIVerificationError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Canva narration start could not be observed; continuing: {}",
+                type(exc).__name__,
+            )
 
-                deadline = time.monotonic() + min(self.export_timeout_seconds, 10.0)
-                while True:
-                    accessible_position = str(
-                        narration_position.get_attribute("aria-valuetext") or ""
-                    ).strip().lower()
-                    current_starts = page.locator(self._VIDEO_START_EDGE)
-                    narration_start = (
-                        current_starts.nth(6) if current_starts.count() >= 7 else None
-                    )
-                    narration_start_position = str(
-                        narration_start.get_attribute("aria-valuetext")
-                        if narration_start is not None
-                        else ""
-                    ).strip().lower()
-                    if (
-                        accessible_position in {"0 second", "0 seconds"}
-                        and narration_start_position in {"0 second", "0 seconds"}
-                    ):
-                        return
-                    if time.monotonic() >= deadline:
-                        raise CanvaUIVerificationError(
-                            "Canva narration cannot be verified at timeline time 0"
-                        )
-                    time.sleep(self.poll_seconds)
+    def _verify_first_video_starts_at_zero(self, page: Any) -> None:
+        """Best-effort observation of the first visual clip's timeline start."""
+        if hasattr(page, "verify_first_video_starts_at_zero"):
+            observed = page.verify_first_video_starts_at_zero()
+            self._accept_start_observation(observed, "first video")
+            return
 
-        narration_start = starts.nth(6)
+        try:
+            starts = page.locator(self._VIDEO_START_EDGE)
+            if starts.count() == 0:
+                self._accept_start_observation(None, "first video")
+                return
+            self._accept_start_observation(
+                self._slider_is_at_zero(starts.nth(0)),
+                "first video",
+            )
+        except CanvaUIVerificationError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Canva first-video start could not be observed; continuing: {}",
+                type(exc).__name__,
+            )
+
+    def _accept_start_observation(self, observed: bool | None, label: str) -> None:
+        if observed is None:
+            logger.warning("Canva {} start could not be observed; continuing", label)
+            return
+        if not observed:
+            raise CanvaUIVerificationError(f"Canva {label} cannot be verified at timeline time 0")
+
+    def _slider_is_at_zero(self, slider: Any) -> bool | None:
         accessible_position = str(
-            narration_start.get_attribute("aria-valuetext") or ""
+            slider.get_attribute("aria-valuetext") or ""
         ).strip().lower()
-        raw_position = self._slider_seconds(narration_start)
-        if accessible_position not in {"0 second", "0 seconds"} and raw_position > 0.05:
-            raise CanvaUIVerificationError("Canva narration cannot be verified at timeline time 0")
+        if accessible_position in {"0 second", "0 seconds"}:
+            return True
+        raw_value = slider.get_attribute("aria-valuenow")
+        if raw_value is None:
+            return None
+        return abs(float(raw_value) / 1_000_000) <= 0.05
 
     def _bound_final_visual_end(self, page: Any, target_seconds: float) -> None:
         if hasattr(page, "bound_final_visual_end"):

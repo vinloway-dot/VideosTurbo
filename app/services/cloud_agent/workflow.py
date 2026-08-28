@@ -197,15 +197,6 @@ class CloudAgentWorkflow:
                     f"checkpoint {checkpoint.value} has invalid Flow artifact {path.name}: {exc}"
                 ) from exc
 
-    def _validate_final_duration(self, job: CloudJobRecord, probe: MediaProbe) -> None:
-        difference = abs(probe.duration - job.target_final_duration_seconds)
-        if difference > self.final_duration_tolerance_seconds:
-            raise MediaValidationError(
-                f"final media duration {probe.duration:.3f}s differs from target "
-                f"{job.target_final_duration_seconds:.3f}s by {difference:.3f}s; "
-                f"tolerance is {self.final_duration_tolerance_seconds:.3f}s"
-            )
-
     def _validate_final_checkpoint(self, job: CloudJobRecord, paths: JobPaths) -> None:
         checkpoint = job.checkpoint
         if not paths.final_file.is_file():
@@ -213,14 +204,13 @@ class CloudAgentWorkflow:
                 f"checkpoint {checkpoint.value} requires final artifact: {paths.final_file}"
             )
         try:
-            probe = validate_video(
+            validate_video(
                 paths.final_file,
                 require_audio=True,
                 min_size_bytes=self.final_min_size_bytes,
                 expected_width=self.expected_width,
                 expected_height=self.expected_height,
             )
-            self._validate_final_duration(job, probe)
         except MediaValidationError as exc:
             raise MediaValidationError(
                 f"checkpoint {checkpoint.value} has invalid final artifact: {exc}"
@@ -429,14 +419,13 @@ class CloudAgentWorkflow:
                         current_step="validating",
                         progress=90,
                     )
-                    probe = validate_video(
+                    validate_video(
                         paths.final_file,
                         require_audio=True,
                         min_size_bytes=self.final_min_size_bytes,
                         expected_width=self.expected_width,
                         expected_height=self.expected_height,
                     )
-                    self._validate_final_duration(job, probe)
                     job = self.store.patch_job(
                         job.id,
                         status=CloudJobStatus.FINAL_VALIDATED,

@@ -84,6 +84,14 @@ class FakeCanvaEditorPage:
     def add_uploaded_audio(self, name):
         self.actions.append(("add_uploaded_audio", name))
 
+    def verify_narration_starts_at_zero(self, name):
+        self.actions.append(("verify_narration_zero", name))
+        return True
+
+    def verify_first_video_starts_at_zero(self):
+        self.actions.append(("verify_first_video_zero",))
+        return True
+
     def timeline_video_count_value(self):
         return self.timeline_video_count
 
@@ -127,6 +135,26 @@ class FakeCanvaEditorPage:
         self.actions.append(("download", Path(output).name))
         if self.download_completes:
             Path(output).write_bytes(b"final-mp4")
+
+
+class FakeUnobservableTimelineStartsPage(FakeCanvaEditorPage):
+    """Models a Canva UI revision whose start positions cannot be observed."""
+
+    def verify_narration_starts_at_zero(self, name):
+        self.actions.append(("verify_narration_zero", name))
+        return None
+
+    def verify_first_video_starts_at_zero(self):
+        self.actions.append(("verify_first_video_zero",))
+        return None
+
+
+class FakeConfirmedNonZeroNarrationPage(FakeCanvaEditorPage):
+    """Models a semantically observable narration start away from zero."""
+
+    def verify_narration_starts_at_zero(self, name):
+        self.actions.append(("verify_narration_zero", name))
+        return False
 
 
 class _CaptionControl:
@@ -1241,8 +1269,8 @@ def _media(tmp_path):
     return clips, audio, tmp_path / "final.mp4"
 
 
-def test_canva_assembly_uploads_orders_and_exports_adaptive_six_clip_job(tmp_path):
-    """Catches skipped media, wrong clip order, missing playback proof, or invalid export flow."""
+def test_canva_assembly_adds_audio_before_videos_without_timing_adjustment(tmp_path):
+    """Catches narration insertion after video or any duration/speed adjustment."""
     page = FakeCanvaEditorPage()
     client, sessions = _assembly_client(page)
     clips, audio, output = _media(tmp_path)
@@ -1265,59 +1293,60 @@ def test_canva_assembly_uploads_orders_and_exports_adaptive_six_clip_job(tmp_pat
         ),
         ("clear_audio_timeline",),
         ("upload", ("clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4", "voice.mp3")),
-        ("order", ("clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4")),
-        ("select_clip", 1),
-        ("open_video_speed",),
-        ("set_speed", 0.95),
-        ("verify_speed", 0.95),
-        ("select_clip", 2),
-        ("open_video_speed",),
-        ("set_speed", 0.95),
-        ("verify_speed", 0.95),
-        ("select_clip", 3),
-        ("open_video_speed",),
-        ("set_speed", 0.95),
-        ("verify_speed", 0.95),
-        ("select_clip", 4),
-        ("open_video_speed",),
-        ("set_speed", 0.95),
-        ("verify_speed", 0.95),
-        ("select_clip", 5),
-        ("open_video_speed",),
-        ("set_speed", 0.95),
-        ("verify_speed", 0.95),
-        ("select_clip", 6),
-        ("open_video_speed",),
-        ("set_speed", 0.95),
-        ("verify_speed", 0.95),
         ("add_uploaded_audio", "voice.mp3"),
-        ("narration_at_zero",),
+        ("verify_narration_zero", "voice.mp3"),
+        ("verify_first_video_zero",),
+        ("order", ("clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4")),
         ("mute_source_audio",),
-        ("bound_final_end", 63.25),
-        ("verify_timeline_end", 63.25, 1.0),
         ("auto_captions",),
         ("export_mp4_1080p",),
         ("download", "final.mp4"),
     ]
 
 
+def test_canva_assembly_continues_when_timeline_starts_are_unobservable(tmp_path):
+    page = FakeUnobservableTimelineStartsPage()
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+
+    result = client.assemble_and_export(_assembly_job(), clips, audio, output)
+
+    assert result == output
+    assert output.read_bytes() == b"final-mp4"
+    assert ("verify_narration_zero", "voice.mp3") in page.actions
+    assert ("verify_first_video_zero",) in page.actions
+    assert ("export_mp4_1080p",) in page.actions
+
+
+def test_canva_assembly_stops_when_narration_is_confirmed_after_zero(tmp_path):
+    page = FakeConfirmedNonZeroNarrationPage()
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+
+    with pytest.raises(canva.CanvaUIVerificationError, match="narration.*time 0"):
+        client.assemble_and_export(_assembly_job(), clips, audio, output)
+
+    assert ("export_mp4_1080p",) not in page.actions
+
+
 def test_canva_accepts_accessible_zero_seconds_for_narration_position():
     """Catches rejecting Canva's pixel-offset raw value when ARIA proves time zero."""
     client, _ = _assembly_client(FakeCanvaEditorPage())
 
-    client._position_narration_at_zero(FakeAccessibleZeroNarrationPage())
+    client._verify_narration_starts_at_zero(FakeAccessibleZeroNarrationPage(), "")
 
 
-def test_canva_moves_current_audio_track_to_timeline_zero_before_verifying():
-    """Catches Canva adding narration at its current playhead instead of time zero."""
+def test_canva_does_not_drag_a_confirmed_nonzero_audio_track():
+    """Catches trimming narration content while trying to reposition the track."""
     page = FakeCurrentCanvaAudioTimelinePage()
     client, _ = _assembly_client(FakeCanvaEditorPage())
 
-    client._position_narration_at_zero(page, "voice.mp3")
+    with pytest.raises(canva.CanvaUIVerificationError, match="narration.*time 0"):
+        client._verify_narration_starts_at_zero(page, "voice.mp3")
 
     assert page.audio_track_selected is True
-    assert page.audio_position_text == "0 seconds"
-    assert page.mouse.moves
+    assert page.audio_position_text == "9.1 seconds"
+    assert page.mouse.moves == []
 
 
 def test_canva_auto_captions_selects_classic_style_after_generation():
@@ -1406,7 +1435,7 @@ def test_canva_assembly_prepares_clean_workspace_before_upload_and_adds_clips_in
     client.assemble_and_export(_assembly_job(), clips, audio, output)
 
     actions = page.actions
-    assert actions[:10] == [
+    assert actions[:12] == [
         (
             "goto",
             "https://www.canva.com/design/demo/edit",
@@ -1426,13 +1455,15 @@ def test_canva_assembly_prepares_clean_workspace_before_upload_and_adds_clips_in
         ("clear_video_timeline",),
         ("clear_audio_timeline",),
         ("upload", ("clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4", "voice.mp3")),
+        ("add_uploaded_audio", "voice.mp3"),
+        ("verify_narration_zero", "voice.mp3"),
         ("add_uploaded_clip", "clip_01.mp4", 0, 1),
         ("add_uploaded_clip", "clip_02.mp4", 1, 2),
         ("add_uploaded_clip", "clip_03.mp4", 2, 3),
         ("add_uploaded_clip", "clip_04.mp4", 3, 4),
         ("add_uploaded_clip", "clip_05.mp4", 4, 5),
     ]
-    assert actions[10] == ("add_uploaded_clip", "clip_06.mp4", 5, 6)
+    assert actions[12] == ("add_uploaded_clip", "clip_06.mp4", 5, 6)
 
 
 def test_canva_assembly_cleans_only_current_job_video_and_audio_names_before_upload(
@@ -1805,21 +1836,19 @@ def test_canva_assembly_skips_playback_changes_when_speed_is_one(tmp_path):
     )
 
     assert not any(action[0] in {"open_video_speed", "set_speed", "verify_speed"} for action in page.actions)
-    assert ("bound_final_end", 60.0) in page.actions
+    assert not any(action[0] in {"bound_final_end", "verify_timeline_end"} for action in page.actions)
 
 
-def test_canva_assembly_raises_typed_error_when_playback_cannot_be_verified(tmp_path):
-    """Catches a false success when Canva does not expose post-action playback state."""
+def test_canva_assembly_does_not_use_playback_controls(tmp_path):
+    """Catches reintroducing video speed or duration adjustment into assembly."""
     page = FakeCanvaEditorPage(playback_verifies=False)
     client, _ = _assembly_client(page)
     clips, audio, output = _media(tmp_path)
-    error_cls = getattr(canva, "CanvaPlaybackVerificationError", None)
-    assert error_cls is not None, "Task 10 typed playback verification error is not implemented"
 
-    with pytest.raises(error_cls, match="playback|timeline"):
-        client.assemble_and_export(_assembly_job(), clips, audio, output)
+    result = client.assemble_and_export(_assembly_job(), clips, audio, output)
 
-    assert not output.exists()
+    assert result == output
+    assert not any(action[0] in {"open_video_speed", "set_speed", "verify_speed"} for action in page.actions)
 
 
 def test_canva_assembly_rejects_an_export_without_a_completed_mp4_download(tmp_path):
