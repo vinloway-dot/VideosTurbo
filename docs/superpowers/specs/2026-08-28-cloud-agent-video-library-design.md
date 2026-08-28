@@ -38,9 +38,11 @@ without changing the desktop 5 × 2 contract. On a successful deletion, the UI
 reloads the current library page. If it becomes empty and a previous page
 exists, the UI returns to that previous page.
 
-The already-running production-status refresh detects terminal completion and
-refreshes the application view, so a newly completed job appears in the
-library without a manual refresh.
+Worker-originated status events refresh the application view at durable state
+transitions, so a newly completed job appears in the library without a manual
+refresh or two-second WebUI polling. The event path and its isolation guarantees
+are defined in
+`docs/superpowers/specs/2026-08-28-cloud-agent-worker-events-sse-design.md`.
 
 ## API and Data Boundaries
 
