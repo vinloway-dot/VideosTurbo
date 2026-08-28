@@ -527,6 +527,12 @@ class TestConfigPersistence:
         assert normalized["cloud_agent_worker_poll_seconds"] == 2
         assert normalized["cloud_agent_worker_lease_seconds"] == 120
         assert normalized["cloud_agent_worker_heartbeat_seconds"] == 10
+        assert normalized["cloud_agent_event_queue_size"] == 128
+        assert normalized["cloud_agent_event_intake_url"] == (
+            "http://127.0.0.1:8080/api/v1/cloud-agent/internal/events"
+        )
+        assert normalized["cloud_agent_event_delivery_timeout_seconds"] == 0.5
+        assert normalized["cloud_agent_sse_heartbeat_seconds"] == 25
         assert normalized["cloud_agent_max_retries"] == 3
         assert normalized["cloud_agent_min_free_disk_gb"] == 10
         assert normalized["cloud_agent_tts_min_duration_seconds"] == 1
