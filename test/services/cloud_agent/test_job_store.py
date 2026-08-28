@@ -132,6 +132,37 @@ def test_create_job_persists_defaults_and_six_clip_plan_across_reopen(tmp_path):
     assert loaded.clip_plan.model_dump() == created.clip_plan.model_dump()
 
 
+def test_first_completed_transition_sets_completion_time_and_terminal_fields(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+
+    completed = store.patch_job(job.id, status=CloudJobStatus.COMPLETED)
+    retained = store.patch_job(job.id, current_step="completed")
+
+    assert completed.completed_at
+    assert completed.checkpoint is CloudJobCheckpoint.COMPLETED
+    assert completed.progress == 100
+    assert retained.completed_at == completed.completed_at
+
+
+def test_store_backfills_legacy_completed_row_from_updated_at(tmp_path):
+    db_path = tmp_path / "agent.sqlite3"
+    store = CloudJobStore(str(db_path))
+    job = store.create_job(_request())
+    completed = store.patch_job(job.id, status=CloudJobStatus.COMPLETED)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE cloud_agent_jobs SET completed_at = '' WHERE id = ?",
+            (job.id,),
+        )
+
+    reopened = CloudJobStore(str(db_path))
+
+    restored = reopened.get_job(job.id)
+    assert restored is not None
+    assert restored.completed_at == completed.updated_at
+
+
 def test_cloud_job_store_round_trips_canva_workspace_fields(tmp_path):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     created = store.create_job(_request())

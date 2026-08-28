@@ -571,6 +571,7 @@ def test_workflow_progresses_from_queue_through_all_durable_checkpoints(monkeypa
     assert result.status is CloudJobStatus.COMPLETED
     assert result.checkpoint is CloudJobCheckpoint.COMPLETED
     assert result.progress == 100
+    assert result.completed_at
     assert Path(result.voice_file).is_file()
     assert Path(result.final_video).is_file()
 

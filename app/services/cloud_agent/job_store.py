@@ -158,6 +158,12 @@ class CloudJobStore:
                 )
                 """
             )
+            connection.execute(
+                """UPDATE cloud_agent_jobs
+                   SET completed_at = updated_at
+                   WHERE status = ? AND completed_at = ''""",
+                (CloudJobStatus.COMPLETED.value,),
+            )
 
     @staticmethod
     def _row_to_record(row: sqlite3.Row) -> CloudJobRecord:
@@ -341,9 +347,28 @@ class CloudJobStore:
         if existing is None:
             raise KeyError(job_id)
 
+        now = _utc_now()
+        next_status = changes.get("status", existing.status)
+        if not isinstance(next_status, CloudJobStatus):
+            next_status = CloudJobStatus(next_status)
+        completing = (
+            existing.status is not CloudJobStatus.COMPLETED
+            and next_status is CloudJobStatus.COMPLETED
+        )
+        if completing:
+            changes["checkpoint"] = CloudJobCheckpoint.COMPLETED
+            changes["progress"] = 100
+            if not str(changes.get("completed_at") or existing.completed_at).strip():
+                changes["completed_at"] = now
+        elif (
+            next_status is CloudJobStatus.COMPLETED
+            and not str(changes.get("completed_at") or existing.completed_at).strip()
+        ):
+            changes["completed_at"] = now
+
         candidate_data = existing.model_dump()
         candidate_data.update(changes)
-        candidate_data["updated_at"] = _utc_now()
+        candidate_data["updated_at"] = now
         candidate = CloudJobRecord.model_validate(candidate_data)
 
         columns = [*changes.keys(), "updated_at"]

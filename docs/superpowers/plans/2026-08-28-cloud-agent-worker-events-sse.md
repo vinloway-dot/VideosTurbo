@@ -147,8 +147,10 @@ first/legacy transition to `COMPLETED`:
 now = _utc_now()
 next_status = changes.get("status", existing.status)
 if next_status is CloudJobStatus.COMPLETED:
-    changes["checkpoint"] = CloudJobCheckpoint.COMPLETED
-    changes["progress"] = 100
+    completing = existing.status is not CloudJobStatus.COMPLETED
+    if completing:
+        changes["checkpoint"] = CloudJobCheckpoint.COMPLETED
+        changes["progress"] = 100
     if not str(changes.get("completed_at") or existing.completed_at).strip():
         changes["completed_at"] = now
 candidate_data.update(changes)
