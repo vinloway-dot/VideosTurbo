@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
 from uuid import uuid4
 
 from app.utils import utils
+from app.utils.file_security import resolve_path_within_directory
 
 
 @dataclass(frozen=True)
@@ -132,3 +134,57 @@ class CloudJobStorage:
         for source in sources:
             source.replace(destination / source.name)
         return destination
+
+    def has_valid_final_video(self, job_id: str, recorded_final_video: str) -> bool:
+        paths = self._paths(job_id)
+        try:
+            resolved_recorded = Path(
+                resolve_path_within_directory(
+                    str(self.root.resolve()), recorded_final_video, require_file=True
+                )
+            )
+        except (TypeError, ValueError):
+            return False
+        return resolved_recorded == paths.final_file.resolve()
+
+    def stage_job_artifacts(self, job_id: str) -> Path:
+        paths = self._paths(job_id)
+        root = self.root.resolve()
+        if paths.job_dir.parent != root:
+            raise ValueError("job path is outside storage root")
+        if paths.job_dir == (root / ".deleting"):
+            raise ValueError("reserved storage directory")
+        if not paths.job_dir.is_dir():
+            raise FileNotFoundError(paths.job_dir)
+        deleting_root = root / ".deleting"
+        deleting_root.mkdir(parents=True, exist_ok=True)
+        staged = (deleting_root / f"{paths.job_dir.name}-{uuid4().hex}").resolve()
+        if staged.parent != deleting_root.resolve():
+            raise ValueError("staged path is outside storage root")
+        paths.job_dir.rename(staged)
+        return staged
+
+    def restore_staged_job(self, job_id: str, staged_dir: Path) -> None:
+        paths = self._paths(job_id)
+        root = self.root.resolve()
+        deleting_root = (root / ".deleting").resolve()
+        staged = Path(staged_dir).resolve()
+        if paths.job_dir.parent != root or staged.parent != deleting_root:
+            raise ValueError("staged path is outside storage root")
+        if not staged.is_dir():
+            raise FileNotFoundError(staged)
+        if paths.job_dir.exists():
+            raise FileExistsError(paths.job_dir)
+        staged.rename(paths.job_dir)
+
+    def purge_staged_job(self, staged_dir: Path) -> None:
+        root = self.root.resolve()
+        deleting_root = (root / ".deleting").resolve()
+        staged = Path(staged_dir).resolve()
+        if staged.parent != deleting_root:
+            raise ValueError("staged path is outside storage root")
+        if not staged.exists() and not staged.is_symlink():
+            return
+        if staged.is_symlink() or not staged.is_dir():
+            raise ValueError("staged path must be a directory")
+        shutil.rmtree(staged)

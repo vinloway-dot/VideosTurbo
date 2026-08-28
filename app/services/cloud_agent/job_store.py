@@ -304,6 +304,28 @@ class CloudJobStore:
             ).fetchall()
         return [self._row_to_record(row) for row in rows]
 
+    def list_completed_final_candidates(self) -> list[CloudJobRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM cloud_agent_jobs
+                   WHERE status = ? AND checkpoint IN (?, ?)
+                   ORDER BY completed_at DESC, id DESC""",
+                (
+                    CloudJobStatus.COMPLETED.value,
+                    CloudJobCheckpoint.FINAL_VALIDATED.value,
+                    CloudJobCheckpoint.COMPLETED.value,
+                ),
+            ).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
+    def delete_job(self, job_id: str) -> None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM cloud_agent_jobs WHERE id = ?", (job_id,)
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(job_id)
+
     def patch_job(self, job_id: str, **changes) -> CloudJobRecord:
         if not changes:
             existing = self.get_job(job_id)

@@ -1,0 +1,103 @@
+import pytest
+
+from app.models.cloud_agent import (
+    CloudJobCheckpoint,
+    CloudJobCreate,
+    CloudJobStatus,
+)
+from app.models.six_clip import empty_six_clip_plan
+from app.services.cloud_agent.job_store import CloudJobStore
+from app.services.cloud_agent.storage import CloudJobStorage
+
+
+def _request() -> CloudJobCreate:
+    return CloudJobCreate(
+        subject="Library test",
+        script="A valid narration script for testing.",
+        master_prompt="Create six chronological clips.",
+        clip_plan=empty_six_clip_plan(),
+        language="English",
+        target_words=130,
+        tts_provider="test",
+        voice_id="voice",
+    )
+
+
+def _completed_job(store: CloudJobStore, *, job_id: str, completed_at: str):
+    job = store.create_job(_request(), status=CloudJobStatus.COMPLETED)
+    store.patch_job(
+        job.id,
+        checkpoint=CloudJobCheckpoint.COMPLETED,
+        completed_at=completed_at,
+        final_video="final.mp4",
+    )
+    if job.id != job_id:
+        with store._connect() as connection:
+            connection.execute(
+                "UPDATE cloud_agent_jobs SET id = ? WHERE id = ?", (job_id, job.id)
+            )
+    return store.get_job(job_id)
+
+
+def _queued_job(store: CloudJobStore):
+    return store.create_job(_request())
+
+
+def test_completed_final_candidates_are_sorted_by_completion_then_id(tmp_path):
+    store = CloudJobStore(str(tmp_path / "jobs.sqlite3"))
+    older = _completed_job(
+        store, job_id="a", completed_at="2026-08-28T10:00:00+00:00"
+    )
+    newer = _completed_job(
+        store, job_id="b", completed_at="2026-08-28T11:00:00+00:00"
+    )
+    _queued_job(store)
+    assert [job.id for job in store.list_completed_final_candidates()] == [
+        newer.id,
+        older.id,
+    ]
+
+
+def test_stage_job_artifacts_moves_only_its_job_and_rejects_escape(tmp_path):
+    storage = CloudJobStorage(tmp_path / "jobs")
+    target = storage.prepare("job-a")
+    sibling = storage.prepare("job-b")
+    target.final_file.write_bytes(b"mp4")
+    sibling.final_file.write_bytes(b"mp4")
+    staged = storage.stage_job_artifacts("job-a")
+    assert not target.job_dir.exists()
+    assert staged.is_dir()
+    assert sibling.final_file.exists()
+    with pytest.raises(ValueError):
+        storage.stage_job_artifacts("../outside")
+
+
+def test_final_video_validation_requires_the_canonical_existing_file(tmp_path):
+    storage = CloudJobStorage(tmp_path / "jobs")
+    paths = storage.prepare("job-a")
+    paths.final_file.write_bytes(b"mp4")
+    assert storage.has_valid_final_video("job-a", str(paths.final_file))
+    assert not storage.has_valid_final_video("job-a", str(paths.job_dir / "missing.mp4"))
+    assert not storage.has_valid_final_video("job-a", "../outside.mp4")
+
+
+def test_staged_job_can_be_restored_or_purged_only_under_deleting_root(tmp_path):
+    storage = CloudJobStorage(tmp_path / "jobs")
+    storage.prepare("job-a").final_file.write_bytes(b"mp4")
+    staged = storage.stage_job_artifacts("job-a")
+    storage.restore_staged_job("job-a", staged)
+    assert storage.prepare("job-a").final_file.exists()
+    staged = storage.stage_job_artifacts("job-a")
+    storage.purge_staged_job(staged)
+    assert not staged.exists()
+    with pytest.raises(ValueError):
+        storage.purge_staged_job(tmp_path)
+
+
+def test_delete_job_removes_one_record_and_rejects_missing_id(tmp_path):
+    store = CloudJobStore(str(tmp_path / "jobs.sqlite3"))
+    job = store.create_job(_request())
+    store.delete_job(job.id)
+    assert store.get_job(job.id) is None
+    with pytest.raises(KeyError):
+        store.delete_job(job.id)
