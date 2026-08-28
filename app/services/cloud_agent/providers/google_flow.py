@@ -448,6 +448,8 @@ class FlowWorkspaceRun:
             raise ValueError("Google Flow workspace requires exactly six clips")
         try:
             self.client._wait_for_generation(self.page, expected_count)
+        except FlowBatchIncompleteError:
+            raise
         except MediaValidationError as exc:
             raise FlowWorkspaceVerificationError(
                 "Google Flow existing generation could not be reconciled"

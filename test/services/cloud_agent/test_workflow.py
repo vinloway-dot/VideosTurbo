@@ -14,6 +14,7 @@ from app.models.cloud_agent import (
 from app.models.six_clip import empty_six_clip_plan
 from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
+    FlowBatchIncompleteError,
     FlowWorkspaceVerificationError,
     HumanRequiredError,
     MediaValidationError,
@@ -425,7 +426,16 @@ class PostCleanRecordingCanva(RecordingCanva):
             raise self.cleanup_error
 
 
-def _workflow(tmp_path, store, *, preflight=None, tts=None, flow=None, canva=None):
+def _workflow(
+    tmp_path,
+    store,
+    *,
+    preflight=None,
+    tts=None,
+    flow=None,
+    canva=None,
+    flow_recovery=None,
+):
     return CloudAgentWorkflow(
         store,
         CloudJobStorage(tmp_path / "jobs"),
@@ -439,6 +449,7 @@ def _workflow(tmp_path, store, *, preflight=None, tts=None, flow=None, canva=Non
         final_min_size_bytes=1,
         expected_width=1080,
         expected_height=1920,
+        flow_recovery=flow_recovery,
     )
 
 
@@ -851,6 +862,51 @@ def test_flow_error_after_paid_fence_requires_human_reconciliation(
     assert result.error_code == "FLOW_GENERATION_RECONCILIATION_REQUIRED"
     assert workspace.generate_calls == 1
     assert workspace.reconcile_calls == 0
+
+
+def test_incomplete_original_batch_delegates_to_targeted_recovery(
+    monkeypatch,
+    tmp_path,
+):
+    class CompletingRecovery:
+        def __init__(self):
+            self.calls = []
+
+        def recover_incomplete_batch(self, current_job, workspace, paths):
+            self.calls.append((current_job.id, workspace))
+            for path in paths.flow_files:
+                path.write_bytes(b"recovered")
+            return paths.flow_files
+
+        def resume_unresolved_recovery(self, current_job, workspace, paths):
+            raise AssertionError("fresh failure must not resume")
+
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    events = []
+    workspace = FenceWorkspace(
+        store,
+        events,
+        generate_error=FlowBatchIncompleteError(
+            completed_count=5,
+            failed_count=1,
+        ),
+    )
+    recovery = CompletingRecovery()
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        flow=FenceFlow(workspace, events),
+        flow_recovery=recovery,
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert len(recovery.calls) == 1
+    assert workspace.generate_calls == 1
+    assert result.status is CloudJobStatus.COMPLETED
 
 
 def test_unresolved_tts_ready_reconciles_existing_six_without_prepare_or_generate(

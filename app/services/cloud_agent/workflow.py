@@ -9,13 +9,20 @@ from app.models.cloud_agent import (
     CloudJobCheckpoint,
     CloudJobRecord,
     CloudJobStatus,
+    FlowRecoveryState,
 )
 from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
+    FlowBatchIncompleteError,
     FlowWorkspaceVerificationError,
     HumanRequiredError,
     MediaValidationError,
     NarrationTooLongError,
+)
+from app.services.cloud_agent.flow_recovery import (
+    FlowRecoveryCoordinator,
+    FlowRecoveryExhausted,
+    FlowRecoveryMappingError,
 )
 from app.services.cloud_agent.flow_archive import (
     recover_flow_artifacts,
@@ -60,6 +67,20 @@ class FlowWorkspace(Protocol):
     ) -> tuple[Path, ...]: ...
 
     def cleanup_and_verify_empty(self) -> None: ...
+
+    def capture_partial_inventory(self, paths: JobPaths, *, attempt: int): ...
+
+    def prepare_targeted_replacement(
+        self, prompt: str, *, missing_index: int
+    ): ...
+
+    def submit_targeted_replacement(
+        self, prompt: str, *, missing_index: int
+    ) -> None: ...
+
+    def reconcile_targeted_replacement(
+        self, paths: JobPaths, *, missing_index: int, attempt: int
+    ): ...
 
 
 class FlowClient(Protocol):
@@ -109,6 +130,7 @@ class CloudAgentWorkflow:
         final_min_size_bytes: int,
         expected_width: int,
         expected_height: int,
+        flow_recovery: FlowRecoveryCoordinator | None = None,
     ):
         self.store = store
         self.storage = storage
@@ -122,6 +144,11 @@ class CloudAgentWorkflow:
         self.final_min_size_bytes = final_min_size_bytes
         self.expected_width = expected_width
         self.expected_height = expected_height
+        self.flow_recovery = flow_recovery or FlowRecoveryCoordinator(
+            store,
+            expected_width=expected_width,
+            expected_height=expected_height,
+        )
 
     def _get_job(self, job_id: str) -> CloudJobRecord:
         job = self.store.get_job(job_id)
@@ -325,6 +352,12 @@ class CloudAgentWorkflow:
                 with self.flow.acquire_workspace(job) as workspace:
                     if recovered is not None:
                         generated = recovered.paths
+                    elif job.flow_recovery_state is not FlowRecoveryState.NONE:
+                        generated = self.flow_recovery.resume_unresolved_recovery(
+                            job,
+                            workspace,
+                            paths,
+                        )
                     elif job.flow_generation_unresolved:
                         job = self.store.patch_job(
                             job.id,
@@ -332,7 +365,14 @@ class CloudAgentWorkflow:
                             current_step="flow_reconciling",
                             progress=35,
                         )
-                        generated = workspace.reconcile_and_download(job, paths)
+                        try:
+                            generated = workspace.reconcile_and_download(job, paths)
+                        except FlowBatchIncompleteError:
+                            generated = self.flow_recovery.recover_incomplete_batch(
+                                self._get_job(job.id),
+                                workspace,
+                                paths,
+                            )
                     else:
                         workspace.prepare_for_generation()
                         workspace.prepare_agent_prompt(job.master_prompt)
@@ -344,10 +384,17 @@ class CloudAgentWorkflow:
                             progress=35,
                             flow_generation_unresolved=True,
                         )
-                        generated = workspace.submit_prepared_generation_and_download(
-                            job,
-                            paths,
-                        )
+                        try:
+                            generated = workspace.submit_prepared_generation_and_download(
+                                job,
+                                paths,
+                            )
+                        except FlowBatchIncompleteError:
+                            generated = self.flow_recovery.recover_incomplete_batch(
+                                self._get_job(job.id),
+                                workspace,
+                                paths,
+                            )
                     if len(generated) != 6:
                         raise MediaValidationError(
                             f"Flow step must produce exactly six clips; got {len(generated)}"
@@ -370,6 +417,9 @@ class CloudAgentWorkflow:
                         progress=60,
                         flow_generation_unresolved=False,
                         flow_cleanup_unresolved=True,
+                        flow_recovery_state=FlowRecoveryState.NONE,
+                        flow_missing_clip_index=0,
+                        flow_recovery_baseline="",
                     )
                     try:
                         workspace.cleanup_and_verify_empty()
@@ -483,6 +533,24 @@ class CloudAgentWorkflow:
                 job.id,
                 status=CloudJobStatus.FAILED,
                 current_step="failed",
+                error_code=exc.error_code,
+                error_message=str(exc),
+            )
+        except FlowRecoveryExhausted as exc:
+            return self.store.patch_job(
+                job.id,
+                status=CloudJobStatus.FAILED,
+                checkpoint=CloudJobCheckpoint.TTS_READY,
+                current_step="failed",
+                error_code=exc.error_code,
+                error_message=str(exc),
+            )
+        except FlowRecoveryMappingError as exc:
+            return self.store.patch_job(
+                job.id,
+                status=CloudJobStatus.HUMAN_REQUIRED,
+                checkpoint=CloudJobCheckpoint.TTS_READY,
+                current_step="human_required",
                 error_code=exc.error_code,
                 error_message=str(exc),
             )
