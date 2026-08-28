@@ -774,6 +774,44 @@ def _advanced_settings_container():
     return st.expander("Advanced settings", expanded=False)
 
 
+def _render_settings_research_provider_selector(
+    *, ui_state, research_settings, research_provider_catalog
+):
+    provider_labels = {
+        item["id"]: item["label"] for item in research_provider_catalog
+    }
+    state_key = "cloud_agent_settings_research_provider"
+    provider = str(ui_state.get(state_key) or research_settings["provider"])
+    if provider not in provider_labels:
+        provider = next(iter(provider_labels), "")
+    ui_state[state_key] = provider
+    provider_ids = list(provider_labels)
+    return st.selectbox(
+        "Research Provider",
+        provider_ids,
+        index=provider_ids.index(provider) if provider in provider_ids else 0,
+        format_func=lambda value: provider_labels[value],
+        key=state_key,
+    )
+
+
+def _render_settings_tts_provider_selector(*, ui_state, defaults, provider_catalog):
+    provider_labels = {item["id"]: item["label"] for item in provider_catalog}
+    state_key = "cloud_agent_settings_tts_provider"
+    provider = str(ui_state.get(state_key) or defaults["tts_provider"])
+    if provider not in provider_labels:
+        provider = next(iter(provider_labels), "")
+    ui_state[state_key] = provider
+    provider_ids = list(provider_labels)
+    return st.selectbox(
+        "TTS Provider",
+        provider_ids,
+        index=provider_ids.index(provider) if provider in provider_ids else 0,
+        format_func=lambda value: provider_labels[value],
+        key=state_key,
+    )
+
+
 def _render_advanced_settings(
     *,
     ui_state,
@@ -782,10 +820,17 @@ def _render_advanced_settings(
     research_provider_catalog,
     provider,
     provider_metadata,
-    include_research: bool = False,
+    include_research: bool | None = None,
+    include_tts: bool = True,
+    research_provider_state_key: str = "cloud_agent_research_provider",
 ):
-    if include_research or ui_state.get("cloud_agent_script_mode") == "Research Script":
-        research_provider = str(ui_state.get("cloud_agent_research_provider", "") or "")
+    should_render_research = (
+        ui_state.get("cloud_agent_script_mode") == "Research Script"
+        if include_research is None
+        else include_research
+    )
+    if should_render_research:
+        research_provider = str(ui_state.get(research_provider_state_key, "") or "")
         research_provider_labels = {
             item["id"]: item["label"] for item in research_provider_catalog
         }
@@ -860,6 +905,7 @@ def _render_advanced_settings(
                     }
                 )
                 if verified:
+                    ui_state["cloud_agent_research_provider"] = research_provider
                     ui_state["cloud_agent_research_settings_feedback"] = message
                     st.rerun()
                 else:
@@ -895,6 +941,9 @@ def _render_advanced_settings(
         if feedback := ui_state.get("cloud_agent_research_key_feedback"):
             feedback_kind, feedback_message = feedback
             (st.success if feedback_kind == "success" else st.error)(feedback_message)
+
+    if not include_tts:
+        return
 
     if feedback := ui_state.get("cloud_agent_tts_settings_feedback"):
         st.success(feedback)

@@ -103,6 +103,81 @@ def test_advanced_settings_are_collapsed_behind_one_disclosure(monkeypatch):
     assert fake.calls == [("Advanced settings", {"expanded": False})]
 
 
+def test_settings_provider_selectors_keep_research_and_tts_selection_separate(
+    monkeypatch,
+):
+    class SelectorStreamlit:
+        def __init__(self):
+            self.calls = []
+
+        def selectbox(self, label, options, **kwargs):
+            self.calls.append((label, list(options), kwargs["key"]))
+            return options[kwargs.get("index", 0)]
+
+    fake = SelectorStreamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake)
+    ui_state = {}
+    research_provider = cloud_agent._render_settings_research_provider_selector(
+        ui_state=ui_state,
+        research_settings={"provider": "openrouter"},
+        research_provider_catalog=[
+            {
+                "id": "openrouter",
+                "label": "OpenRouter",
+                "models": ["openai/gpt-5.6-sol-pro", "custom"],
+                "default_model": "openai/gpt-5.6-sol-pro",
+                "custom_model_id": "",
+                "api_key_configured": True,
+            },
+            {
+                "id": "aihubmix",
+                "label": "AIHubMix",
+                "models": ["gpt-5.6-sol", "custom"],
+                "default_model": "gpt-5.6-sol",
+                "custom_model_id": "",
+                "api_key_configured": True,
+            },
+        ],
+    )
+    tts_provider = cloud_agent._render_settings_tts_provider_selector(
+        ui_state=ui_state,
+        defaults={"tts_provider": "elevenlabs"},
+        provider_catalog=[
+            {
+                "id": "azure-tts-v1",
+                "label": "Azure TTS V1",
+                "voices": [],
+                "settings": [],
+                "requires_explicit_voice_refresh": False,
+            },
+            {
+                "id": "elevenlabs",
+                "label": "ElevenLabs TTS",
+                "voices": [],
+                "settings": [],
+                "requires_explicit_voice_refresh": True,
+            },
+        ],
+    )
+
+    assert research_provider == "openrouter"
+    assert tts_provider == "elevenlabs"
+    assert ui_state["cloud_agent_settings_research_provider"] == "openrouter"
+    assert ui_state["cloud_agent_settings_tts_provider"] == "elevenlabs"
+    assert fake.calls == [
+        (
+            "Research Provider",
+            ["openrouter", "aihubmix"],
+            "cloud_agent_settings_research_provider",
+        ),
+        (
+            "TTS Provider",
+            ["azure-tts-v1", "elevenlabs"],
+            "cloud_agent_settings_tts_provider",
+        ),
+    ]
+
+
 def test_cloud_agent_ui_is_a_thin_fastapi_client_with_required_controls_and_status():
     source = UI_SOURCE.read_text(encoding="utf-8")
 

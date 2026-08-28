@@ -47,19 +47,7 @@ def _render_settings_page():
         except requests.RequestException as exc:
             st.error(cloud_agent._api_error_message(exc))
 
-    provider_labels = {item["id"]: item["label"] for item in provider_catalog}
-    provider = str(defaults.get("tts_provider") or "")
-    if provider not in provider_labels:
-        provider = next(iter(provider_labels), "")
-    provider_metadata = {"voices": [], "settings": []}
-    if hasattr(st, "runtime") and provider:
-        try:
-            provider_metadata = cloud_agent._api("GET", f"tts/providers/{provider}")
-        except requests.RequestException as exc:
-            st.error(cloud_agent._api_error_message(exc))
-
     ui_state.setdefault("cloud_agent_script_mode", "Research Script")
-    ui_state.setdefault("cloud_agent_provider", provider)
     ui_state.setdefault("cloud_agent_voice", defaults.get("voice_id", ""))
     ui_state.setdefault("cloud_agent_speed", defaults.get("voice_speed", 1.0))
     ui_state.setdefault(
@@ -87,8 +75,38 @@ def _render_settings_page():
     ):
         ui_state.setdefault(key, value)
 
-    with st.container(key="cloud_agent_settings_page", border=True):
-        st.subheader("Research and generation settings")
+    with st.container(key="cloud_agent_settings_research", border=True):
+        st.subheader("Research provider")
+        cloud_agent._render_settings_research_provider_selector(
+            ui_state=ui_state,
+            research_settings=research_settings,
+            research_provider_catalog=research_provider_catalog,
+        )
+        cloud_agent._render_advanced_settings(
+            ui_state=ui_state,
+            defaults=defaults,
+            research_settings=research_settings,
+            research_provider_catalog=research_provider_catalog,
+            provider="",
+            provider_metadata={"voices": [], "settings": []},
+            include_research=True,
+            include_tts=False,
+            research_provider_state_key="cloud_agent_settings_research_provider",
+        )
+
+    with st.container(key="cloud_agent_settings_tts", border=True):
+        st.subheader("TTS provider")
+        provider = cloud_agent._render_settings_tts_provider_selector(
+            ui_state=ui_state,
+            defaults=defaults,
+            provider_catalog=provider_catalog,
+        )
+        provider_metadata = {"voices": [], "settings": []}
+        if hasattr(st, "runtime") and provider:
+            try:
+                provider_metadata = cloud_agent._api("GET", f"tts/providers/{provider}")
+            except requests.RequestException as exc:
+                st.error(cloud_agent._api_error_message(exc))
         cloud_agent._render_advanced_settings(
             ui_state=ui_state,
             defaults=defaults,
@@ -96,7 +114,8 @@ def _render_settings_page():
             research_provider_catalog=research_provider_catalog,
             provider=provider,
             provider_metadata=provider_metadata,
-            include_research=True,
+            include_research=False,
+            include_tts=True,
         )
 
 
