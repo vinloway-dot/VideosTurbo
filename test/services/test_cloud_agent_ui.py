@@ -95,6 +95,60 @@ def test_video_library_renderer_uses_public_video_urls_and_numbered_pages(monkey
     assert any(config.get("key") == "cloud_agent_delete_job-1" for _, config in fake.buttons)
 
 
+def test_video_library_delete_confirmation_limits_scope_to_local_videosturbo_storage(
+    monkeypatch,
+):
+    class ConfirmationStreamlit:
+        def __init__(self):
+            self.session_state = {"cloud_agent_delete_job-1": True}
+            self.warnings = []
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def columns(self, count):
+            return [nullcontext() for _ in range(count)]
+
+        def html(self, _body):
+            return None
+
+        def video(self, _url):
+            return None
+
+        def button(self, _label, **_kwargs):
+            return False
+
+        def warning(self, message):
+            self.warnings.append(message)
+
+    fake = ConfirmationStreamlit()
+    monkeypatch.setattr(cloud_agent_ui, "st", fake)
+
+    cloud_agent_ui.render_video_library(
+        cloud_agent_ui.VideoLibraryView(
+            items=(
+                cloud_agent_ui.VideoCardView(
+                    job_id="job-1",
+                    subject="Newest",
+                    completed_at="2026-08-28T12:00:00+00:00",
+                    final_url="/cloud-agent/jobs/job-1/final",
+                ),
+            ),
+            page=1,
+            total_pages=1,
+            total_items=1,
+        ),
+        on_delete=lambda _job_id: None,
+        on_page=lambda _page: None,
+    )
+
+    assert fake.warnings == [
+        "การลบนี้จะลบวิดีโอและไฟล์งานของรายการนี้ออกจากที่เก็บข้อมูล "
+        "VideosTurbo ภายในเครื่องอย่างถาวรเท่านั้น และจะไม่ลบข้อมูลจาก "
+        "Google Flow หรือ Canva"
+    ]
+
+
 class ShellStreamlit:
     def __init__(self):
         self.html_bodies = []

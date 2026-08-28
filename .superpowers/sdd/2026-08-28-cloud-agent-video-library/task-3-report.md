@@ -56,3 +56,20 @@ Results: 26 tests passed, Ruff reported `All checks passed!`, and `git diff
   5 x 2 layout.  Task 4 remains responsible for fetch/delete orchestration,
   page refresh, and empty-page fallback after a successful deletion.
 - No backend files or main page integration were changed.
+
+## Review fix: deletion-scope confirmation
+
+Added `test_video_library_delete_confirmation_limits_scope_to_local_videosturbo_storage`.
+It first failed against the vague `VideosTurbo cloud` confirmation.  The
+confirmation now states in Thai that deletion permanently removes only the
+selected video's job artifacts from local VideosTurbo storage and does not
+delete Google Flow or Canva data.
+
+Verification:
+
+```bash
+uv run python -X utf8 -m pytest test/services/test_cloud_agent_ui.py -k 'delete_confirmation_limits_scope' -v
+uv run ruff check webui/cloud_agent_ui.py test/services/test_cloud_agent_ui.py
+```
+
+Results: 1 focused test passed and Ruff reported `All checks passed!`.

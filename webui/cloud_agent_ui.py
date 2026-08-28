@@ -113,7 +113,11 @@ def render_video_library(
                             ):
                                 st.session_state[delete_key] = True
                             if st.session_state.get(delete_key):
-                                st.warning("การลบนี้ถาวรภายใน VideosTurbo cloud")
+                                st.warning(
+                                    "การลบนี้จะลบวิดีโอและไฟล์งานของรายการนี้ออกจากที่เก็บข้อมูล "
+                                    "VideosTurbo ภายในเครื่องอย่างถาวรเท่านั้น และจะไม่ลบข้อมูลจาก "
+                                    "Google Flow หรือ Canva"
+                                )
                                 if st.button(
                                     "ยืนยันการลบ",
                                     key=f"cloud_agent_confirm_delete_{card.job_id}",
