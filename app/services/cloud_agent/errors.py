@@ -13,6 +13,18 @@ class FlowArchiveValidationError(MediaValidationError):
     """Raised when a Flow bulk-download archive is unsafe or incomplete."""
 
 
+class FlowBatchIncompleteError(MediaValidationError):
+    """Raised when Flow exposes a terminal failed output in a six-clip batch."""
+
+    def __init__(self, *, completed_count: int, failed_count: int):
+        self.completed_count = int(completed_count)
+        self.failed_count = int(failed_count)
+        super().__init__(
+            "Google Flow batch ended with "
+            f"{self.completed_count} completed and {self.failed_count} failed clips"
+        )
+
+
 class NarrationTooLongError(MediaValidationError):
     """Raised before Flow when six clips would require excessive slowing."""
 

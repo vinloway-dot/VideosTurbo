@@ -9,6 +9,7 @@ from playwright.sync_api import Error as PlaywrightError
 from app.models.cloud_agent import ServiceSessionStatus
 from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
+    FlowBatchIncompleteError,
     FlowWorkspaceVerificationError,
     HumanRequiredError,
     MediaValidationError,
@@ -425,7 +426,24 @@ class FakeLocator:
             return str(self.page.agent_pressed).lower()
         if self.kind == "generated_image" and name == "alt":
             return self.page.generated_image_alts[self.index]
+        if self.kind == "media_card" and name == "aria-busy":
+            if self.index >= len(self.page.active_completed_video_poll):
+                return "false"
+            card = self.page.active_completed_video_poll[self.index]
+            return "true" if card.get("busy", False) else "false"
         return None
+
+    def inner_text(self):
+        if self.kind == "media_card":
+            if self.index >= len(self.page.active_completed_video_poll):
+                return ""
+            card = self.page.active_completed_video_poll[self.index]
+            if card.get("failed"):
+                return card.get("failure_text", "Audio Generation Failed")
+            if card.get("processing"):
+                return "Processing"
+            return card.get("description", "Duration 00:10")
+        raise AssertionError(f"inner_text is unavailable for {self.kind}")
 
     def input_value(self):
         assert self.kind in {
@@ -2741,7 +2759,6 @@ def test_google_flow_completed_video_cards_require_card_local_video_descendant(
     "cards",
     [
         _completed_video_cards(processing=True),
-        _completed_video_cards(failed=True),
         _completed_video_cards(
             fingerprints=("a", "b", "c", "d", "e", "unknown"),
         )[:-1]
@@ -2754,7 +2771,7 @@ def test_google_flow_completed_video_cards_require_card_local_video_descendant(
             }
         ],
     ],
-    ids=("processing", "failed", "unknown_media"),
+    ids=("processing", "unknown_media"),
 )
 def test_google_flow_completed_video_cards_fail_closed_on_unsafe_card_evidence(
     monkeypatch,
@@ -2769,6 +2786,69 @@ def test_google_flow_completed_video_cards_fail_closed_on_unsafe_card_evidence(
 
     with pytest.raises(FlowWorkspaceVerificationError, match="timed out"):
         client._wait_for_generation(page, expected_count=6)
+
+
+def test_visible_failed_output_card_stops_wait_before_generation_timeout(
+    monkeypatch,
+):
+    cards = _completed_video_cards()
+    cards[-1].update(failed=True, has_video_element=False)
+    page = FakePage(
+        progress_html=["<main>Generating</main>"],
+        completed_video_polls=[cards],
+    )
+    client, _ = _client(page, timeout_seconds=1800)
+    sleep_calls = []
+    monkeypatch.setattr(google_flow.time, "sleep", sleep_calls.append)
+
+    with pytest.raises(FlowBatchIncompleteError) as error:
+        client._wait_for_generation(page, expected_count=6)
+
+    assert error.value.completed_count == 5
+    assert error.value.failed_count == 1
+    assert sleep_calls == []
+
+
+def test_agent_panel_failure_text_does_not_count_as_failed_output_card():
+    page = FakePage(
+        progress_html=["<aside>Audio Generation Failed</aside>"],
+        completed_video_polls=[[]],
+    )
+    client, _ = _client(page)
+
+    assert client._failed_output_card_count(page) == 0
+
+
+def test_targeted_submit_uses_exact_prepared_prompt_and_one_generate_click():
+    page = FakePage(progress_html=["<div>Ready</div>"])
+    client, _ = _client(page)
+    workspace = google_flow.FlowWorkspaceRun(client, page)
+    exact_wrapper = "Name only the new completed video clip 2.\n\nEXACT PROMPT"
+
+    workspace.prepare_targeted_replacement(exact_wrapper, missing_index=2)
+    workspace.submit_targeted_replacement(exact_wrapper, missing_index=2)
+
+    assert page.last_filled == exact_wrapper
+    assert page.actions.count(("click", "generate")) == 1
+
+
+def test_reconcile_never_clicks_generate(tmp_path):
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        completed_video_polls=[[]],
+    )
+    client, _ = _client(page)
+    workspace = google_flow.FlowWorkspaceRun(client, page)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+
+    result = workspace.reconcile_targeted_replacement(
+        paths,
+        missing_index=2,
+        attempt=1,
+    )
+
+    assert result.state in set(google_flow.FlowRecoveryRemoteState)
+    assert page.actions.count(("click", "generate")) == 0
 
 
 def test_google_flow_completed_video_cards_preserve_generated_image_failure_gate(

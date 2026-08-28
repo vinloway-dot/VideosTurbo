@@ -4,6 +4,7 @@ import re
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlsplit, urlunsplit
@@ -13,11 +14,16 @@ from playwright.sync_api import Error as PlaywrightError
 from app.models.cloud_agent import CloudJobRecord, ServiceSessionStatus
 from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
+    FlowBatchIncompleteError,
     FlowWorkspaceVerificationError,
     HumanRequiredError,
     MediaValidationError,
 )
-from app.services.cloud_agent.flow_archive import materialize_flow_archive
+from app.services.cloud_agent.flow_archive import (
+    FlowPartialInventory,
+    inspect_partial_flow_archive,
+    materialize_flow_archive,
+)
 from app.services.cloud_agent.providers._browser_session import BrowserSessionProvider
 from app.services.cloud_agent.providers._session_detection import (
     classify_security_challenge,
@@ -126,6 +132,10 @@ _ANNOUNCEMENT_DIALOG_RE = re.compile(
     re.IGNORECASE,
 )
 RENAME_CLIPS_INSTRUCTION = "เปลี่ยนชื่อคลิปตามลำดับ ของวีดีโอ"
+RENAME_SURVIVING_CLIPS_INSTRUCTION = (
+    "เปลี่ยนชื่อวิดีโอที่สร้างสำเร็จแต่ละรายการตามหมายเลข CLIP เดิม "
+    "ห้ามเลื่อนหมายเลขเพื่อปิดช่องว่าง ห้ามตั้งชื่อซ้ำ และห้ามเปลี่ยนลำดับ"
+)
 _DIRECT_LINK_RECOVERY_CYCLES = 2
 
 
@@ -141,6 +151,20 @@ class AgentComposer:
     container: Any
     prompt: Any
     generate: Any
+
+
+class FlowRecoveryRemoteState(str, Enum):
+    RUNNING = "RUNNING"
+    FAILED = "FAILED"
+    COMPLETE_PROJECT = "COMPLETE_PROJECT"
+    REPLACEMENT_ONLY = "REPLACEMENT_ONLY"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+@dataclass(frozen=True)
+class FlowRecoveryObservation:
+    state: FlowRecoveryRemoteState
+    snapshot_path: Path | None = None
 
 
 def classify_google_flow_session(*, url: str, html: str) -> ServiceSessionStatus:
@@ -186,6 +210,8 @@ class FlowWorkspaceRun:
         self.client = client
         self.page = page
         self._prepared_master_prompt = ""
+        self._prepared_recovery_prompt = ""
+        self._prepared_missing_index = 0
 
     def preclean_and_verify_empty(self) -> None:
         while self.client._media_card_count(self.page):
@@ -293,6 +319,104 @@ class FlowWorkspaceRun:
         self._prepared_master_prompt = master_prompt
         return prepared
 
+    def prepare_targeted_replacement(
+        self,
+        prompt: str,
+        *,
+        missing_index: int,
+    ) -> AgentComposer:
+        if missing_index < 1 or missing_index > 6:
+            raise ValueError("missing_index must be between 1 and 6")
+        prepared = self.client._prepare_agent_prompt(self.page, prompt)
+        self._prepared_recovery_prompt = prompt
+        self._prepared_missing_index = missing_index
+        return prepared
+
+    def submit_targeted_replacement(
+        self,
+        prompt: str,
+        *,
+        missing_index: int,
+    ) -> None:
+        if (
+            self._prepared_recovery_prompt != prompt
+            or self._prepared_missing_index != missing_index
+        ):
+            raise FlowWorkspaceVerificationError(
+                "Google Flow targeted replacement prompt could not be verified"
+            )
+        self.client._dismiss_safe_announcement_dialog(self.page)
+        self.client._submit_prepared_agent_prompt(self.page, prompt)
+
+    def capture_partial_inventory(
+        self,
+        paths: JobPaths,
+        *,
+        attempt: int,
+    ) -> FlowPartialInventory:
+        response_count = self.client._agent_response_count(self.page)
+        self.client._submit_agent_prompt(
+            self.page,
+            RENAME_SURVIVING_CLIPS_INSTRUCTION,
+        )
+        self._wait_for_rename_response_then_refresh(response_count)
+        snapshot = paths.flow_snapshots_dir / f"partial-{attempt}.zip"
+        self._download_project_archive_to(snapshot)
+        inventory = inspect_partial_flow_archive(
+            snapshot,
+            paths,
+            min_size_bytes=1,
+        )
+        if self._semantic_name_numbers() != inventory.semantic_numbers:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow missing clip position could not be corroborated"
+            )
+        return inventory
+
+    def download_recovery_snapshot(
+        self,
+        paths: JobPaths,
+        *,
+        attempt: int,
+    ) -> Path:
+        if attempt < 1 or attempt > 2:
+            raise ValueError("attempt must be between 1 and 2")
+        snapshot = paths.flow_snapshots_dir / f"replacement-{attempt}.zip"
+        self._download_project_archive_to(snapshot)
+        return snapshot
+
+    def reconcile_targeted_replacement(
+        self,
+        paths: JobPaths,
+        *,
+        missing_index: int,
+        attempt: int,
+    ) -> FlowRecoveryObservation:
+        if missing_index < 1 or missing_index > 6:
+            raise ValueError("missing_index must be between 1 and 6")
+        completed, failed = self.client._terminal_output_card_counts(self.page)
+        if failed:
+            return FlowRecoveryObservation(FlowRecoveryRemoteState.FAILED)
+        if (
+            self.page.locator('[aria-busy="true"]:visible').count()
+            or self.page.get_by_role("progressbar").count()
+        ):
+            return FlowRecoveryObservation(FlowRecoveryRemoteState.RUNNING)
+        semantic_numbers = self._semantic_name_numbers()
+        if semantic_numbers == tuple(range(1, 7)) and completed >= 6:
+            snapshot = self.download_recovery_snapshot(paths, attempt=attempt)
+            return FlowRecoveryObservation(
+                FlowRecoveryRemoteState.COMPLETE_PROJECT,
+                snapshot,
+            )
+        if semantic_numbers == (missing_index,) and completed == 1:
+            snapshot = self.download_recovery_snapshot(paths, attempt=attempt)
+            return FlowRecoveryObservation(
+                FlowRecoveryRemoteState.REPLACEMENT_ONLY,
+                snapshot,
+            )
+        return FlowRecoveryObservation(FlowRecoveryRemoteState.AMBIGUOUS)
+
     def submit_prepared_generation_and_download(
         self,
         job: CloudJobRecord,
@@ -365,6 +489,9 @@ class FlowWorkspaceRun:
         )
 
     def _download_project_archive(self, paths: JobPaths) -> None:
+        self._download_project_archive_to(paths.flow_archive_file)
+
+    def _download_project_archive_to(self, destination: Path) -> None:
         project_menu = self.page.get_by_role(
             "button",
             name=_CARD_OVERFLOW_NAME_RE,
@@ -392,11 +519,24 @@ class FlowWorkspaceRun:
             )
         with self.page.expect_download() as download_info:
             download_project.click()
-        download_info.value.save_as(str(paths.flow_archive_file))
-        if not paths.flow_archive_file.is_file():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        download_info.value.save_as(str(destination))
+        if not destination.is_file():
             raise FlowArchiveValidationError(
                 "Google Flow project download did not produce an archive"
             )
+
+    def _semantic_name_numbers(self) -> tuple[int, ...]:
+        if self.page.get_by_role("checkbox").count() > 6:
+            return ()
+        numbers = tuple(
+            number
+            for number in range(1, 7)
+            if self.page.get_by_text(f"clip {number}", exact=True).count() == 1
+        )
+        if len(numbers) != self.page.get_by_role("checkbox").count():
+            return ()
+        return numbers
 
     def _semantic_names_are_complete(self, expected_count: int) -> bool:
         if self.page.get_by_role("checkbox").count() != expected_count:
@@ -901,6 +1041,15 @@ class GoogleFlowClient:
                 raise FlowWorkspaceVerificationError(
                     "Google Flow generated image output detected before six videos"
                 )
+            completed_count, failed_count = self._terminal_output_card_counts(page)
+            if (
+                failed_count
+                and completed_count + failed_count == expected_count
+            ):
+                raise FlowBatchIncompleteError(
+                    completed_count=completed_count,
+                    failed_count=failed_count,
+                )
             progress = self._progress_for_expected_count(page.content(), expected_count)
             if progress is not None and progress >= expected_count:
                 return
@@ -922,6 +1071,36 @@ class GoogleFlowClient:
                     f"Google Flow generation timed out before {expected_count}/{expected_count}"
                 )
             time.sleep(self.poll_seconds)
+
+    @classmethod
+    def _terminal_output_card_counts(cls, page: Any) -> tuple[int, int]:
+        if (
+            page.locator('[aria-busy="true"]:visible').count()
+            or page.get_by_role("progressbar").count()
+        ):
+            return (0, 0)
+        cards = cls._media_cards(page)
+        completed = 0
+        failed = 0
+        try:
+            for index in range(cards.count()):
+                card = cards.nth(index)
+                if not card.is_visible() or card.get_attribute("aria-busy") == "true":
+                    continue
+                text = str(card.inner_text() or "")
+                if _CARD_PROCESSING_RE.search(text):
+                    continue
+                if _CARD_FAILURE_RE.search(text):
+                    failed += 1
+                elif card.locator("video").count() == 1:
+                    completed += 1
+        except (AttributeError, PlaywrightError):
+            return (0, 0)
+        return completed, failed
+
+    @classmethod
+    def _failed_output_card_count(cls, page: Any) -> int:
+        return cls._terminal_output_card_counts(page)[1]
 
     @classmethod
     def _completed_video_card_fingerprints(
