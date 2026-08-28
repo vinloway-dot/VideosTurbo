@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal, Mapping
 
 import streamlit as st
 
@@ -42,6 +42,120 @@ class ResearchSummary:
     source_links: tuple[tuple[str, str], ...]
     provider_rounds: int | None
     tool_calls: int | None
+
+
+@dataclass(frozen=True)
+class VideoCardView:
+    job_id: str
+    subject: str
+    completed_at: str
+    final_url: str
+
+
+@dataclass(frozen=True)
+class VideoLibraryView:
+    items: tuple[VideoCardView, ...]
+    page: int
+    total_pages: int
+    total_items: int
+
+
+def video_library_view(payload: Mapping[str, object]) -> VideoLibraryView:
+    items = tuple(
+        VideoCardView(
+            job_id=str(item.get("job_id") or ""),
+            subject=str(item.get("subject") or ""),
+            completed_at=str(item.get("completed_at") or ""),
+            final_url=str(item.get("final_url") or ""),
+        )
+        for value in payload.get("items") or ()
+        if isinstance(value, Mapping)
+        for item in (value,)
+    )
+    return VideoLibraryView(
+        items=items,
+        page=max(1, int(payload.get("page") or 1)),
+        total_pages=max(1, int(payload.get("total_pages") or 1)),
+        total_items=max(0, int(payload.get("total_items") or 0)),
+    )
+
+
+def render_video_library(
+    view: VideoLibraryView,
+    *,
+    load_video: Callable[[str], bytes],
+    pending_delete_id: str,
+    on_delete_request: Callable[[str], None],
+    on_delete_confirm: Callable[[str], None],
+    on_delete_cancel: Callable[[str], None],
+    on_page: Callable[[int], None],
+) -> None:
+    with st.container(key="cloud_agent_video_library"):
+        st.html('<h2 class="vt-video-library__title">วีดีโอที่สร้าง</h2>')
+        if not view.items:
+            st.html(
+                '<p class="vt-video-library__empty">ยังไม่มีวิดีโอที่สร้างเสร็จ</p>'
+            )
+        else:
+            with st.container(key="cloud_agent_video_library_grid"):
+                cards = view.items[:10]
+                for row_start in range(0, len(cards), 5):
+                    columns = st.columns(5)
+                    for column, card in zip(columns, cards[row_start : row_start + 5]):
+                        with column:
+                            with st.container(
+                                key=f"cloud_agent_video_card_{card.job_id}", border=True
+                            ):
+                                try:
+                                    media = load_video(card.final_url)
+                                    if not media:
+                                        raise ValueError("empty video media")
+                                    st.video(media, format="video/mp4")
+                                except Exception:
+                                    st.warning("วิดีโอนี้ยังเปิดไม่ได้ กรุณาลองใหม่ภายหลัง")
+                                st.html(
+                                    '<p class="vt-video-library-card__subject">'
+                                    f"{escape(card.subject)}</p>"
+                                    '<p class="vt-video-library-card__time">'
+                                    f"{escape(card.completed_at)}</p>"
+                                )
+                                delete_requested = st.button(
+                                    "ลบ",
+                                    key=f"cloud_agent_delete_{card.job_id}",
+                                    type="secondary",
+                                    disabled=False,
+                                )
+                                is_pending = pending_delete_id == card.job_id
+                                if delete_requested:
+                                    on_delete_request(card.job_id)
+                                    is_pending = True
+                                if is_pending:
+                                    st.warning(
+                                        "การลบนี้จะลบวิดีโอและไฟล์งานของรายการนี้ออกจากที่เก็บข้อมูล "
+                                        "VideosTurbo ภายในเครื่องอย่างถาวรเท่านั้น และจะไม่ลบข้อมูลจาก "
+                                        "Google Flow หรือ Canva"
+                                    )
+                                    if st.button(
+                                        "ยืนยันการลบ",
+                                        key=f"cloud_agent_confirm_delete_{card.job_id}",
+                                        type="primary",
+                                    ):
+                                        on_delete_confirm(card.job_id)
+                                    if st.button(
+                                        "ยกเลิก",
+                                        key=f"cloud_agent_cancel_delete_{card.job_id}",
+                                        type="secondary",
+                                    ):
+                                        on_delete_cancel(card.job_id)
+        if view.total_pages > 1:
+            with st.container(key="cloud_agent_video_library_pagination"):
+                for page in range(1, view.total_pages + 1):
+                    if st.button(
+                        str(page),
+                        key=f"cloud_agent_video_page_{page}",
+                        disabled=page == view.page,
+                    ):
+                        on_page(page)
 
 
 def research_summary(*, research_draft_id, sources, accounting) -> ResearchSummary:
@@ -118,23 +232,6 @@ _PRODUCTION_PROGRESS_BY_STEP = {
     "final_validated": "ตรวจสอบวิดีโอสุดท้ายเสร็จแล้ว",
 }
 
-_LIVE_PRODUCTION_STATUSES = {
-    "QUEUED",
-    "PREFLIGHT",
-    "PREFLIGHT_PASSED",
-    "TTS_GENERATING",
-    "TTS_READY",
-    "FLOW_GENERATING",
-    "FLOW_DOWNLOADING",
-    "FLOW_READY",
-    "CANVA_UPLOADING",
-    "CANVA_EDITING",
-    "CAPTIONING",
-    "EXPORTING",
-    "DOWNLOADING_FINAL",
-    "VALIDATING",
-    "FINAL_VALIDATED",
-}
 
 _CSS_PATH = Path(__file__).with_name("cloud_agent.css")
 
@@ -269,10 +366,6 @@ def build_production_progress(job: dict | None) -> ProductionProgressView:
         "กำลังทำงาน",
         _PRODUCTION_PROGRESS_BY_STEP.get(current_step, "กำลังดำเนินการผลิตวิดีโอ"),
     )
-
-
-def job_requires_status_refresh(job: dict | None) -> bool:
-    return str(dict(job or {}).get("status") or "").upper() in _LIVE_PRODUCTION_STATUSES
 
 
 def build_production_stages(

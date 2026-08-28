@@ -1,8 +1,15 @@
+from contextlib import contextmanager
 from dataclasses import dataclass
+import errno
+import os
 from pathlib import Path
+import shutil
+import stat
+from typing import Iterator
 from uuid import uuid4
 
 from app.utils import utils
+from app.utils.file_security import resolve_path_within_directory
 
 
 @dataclass(frozen=True)
@@ -78,6 +85,63 @@ class CloudJobStorage:
             final_file=final_dir / "final.mp4",
         )
 
+    @staticmethod
+    def _directory_open_flags() -> int:
+        return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+    @classmethod
+    @contextmanager
+    def _open_deleting_directory(
+        cls, root: Path, *, create: bool
+    ) -> Iterator[tuple[int, int]]:
+        root_fd = os.open(root, cls._directory_open_flags())
+        deleting_fd = None
+        try:
+            if create:
+                try:
+                    os.mkdir(".deleting", dir_fd=root_fd)
+                except FileExistsError:
+                    pass
+            try:
+                deleting_fd = os.open(
+                    ".deleting", cls._directory_open_flags(), dir_fd=root_fd
+                )
+            except OSError as exc:
+                if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise ValueError(
+                        "deleting directory must be a real directory"
+                    ) from exc
+                raise
+            if not cls._deleting_entry_matches(root_fd, deleting_fd):
+                raise ValueError("deleting directory changed during validation")
+            yield root_fd, deleting_fd
+        finally:
+            if deleting_fd is not None:
+                os.close(deleting_fd)
+            os.close(root_fd)
+
+    @staticmethod
+    def _deleting_entry_matches(root_fd: int, deleting_fd: int) -> bool:
+        try:
+            entry = os.stat(".deleting", dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        opened = os.fstat(deleting_fd)
+        return (
+            stat.S_ISDIR(entry.st_mode)
+            and entry.st_dev == opened.st_dev
+            and entry.st_ino == opened.st_ino
+        )
+
+    @staticmethod
+    def _direct_staged_name(root: Path, staged_dir: Path) -> str:
+        staged = Path(staged_dir)
+        if not staged.is_absolute() or staged.parent != root / ".deleting":
+            raise ValueError("staged path is outside storage root")
+        if not staged.name or staged.name in {".", ".."}:
+            raise ValueError("invalid staged path")
+        return staged.name
+
     def prepare(self, job_id: str) -> JobPaths:
         paths = self._paths(job_id)
         for directory in (
@@ -132,3 +196,102 @@ class CloudJobStorage:
         for source in sources:
             source.replace(destination / source.name)
         return destination
+
+    def has_valid_final_video(self, job_id: str, recorded_final_video: str) -> bool:
+        paths = self._paths(job_id)
+        try:
+            resolved_recorded = Path(
+                resolve_path_within_directory(
+                    str(self.root.resolve()), recorded_final_video, require_file=True
+                )
+            )
+        except (TypeError, ValueError):
+            return False
+        return resolved_recorded == paths.final_file.resolve()
+
+    def stage_job_artifacts(self, job_id: str) -> Path:
+        safe_job_id = self._validate_job_id(job_id)
+        paths = self._paths(safe_job_id)
+        root = self.root.resolve()
+        if paths.job_dir.parent != root:
+            raise ValueError("job path is outside storage root")
+        if paths.job_dir == (root / ".deleting"):
+            raise ValueError("reserved storage directory")
+        staged_name = f"{safe_job_id}-{uuid4().hex}"
+        with self._open_deleting_directory(root, create=True) as (
+            root_fd,
+            deleting_fd,
+        ):
+            try:
+                job_entry = os.stat(
+                    safe_job_id, dir_fd=root_fd, follow_symlinks=False
+                )
+            except FileNotFoundError as exc:
+                raise FileNotFoundError(paths.job_dir) from exc
+            if not stat.S_ISDIR(job_entry.st_mode):
+                raise ValueError("job path must be a directory")
+            os.rename(
+                safe_job_id,
+                staged_name,
+                src_dir_fd=root_fd,
+                dst_dir_fd=deleting_fd,
+            )
+            if not self._deleting_entry_matches(root_fd, deleting_fd):
+                os.rename(
+                    staged_name,
+                    safe_job_id,
+                    src_dir_fd=deleting_fd,
+                    dst_dir_fd=root_fd,
+                )
+                raise ValueError("deleting directory changed during staging")
+        return root / ".deleting" / staged_name
+
+    def restore_staged_job(self, job_id: str, staged_dir: Path) -> None:
+        safe_job_id = self._validate_job_id(job_id)
+        paths = self._paths(safe_job_id)
+        root = self.root.resolve()
+        staged_name = self._direct_staged_name(root, staged_dir)
+        if paths.job_dir.parent != root:
+            raise ValueError("staged path is outside storage root")
+        with self._open_deleting_directory(root, create=False) as (
+            root_fd,
+            deleting_fd,
+        ):
+            try:
+                staged_entry = os.stat(
+                    staged_name, dir_fd=deleting_fd, follow_symlinks=False
+                )
+            except FileNotFoundError as exc:
+                raise FileNotFoundError(staged_dir) from exc
+            if not stat.S_ISDIR(staged_entry.st_mode):
+                raise ValueError("staged path must be a directory")
+            try:
+                os.stat(safe_job_id, dir_fd=root_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise FileExistsError(paths.job_dir)
+            os.rename(
+                staged_name,
+                safe_job_id,
+                src_dir_fd=deleting_fd,
+                dst_dir_fd=root_fd,
+            )
+
+    def purge_staged_job(self, staged_dir: Path) -> None:
+        root = self.root.resolve()
+        staged_name = self._direct_staged_name(root, staged_dir)
+        try:
+            deleting_context = self._open_deleting_directory(root, create=False)
+            with deleting_context as (_root_fd, deleting_fd):
+                try:
+                    staged_entry = os.stat(
+                        staged_name, dir_fd=deleting_fd, follow_symlinks=False
+                    )
+                except FileNotFoundError:
+                    return
+                if not stat.S_ISDIR(staged_entry.st_mode):
+                    raise ValueError("staged path must be a directory")
+                shutil.rmtree(staged_name, dir_fd=deleting_fd)
+        except FileNotFoundError:
+            return

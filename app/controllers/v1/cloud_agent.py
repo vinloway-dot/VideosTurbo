@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Callable
 
 from fastapi import Depends, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.config import config
@@ -54,11 +54,37 @@ from app.services.cloud_agent.tts_settings import (
     CloudTTSSettingsService,
 )
 from app.services.cloud_agent.storage import CloudJobStorage
+from app.services.cloud_agent.video_library import (
+    CloudVideoLibraryService,
+    VideoLibraryNotFoundError,
+)
+from app.services.cloud_agent.event_hub import event_hub
+from app.services.cloud_agent.job_events import CloudJobEvent
 from app.utils import utils
 from app.utils.file_security import resolve_path_within_directory
 
 
 router = new_router()
+
+
+@router.post("/cloud-agent/internal/events", status_code=202)
+async def ingest_cloud_agent_event(event: CloudJobEvent):
+    await event_hub.publish(event)
+    return {"accepted": True}
+
+
+@router.get("/cloud-agent/events/stream")
+async def stream_cloud_agent_events():
+    heartbeat = float(config.app.get("cloud_agent_sse_heartbeat_seconds", 25))
+    return StreamingResponse(
+        event_hub.stream(heartbeat_seconds=heartbeat),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 _ACTIVE_JOB_STATUSES = {
@@ -144,6 +170,15 @@ def get_cloud_job_store() -> CloudJobStore:
 
 def get_cloud_job_storage() -> CloudJobStorage:
     return CloudJobStorage()
+
+
+def get_cloud_video_library_service(
+    store: CloudJobStore = Depends(get_cloud_job_store),
+    storage: CloudJobStorage = Depends(get_cloud_job_storage),
+) -> CloudVideoLibraryService:
+    return CloudVideoLibraryService(
+        store=store, storage=storage
+    )
 
 
 def get_cloud_agent_sessions() -> SessionManager:
@@ -828,6 +863,60 @@ def cancel_cloud_agent_job(
     if job.status in _TERMINAL_JOB_STATUSES:
         _invalid_transition(job.id, "cancel", job.status)
     _invalid_transition(job.id, "cancel", job.status)
+
+
+@router.get("/cloud-agent/videos")
+def list_cloud_agent_videos(
+    request: Request,
+    page: int = 1,
+    page_size: int = 10,
+    library: CloudVideoLibraryService = Depends(get_cloud_video_library_service),
+):
+    del request
+    try:
+        result = library.list_videos(page=page, page_size=page_size)
+    except ValueError as exc:
+        raise HttpException(
+            task_id="cloud-agent-video-library",
+            status_code=422,
+            message=str(exc),
+        ) from exc
+    return utils.get_response(
+        200,
+        {
+            "items": [
+                {
+                    "job_id": item.job_id,
+                    "subject": item.subject,
+                    "completed_at": item.completed_at,
+                    "final_url": f"/api/v1/cloud-agent/jobs/{item.job_id}/final",
+                }
+                for item in result.items
+            ],
+            "page": result.page,
+            "page_size": result.page_size,
+            "total_items": result.total_items,
+            "total_pages": result.total_pages,
+        },
+    )
+
+
+@router.delete("/cloud-agent/videos/{job_id}")
+def delete_cloud_agent_video(
+    job_id: str,
+    request: Request,
+    library: CloudVideoLibraryService = Depends(get_cloud_video_library_service),
+):
+    del request
+    try:
+        library.delete_video(job_id)
+    except VideoLibraryNotFoundError as exc:
+        raise HttpException(
+            task_id="cloud-agent-video-library",
+            status_code=404,
+            message="cloud agent video not found",
+        ) from exc
+    return utils.get_response(200)
 
 
 @router.get("/cloud-agent/jobs/{job_id}/final")

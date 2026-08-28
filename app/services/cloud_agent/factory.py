@@ -20,6 +20,11 @@ from app.services.cloud_agent.draft_voice import DraftVoiceService
 from app.services.cloud_agent.defaults import CloudAgentDefaultsService
 from app.services.cloud_agent.retry import PreFlowRetryService
 from app.services.cloud_agent.worker import CloudAgentWorker
+from app.services.cloud_agent.event_dispatcher import (
+    CloudJobEventDispatcher,
+    RequestsJobEventTransport,
+)
+from app.services.cloud_agent.job_events import EventPublishingCloudJobStore
 from app.services.cloud_agent.workflow import CloudAgentWorkflow
 from app.services.cloud_agent.research.adapters import (
     AIHubMixToolCallingAdapter,
@@ -31,11 +36,11 @@ from app.services.cloud_agent.research.settings import ResearchSettingsService
 from app.services.cloud_agent.research.store import ResearchDraftStore
 
 
-def build_workflow() -> CloudAgentWorkflow:
+def build_workflow(*, store: CloudJobStore | None = None) -> CloudAgentWorkflow:
     """Build the Cloud Agent from the process's existing ``config.app`` mapping."""
     app_config = config.app
     storage = CloudJobStorage()
-    store = CloudJobStore(str(app_config["cloud_agent_db_path"]))
+    store = store or CloudJobStore(str(app_config["cloud_agent_db_path"]))
     browser = PersistentBrowserManager(app_config=app_config, storage=storage)
     sessions = build_session_manager(browser=browser)
     preflight = PreflightManager(
@@ -148,7 +153,23 @@ def build_research_script_service() -> ResearchScriptService:
 def build_worker() -> CloudAgentWorker:
     """Build one durable worker from the process's existing ``config.app`` mapping."""
     app_config = config.app
-    workflow = build_workflow()
+    transport = RequestsJobEventTransport(
+        app_config.get(
+            "cloud_agent_event_intake_url",
+            "http://127.0.0.1:8080/api/v1/cloud-agent/internal/events",
+        ),
+        timeout_seconds=float(
+            app_config.get("cloud_agent_event_delivery_timeout_seconds", 0.5)
+        ),
+    )
+    dispatcher = CloudJobEventDispatcher(
+        transport=transport.send,
+        queue_size=int(app_config.get("cloud_agent_event_queue_size", 128)),
+    )
+    event_store = EventPublishingCloudJobStore(
+        str(app_config["cloud_agent_db_path"]), sink=dispatcher
+    )
+    workflow = build_workflow(store=event_store)
     return CloudAgentWorker(
         workflow.store,
         workflow,

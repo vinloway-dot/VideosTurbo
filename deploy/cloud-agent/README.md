@@ -9,3 +9,9 @@ Create `/opt/VideosTurbo/storage`, browser-profile and browser-lock directories 
 Preserve the existing `videosturbo-xvfb`, `videosturbo-openbox`, `videosturbo-x11vnc` and `videosturbo-novnc` services. They use `DISPLAY=:99`; VNC/noVNC must remain loopback-only and be protected through the existing reverse proxy/authentication. Do not expose ports 5900 or 6080 publicly.
 
 Run `systemctl daemon-reload`, enable the API/WebUI/worker units, then use the protected headed browser for the first Google Flow and Canva login. Check both sessions through the Cloud Agent API/UI before queueing work. Do not automate passwords, CAPTCHA, 2FA, OAuth consent, or device confirmation.
+
+For the worker-driven progress stream, copy the exact SSE `location` block from
+`deploy/nginx/videosturbo.conf.example` into the authenticated live server.
+Run `sudo nginx -t` before reloading Nginx. Only
+`/api/v1/cloud-agent/events/stream` is proxied to the loopback API; do not
+proxy the internal event POST or a general `/api/` location.
