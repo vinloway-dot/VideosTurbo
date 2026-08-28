@@ -155,6 +155,10 @@ class CloudAgentWorkflow:
             expected_height=expected_height,
         )
 
+    def _report(self, job_id: str, milestone: str) -> None:
+        if self.reporter is not None:
+            self.reporter.reached(job_id, milestone)
+
     def _get_job(self, job_id: str) -> CloudJobRecord:
         job = self.store.get_job(job_id)
         if job is None:
@@ -299,6 +303,7 @@ class CloudAgentWorkflow:
                     current_step="preflight_passed",
                     progress=10,
                 )
+                self._report(job.id, "checkpoint.preflight_passed")
                 stopped = self._control_boundary(job.id)
                 if stopped is not None:
                     return stopped
@@ -341,6 +346,7 @@ class CloudAgentWorkflow:
                     canva_playback_speed=timing.canva_playback_speed,
                     target_final_duration_seconds=timing.target_final_duration_seconds,
                 )
+                self._report(job.id, "tts.validated")
                 stopped = self._control_boundary(job.id)
                 if stopped is not None:
                     return stopped
@@ -426,6 +432,7 @@ class CloudAgentWorkflow:
                         flow_missing_clip_index=0,
                         flow_recovery_baseline="",
                     )
+                    self._report(job.id, "checkpoint.flow_ready")
                     try:
                         workspace.cleanup_and_verify_empty()
                     except Exception:
@@ -498,6 +505,7 @@ class CloudAgentWorkflow:
                         progress=95,
                         final_video=str(paths.final_file),
                     )
+                    self._report(job.id, "final.validated")
                     try:
                         canva.clean_workspace(job.id)
                     except Exception as exc:
@@ -513,7 +521,7 @@ class CloudAgentWorkflow:
             job = self._get_job(job.id)
             if job.checkpoint is CloudJobCheckpoint.FINAL_VALIDATED:
                 self._validate_final_checkpoint(job, paths)
-                return self.store.patch_job(
+                completed = self.store.patch_job(
                     job.id,
                     status=CloudJobStatus.COMPLETED,
                     checkpoint=CloudJobCheckpoint.COMPLETED,
@@ -521,6 +529,8 @@ class CloudAgentWorkflow:
                     progress=100,
                     final_video=str(paths.final_file),
                 )
+                self._report(job.id, "checkpoint.completed")
+                return completed
 
             return self._get_job(job.id)
         except CanvaUIVerificationError as exc:

@@ -5,6 +5,7 @@ from app.services.cloud_agent.progress import ProgressSignal
 from app.services.cloud_agent.worker_process import (
     ChildWaitResult,
     MultiprocessingJobProcessLauncher,
+    run_job_child,
 )
 
 
@@ -66,3 +67,26 @@ def test_child_process_has_a_distinct_process_group(tmp_path):
 
     assert os.getpgid(child.pid) == child.pid
     assert child.terminate_group(grace_seconds=0.2) is True
+
+
+def test_run_job_child_flushes_runtime_even_when_workflow_fails(monkeypatch):
+    from app.services.cloud_agent import factory
+
+    calls = []
+
+    class Runtime:
+        def run(self, job_id, *, worker_id):
+            calls.append(("run", job_id, worker_id))
+            raise RuntimeError("workflow failed")
+
+        def close(self):
+            calls.append(("close",))
+
+    monkeypatch.setattr(factory, "build_job_child", lambda **_kwargs: Runtime())
+
+    try:
+        run_job_child("agent.sqlite3", "job-1", "worker-1", object())
+    except RuntimeError:
+        pass
+
+    assert calls == [("run", "job-1", "worker-1"), ("close",)]

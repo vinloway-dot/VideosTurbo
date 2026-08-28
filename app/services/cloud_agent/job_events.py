@@ -84,19 +84,33 @@ class EventPublishingCloudJobStore(CloudJobStore):
             and after.status is CloudJobStatus.COMPLETED
             else CloudJobEventType.JOB_UPDATED
         )
+        self.publish_snapshot(after, event_type=event_type)
+        return after
+
+    def publish_snapshot(
+        self,
+        job: CloudJobRecord,
+        *,
+        event_type: CloudJobEventType | None = None,
+    ) -> bool:
+        resolved_type = event_type or (
+            CloudJobEventType.JOB_COMPLETED
+            if job.status is CloudJobStatus.COMPLETED
+            else CloudJobEventType.JOB_UPDATED
+        )
         event = CloudJobEvent(
             event_id=uuid4().hex,
-            type=event_type,
-            job_id=after.id,
-            status=after.status,
-            checkpoint=after.checkpoint,
-            current_step=after.current_step,
-            progress=after.progress,
-            updated_at=after.updated_at,
-            completed_at=after.completed_at,
+            type=resolved_type,
+            job_id=job.id,
+            status=job.status,
+            checkpoint=job.checkpoint,
+            current_step=job.current_step,
+            progress=job.progress,
+            updated_at=job.updated_at,
+            completed_at=job.completed_at,
         )
         try:
-            self._event_sink.publish_nowait(event)
+            return self._event_sink.publish_nowait(event)
         except Exception as exc:  # event delivery must never break workflow writes
             logger.warning(
                 "cloud job event publish failed type={} job_id={} error_type={}",
@@ -104,4 +118,4 @@ class EventPublishingCloudJobStore(CloudJobStore):
                 event.job_id,
                 type(exc).__name__,
             )
-        return after
+            return False

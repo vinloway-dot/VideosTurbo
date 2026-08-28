@@ -582,6 +582,7 @@ def test_workflow_progresses_from_queue_through_all_durable_checkpoints(monkeypa
     tts = RecordingTTS()
     flow = RecordingFlow()
     canva = RecordingCanva()
+    reporter = RecordingProgressReporter()
     _accept_media(monkeypatch)
     workflow = _workflow(
         tmp_path,
@@ -590,6 +591,7 @@ def test_workflow_progresses_from_queue_through_all_durable_checkpoints(monkeypa
         tts=tts,
         flow=flow,
         canva=canva,
+        reporter=reporter,
     )
 
     result = workflow.run(job.id, worker_id=WORKER_ID)
@@ -604,6 +606,14 @@ def test_workflow_progresses_from_queue_through_all_durable_checkpoints(monkeypa
     assert result.completed_at
     assert Path(result.voice_file).is_file()
     assert Path(result.final_video).is_file()
+    assert reporter.milestones == [
+        (job.id, "checkpoint.preflight_passed"),
+        (job.id, "tts.validated"),
+        (job.id, "checkpoint.flow_ready"),
+        (job.id, "canva.export.downloaded"),
+        (job.id, "final.validated"),
+        (job.id, "checkpoint.completed"),
+    ]
 
 
 def test_workflow_reuses_a_prepared_canonical_voice_without_resynthesizing(

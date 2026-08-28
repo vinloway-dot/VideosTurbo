@@ -3,6 +3,7 @@ import pytest
 from app.models.cloud_agent import (
     CloudJobCheckpoint,
     CloudJobCreate,
+    CloudJobRecord,
     CloudJobStatus,
 )
 from app.models.six_clip import empty_six_clip_plan
@@ -171,3 +172,24 @@ def test_incident_event_contains_no_subject_message_or_paths():
         "stage",
         "created_at",
     }
+
+
+def test_parent_can_republish_one_durable_snapshot_after_child_exit(tmp_path):
+    sink = RecordingSink()
+    store = EventPublishingCloudJobStore(
+        str(tmp_path / "agent.sqlite3"), sink=sink
+    )
+    job = store.create_job(_request())
+    completed = CloudJobRecord.model_validate(
+        {
+            **job.model_dump(),
+            "status": CloudJobStatus.COMPLETED,
+            "checkpoint": CloudJobCheckpoint.COMPLETED,
+            "current_step": "completed",
+            "progress": 100,
+            "completed_at": "2026-08-28T00:00:00+00:00",
+        }
+    )
+
+    assert store.publish_snapshot(completed) is True
+    assert sink.events[-1].type is CloudJobEventType.JOB_COMPLETED

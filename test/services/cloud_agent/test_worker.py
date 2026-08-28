@@ -422,3 +422,36 @@ def test_factory_builds_parent_supervisor_without_parent_browser(monkeypatch, tm
 
     assert worker.process_launcher is not None
     assert worker.workflow is None
+
+
+def test_canva_restart_budget_exhaustion_deletes_without_sixth_attempt(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+    clock = FakeClock()
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.CANVA_EDITING,
+        checkpoint=CloudJobCheckpoint.FLOW_READY,
+        current_step="canva_editing",
+        last_progress_at=(
+            clock.now() - timedelta(minutes=20)
+        ).isoformat(timespec="microseconds"),
+        canva_restart_attempts=4,
+    )
+    launcher = FakeLauncher(store, clock)
+    termination = FakeTerminationService()
+    worker = CloudAgentWorker(
+        store,
+        process_launcher=launcher,
+        termination_service=termination,
+        worker_id="worker-child",
+        clock=clock,
+        canva_restart_retries=4,
+    )
+
+    worker.run_once()
+
+    assert launcher.events == ["start_attempt_5", "terminate", "confirmed_stopped"]
+    assert termination.calls == [
+        TerminationCall(job.id, True, "CANVA_RESTART_EXHAUSTED", "canva")
+    ]

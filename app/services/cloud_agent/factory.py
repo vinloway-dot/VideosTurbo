@@ -1,5 +1,7 @@
 """Production composition root for the checkpointed Cloud Agent."""
 
+from dataclasses import dataclass
+
 from app.config import config
 from app.services.cloud_agent.browser import PersistentBrowserManager
 from app.services.cloud_agent.job_store import CloudJobStore
@@ -116,12 +118,27 @@ def _build_event_dispatcher(app_config):
     )
 
 
-def build_job_child(*, db_path: str, progress_sink) -> CloudAgentWorkflow:
+@dataclass
+class JobChildRuntime:
+    workflow: CloudAgentWorkflow
+    dispatcher: CloudJobEventDispatcher
+
+    def run(self, job_id: str, *, worker_id: str):
+        return self.workflow.run(job_id, worker_id=worker_id)
+
+    def close(self) -> None:
+        self.dispatcher.close(timeout_seconds=2.0)
+
+
+def build_job_child(*, db_path: str, progress_sink) -> JobChildRuntime:
     """Compose all browser-bound dependencies inside a spawned job child."""
     app_config = config.app
     dispatcher = _build_event_dispatcher(app_config)
     event_store = EventPublishingCloudJobStore(str(db_path), sink=dispatcher)
-    return build_workflow(store=event_store, progress_sink=progress_sink)
+    return JobChildRuntime(
+        workflow=build_workflow(store=event_store, progress_sink=progress_sink),
+        dispatcher=dispatcher,
+    )
 
 
 def build_session_manager(

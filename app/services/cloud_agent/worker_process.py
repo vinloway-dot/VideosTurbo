@@ -61,8 +61,11 @@ def run_job_child(
     """Build and run all browser-bound objects inside the isolated child."""
     from app.services.cloud_agent.factory import build_job_child
 
-    workflow = build_job_child(db_path=db_path, progress_sink=signal_endpoint)
-    workflow.run(job_id, worker_id=worker_id)
+    runtime = build_job_child(db_path=db_path, progress_sink=signal_endpoint)
+    try:
+        runtime.run(job_id, worker_id=worker_id)
+    finally:
+        runtime.close()
 
 
 def _child_process_entry(

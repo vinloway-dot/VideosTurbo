@@ -155,7 +155,14 @@ class CloudAgentWorker:
         return False
 
     def _delete_terminal_job(self, job: CloudJobRecord, *, reason: str) -> None:
-        stage = "canva" if self._is_canva_active(job) else "google_flow"
+        stage = (
+            "canva"
+            if job.checkpoint in {
+                CloudJobCheckpoint.FLOW_READY,
+                CloudJobCheckpoint.FINAL_VALIDATED,
+            }
+            else "google_flow"
+        )
         if self.termination_service is None:
             self.store.patch_job(
                 job.id,
@@ -176,6 +183,9 @@ class CloudAgentWorker:
         persisted = self.store.get_job(job_id)
         if persisted is None:
             return
+        publish_snapshot = getattr(self.store, "publish_snapshot", None)
+        if callable(publish_snapshot):
+            publish_snapshot(persisted)
         if persisted.error_code in {
             "FLOW_RECOVERY_EXHAUSTED",
             "CANVA_RESTART_EXHAUSTED",
