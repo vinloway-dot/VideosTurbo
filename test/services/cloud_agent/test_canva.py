@@ -184,7 +184,10 @@ class FakeCaptionStylePage:
     def get_by_role(self, role, *, name, exact):
         if role == "combobox":
             assert exact is False
-            assert getattr(name, "pattern", "") == r"^\d+ selected \(\d+ of \d+ suitable\)$"
+            assert (
+                getattr(name, "pattern", "")
+                == r"^(?:All|\d+) selected \(\d+ of \d+ suitable\)$"
+            )
             return _CaptionControl(self, "caption_audio_scope")
         assert role in {"button", "option"}
         assert exact is True
@@ -259,6 +262,9 @@ class _TimelineDeleteHandle:
     def click(self):
         self.page.selected = True
 
+    def inner_text(self):
+        return "10.0s"
+
 
 class _StaleTimelineStarts:
     """Models Canva retaining the old locator after its timeline node unmounts."""
@@ -304,6 +310,59 @@ class FakeUnmountingTimelinePage:
         assert key == "Delete"
         assert self.selected is True
         self.timeline_count = 0
+
+
+class _TypedTimelineHandle:
+    def __init__(self, page, kind):
+        self.page = page
+        self.kind = kind
+
+    def locator(self, selector):
+        assert selector == "xpath=.."
+        return self
+
+    def inner_text(self):
+        return "10.0s" if self.kind == "video" else "Generated caption text"
+
+    def click(self):
+        self.page.selected_kind = self.kind
+
+
+class _TypedTimelineStarts:
+    def __init__(self, page):
+        self.page = page
+
+    def _kinds(self):
+        return ["caption"] * self.page.caption_count + ["video"] * self.page.video_count
+
+    def count(self):
+        return len(self._kinds())
+
+    def nth(self, index):
+        return _TypedTimelineHandle(self.page, self._kinds()[index])
+
+
+class FakeCaptionedVideoTimelinePage:
+    """Models Canva removing generated captions when their videos are deleted."""
+
+    def __init__(self):
+        self.caption_count = 3
+        self.video_count = 2
+        self.selected_kind = ""
+        self.deleted_kinds = []
+        self.keyboard = self
+
+    def locator(self, selector):
+        assert selector == canva.CanvaAssemblyClient._VIDEO_START_EDGE
+        return _TypedTimelineStarts(self)
+
+    def press(self, key):
+        assert key == "Delete"
+        self.deleted_kinds.append(self.selected_kind)
+        if self.selected_kind != "video":
+            raise AssertionError("cleanup must never select a generated caption")
+        self.video_count -= 1
+        self.caption_count = 0
 
 
 class _NarrationStartSlider:
@@ -1349,8 +1408,8 @@ def test_canva_does_not_drag_a_confirmed_nonzero_audio_track():
     assert page.mouse.moves == []
 
 
-def test_canva_auto_captions_selects_classic_style_after_generation():
-    """Catches exporting generated captions without applying the required Classic style."""
+def test_canva_auto_captions_accepts_all_selected_scope_and_uses_classic_style():
+    """Catches rejecting Canva's current All-selected caption-scope wording."""
     client, _ = _assembly_client(FakeCanvaEditorPage())
     page = FakeCaptionStylePage()
 
@@ -1544,6 +1603,18 @@ def test_canva_timeline_cleanup_requeries_after_canva_unmounts_deleted_scene():
 
     assert page.timeline_count == 0
     assert page.locator_calls >= 2
+
+
+def test_canva_timeline_cleanup_ignores_captions_and_deletes_only_videos():
+    page = FakeCaptionedVideoTimelinePage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 0.0
+
+    client._clear_video_timeline(page)
+
+    assert page.video_count == 0
+    assert page.caption_count == 0
+    assert page.deleted_kinds == ["video", "video"]
 
 
 def test_canva_clean_uploaded_videos_accepts_missing_videos_tab_as_verified_zero_state():

@@ -88,6 +88,7 @@ class CanvaAssemblyClient:
 
     _VIDEO_START_EDGE = '[role="slider"][aria-label="Trimming, start edge"]'
     _VIDEO_END_EDGE = '[role="slider"][aria-label="Trimming, end edge"]'
+    _VIDEO_DURATION_TEXT = re.compile(r"^\d+(?:\.\d+)?s$")
     _WORKSPACE_TAB_HYDRATION_SECONDS = 30.0
     _AUDIO_PANEL_HYDRATION_SECONDS = 5.0
     _MEDIA_MENU_HYDRATION_SECONDS = 5.0
@@ -536,17 +537,28 @@ class CanvaAssemblyClient:
             page.clear_video_timeline()
             return
         while True:
-            starts = page.locator(self._VIDEO_START_EDGE)
-            if starts.count() == 0:
+            starts = self._video_timeline_starts(page)
+            if not starts:
                 return
-            before = starts.count()
-            starts.nth(0).locator("xpath=..").click()
+            before = len(starts)
+            starts[0].locator("xpath=..").click()
             page.keyboard.press("Delete")
             deadline = time.monotonic() + self.export_timeout_seconds
-            while page.locator(self._VIDEO_START_EDGE).count() >= before:
+            while len(self._video_timeline_starts(page)) >= before:
                 if time.monotonic() >= deadline:
                     raise CanvaUIVerificationError("Canva video timeline cannot be cleared")
                 time.sleep(self.poll_seconds)
+
+    def _video_timeline_starts(self, page: Any) -> list[Any]:
+        """Return visual clips only; generated captions and audio use the same edge role."""
+        starts = page.locator(self._VIDEO_START_EDGE)
+        videos = []
+        for index in range(starts.count()):
+            start = starts.nth(index)
+            parent_text = str(start.locator("xpath=..").inner_text() or "").strip()
+            if self._VIDEO_DURATION_TEXT.fullmatch(parent_text):
+                videos.append(start)
+        return videos
 
     def _clear_audio_timeline(self, page: Any) -> None:
         """Remove every audio track from the reusable design before a new job."""
@@ -597,7 +609,7 @@ class CanvaAssemblyClient:
     def _timeline_video_count(self, page: Any) -> int:
         if hasattr(page, "timeline_video_count_value"):
             return int(page.timeline_video_count_value())
-        return page.locator(self._VIDEO_START_EDGE).count()
+        return len(self._video_timeline_starts(page))
 
     def _upload_media(self, page: Any, paths: list[Path]) -> None:
         if hasattr(page, "upload_media"):
@@ -777,10 +789,10 @@ class CanvaAssemblyClient:
         if hasattr(page, "order_clips"):
             page.order_clips(expected_names)
             return
-        starts = page.locator(self._VIDEO_START_EDGE)
-        if starts.count() < 6:
+        starts = self._video_timeline_starts(page)
+        if len(starts) < 6:
             raise CanvaUIVerificationError("Canva six-clip timeline cannot be found for ordering")
-        start_values = [self._slider_seconds(starts.nth(index)) for index in range(6)]
+        start_values = [self._slider_seconds(starts[index]) for index in range(6)]
         if start_values != sorted(start_values) or len(set(start_values)) != 6:
             raise CanvaUIVerificationError("Canva clip ordering 1 through 6 cannot be verified")
 
@@ -815,10 +827,10 @@ class CanvaAssemblyClient:
         if hasattr(page, "select_video_clip"):
             page.select_video_clip(index)
             return
-        clips = page.locator(self._VIDEO_START_EDGE)
-        if clips.count() < index:
+        clips = self._video_timeline_starts(page)
+        if len(clips) < index:
             raise CanvaPlaybackVerificationError("Canva video timeline clip cannot be found")
-        clips.nth(index - 1).locator("xpath=..").click()
+        clips[index - 1].locator("xpath=..").click()
 
     def _mute_source_audio(self, page: Any) -> None:
         if hasattr(page, "mute_source_audio"):
@@ -898,12 +910,12 @@ class CanvaAssemblyClient:
             return
 
         try:
-            starts = page.locator(self._VIDEO_START_EDGE)
-            if starts.count() == 0:
+            starts = self._video_timeline_starts(page)
+            if not starts:
                 self._accept_start_observation(None, "first video")
                 return
             self._accept_start_observation(
-                self._slider_is_at_zero(starts.nth(0)),
+                self._slider_is_at_zero(starts[0]),
                 "first video",
             )
         except CanvaUIVerificationError:
@@ -972,7 +984,7 @@ class CanvaAssemblyClient:
         classic.click()
         caption_audio_scope = page.get_by_role(
             "combobox",
-            name=re.compile(r"^\d+ selected \(\d+ of \d+ suitable\)$"),
+            name=re.compile(r"^(?:All|\d+) selected \(\d+ of \d+ suitable\)$"),
             exact=False,
         )
         if caption_audio_scope.count() != 1:
