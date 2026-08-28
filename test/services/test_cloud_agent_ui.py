@@ -15,6 +15,30 @@ from webui import cloud_agent_ui
 from webui.cloud_agent_ui import build_production_stages, derive_workflow_step
 
 
+@pytest.mark.parametrize(
+    "current_step",
+    ["flow_workspace_retrying", "flow_workspace_retry_opening"],
+)
+def test_production_progress_exposes_automatic_flow_workspace_retry_attempt(
+    current_step,
+):
+    """Catches a safe automatic retry looking like a stalled generic job."""
+    progress = cloud_agent_ui.build_production_progress(
+        {
+            "id": "job-1",
+            "status": "TTS_READY",
+            "checkpoint": "TTS_READY",
+            "current_step": current_step,
+            "progress": 30,
+            "flow_workspace_retry_attempts": 1,
+        }
+    )
+
+    assert progress.state == "working"
+    assert progress.label == "กำลังทำงาน"
+    assert progress.detail == "กำลังเชื่อมต่อ Google Flow ใหม่อัตโนมัติ · รอบ 1/2"
+
+
 def test_video_library_view_keeps_only_public_card_fields():
     view = cloud_agent_ui.video_library_view(
         {

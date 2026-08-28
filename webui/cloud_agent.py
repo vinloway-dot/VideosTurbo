@@ -488,6 +488,7 @@ def _store_job_snapshot(job, *, sync_lookup=False):
         "progress",
         "error_code",
         "error_message",
+        "flow_workspace_retry_attempts",
         "created_at",
         "updated_at",
     )

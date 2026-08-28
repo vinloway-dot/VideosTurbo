@@ -367,6 +367,21 @@ def build_production_progress(job: dict | None) -> ProductionProgressView:
         return ProductionProgressView(percent, "cancelled", "ยกเลิกแล้ว", "งานนี้ถูกยกเลิก")
     if status == "COMPLETED" or str(snapshot.get("checkpoint") or "").upper() == "COMPLETED":
         return ProductionProgressView(100, "complete", "เสร็จสมบูรณ์", "วิดีโอพร้อมใช้งาน")
+    if current_step in {
+        "flow_workspace_retrying",
+        "flow_workspace_retry_opening",
+    }:
+        try:
+            attempt = int(snapshot.get("flow_workspace_retry_attempts") or 0)
+        except (TypeError, ValueError):
+            attempt = 0
+        attempt = max(1, min(2, attempt))
+        return ProductionProgressView(
+            percent,
+            "working",
+            "กำลังทำงาน",
+            f"กำลังเชื่อมต่อ Google Flow ใหม่อัตโนมัติ · รอบ {attempt}/2",
+        )
     return ProductionProgressView(
         percent,
         "working",

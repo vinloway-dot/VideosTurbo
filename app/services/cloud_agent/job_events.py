@@ -87,6 +87,36 @@ class EventPublishingCloudJobStore(CloudJobStore):
         self.publish_snapshot(after, event_type=event_type)
         return after
 
+    def reserve_flow_workspace_retry(
+        self,
+        job_id: str,
+        *,
+        delay_seconds: float,
+        worker_id: str,
+    ) -> CloudJobRecord | None:
+        after = super().reserve_flow_workspace_retry(
+            job_id,
+            delay_seconds=delay_seconds,
+            worker_id=worker_id,
+        )
+        if after is not None:
+            self.publish_snapshot(after, event_type=CloudJobEventType.JOB_UPDATED)
+        return after
+
+    def begin_flow_workspace_retry_opening(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+    ) -> CloudJobRecord | None:
+        after = super().begin_flow_workspace_retry_opening(
+            job_id,
+            worker_id=worker_id,
+        )
+        if after is not None:
+            self.publish_snapshot(after, event_type=CloudJobEventType.JOB_UPDATED)
+        return after
+
     def publish_snapshot(
         self,
         job: CloudJobRecord,

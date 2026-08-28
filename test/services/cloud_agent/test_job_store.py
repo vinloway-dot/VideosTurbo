@@ -200,6 +200,7 @@ def test_pre_v22_database_is_migrated_without_losing_job(tmp_path):
     assert migrated.flow_cleanup_unresolved is False
     assert migrated.flow_recovery_state is FlowRecoveryState.NONE
     assert migrated.flow_recovery_attempts == 0
+    assert migrated.flow_workspace_retry_attempts == 0
     assert migrated.flow_missing_clip_index == 0
     assert migrated.flow_recovery_baseline == ""
     assert migrated.canva_restart_attempts == 0
@@ -217,6 +218,7 @@ def test_pre_v22_database_is_migrated_without_losing_job(tmp_path):
         "flow_cleanup_unresolved",
         "flow_recovery_state",
         "flow_recovery_attempts",
+        "flow_workspace_retry_attempts",
         "flow_missing_clip_index",
         "flow_recovery_baseline",
         "canva_restart_attempts",
@@ -458,6 +460,131 @@ def test_flow_attempt_budget_stops_after_two(tmp_path):
 
     with pytest.raises(RecoveryBudgetExhausted):
         store.reserve_flow_recovery_attempt(job.id, missing_index=2)
+
+
+def test_flow_workspace_retry_budget_is_reserved_durably_before_reopen(tmp_path):
+    """Catches retries reopening Flow without consuming their durable budget."""
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+    claimed = store.claim_next_job("worker-a", lease_seconds=60)
+    assert claimed is not None
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.TTS_READY,
+        checkpoint=CloudJobCheckpoint.TTS_READY,
+        current_step="tts_ready",
+    )
+
+    first = store.reserve_flow_workspace_retry(
+        job.id,
+        delay_seconds=30.0,
+        worker_id="worker-a",
+    )
+    assert first is not None
+    first_opening = store.begin_flow_workspace_retry_opening(
+        job.id,
+        worker_id="worker-a",
+    )
+    assert first_opening is not None
+    second = store.reserve_flow_workspace_retry(
+        job.id,
+        delay_seconds=120.0,
+        worker_id="worker-a",
+    )
+    assert second is not None
+
+    assert first.flow_workspace_retry_attempts == 1
+    assert second.flow_workspace_retry_attempts == 2
+    assert first.flow_workspace_retry_not_before
+    assert second.flow_workspace_retry_not_before > first.flow_workspace_retry_not_before
+    second_opening = store.begin_flow_workspace_retry_opening(
+        job.id,
+        worker_id="worker-a",
+    )
+    assert second_opening is not None
+    with pytest.raises(RecoveryBudgetExhausted):
+        store.reserve_flow_workspace_retry(
+            job.id,
+            delay_seconds=120.0,
+            worker_id="worker-a",
+        )
+
+
+def test_flow_workspace_retry_opening_transition_requires_current_lease_owner(
+    tmp_path,
+):
+    """Only the worker owning the lease may consume a reserved reopen."""
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+    claimed = store.claim_next_job("worker-new", lease_seconds=60)
+    assert claimed is not None
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.TTS_READY,
+        checkpoint=CloudJobCheckpoint.TTS_READY,
+        current_step="tts_ready",
+    )
+    reserved = store.reserve_flow_workspace_retry(
+        job.id,
+        delay_seconds=30.0,
+        worker_id="worker-new",
+    )
+    assert reserved is not None
+
+    assert (
+        store.begin_flow_workspace_retry_opening(
+            job.id,
+            worker_id="worker-old",
+        )
+        is None
+    )
+    unchanged = store.get_job(job.id)
+    assert unchanged.current_step == "flow_workspace_retrying"
+    assert unchanged.flow_workspace_retry_not_before == reserved.flow_workspace_retry_not_before
+
+    opening = store.begin_flow_workspace_retry_opening(
+        job.id,
+        worker_id="worker-new",
+    )
+    assert opening.current_step == "flow_workspace_retry_opening"
+    assert opening.flow_workspace_retry_not_before == ""
+
+
+def test_flow_workspace_retry_reservation_cannot_overwrite_new_lease_owner(
+    tmp_path,
+):
+    """A stale child cannot consume retry budget after lease handoff."""
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+    claimed = store.claim_next_job("worker-old", lease_seconds=60)
+    assert claimed is not None
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.TTS_READY,
+        checkpoint=CloudJobCheckpoint.TTS_READY,
+        current_step="tts_ready",
+        worker_id="worker-new",
+        lease_until="2026-08-28T23:59:59.999999+00:00",
+    )
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.HUMAN_REQUIRED,
+        current_step="human_required",
+        error_code="HUMAN_REQUIRED",
+    )
+
+    reserved = store.reserve_flow_workspace_retry(
+        job.id,
+        delay_seconds=30.0,
+        worker_id="worker-old",
+    )
+
+    assert reserved is None
+    unchanged = store.get_job(job.id)
+    assert unchanged.status is CloudJobStatus.HUMAN_REQUIRED
+    assert unchanged.current_step == "human_required"
+    assert unchanged.flow_workspace_retry_attempts == 0
+    assert unchanged.worker_id == "worker-new"
 
 
 def test_canva_restart_budget_stops_after_four(tmp_path):

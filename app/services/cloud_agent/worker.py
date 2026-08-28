@@ -6,7 +6,12 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
-from app.models.cloud_agent import CloudJobCheckpoint, CloudJobRecord, CloudJobStatus
+from app.models.cloud_agent import (
+    CloudJobCheckpoint,
+    CloudJobRecord,
+    CloudJobStatus,
+    FlowRecoveryState,
+)
 from app.services.cloud_agent.errors import RecoveryBudgetExhausted
 from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.progress import Clock, SystemClock
@@ -191,6 +196,16 @@ class CloudAgentWorker:
             "CANVA_RESTART_EXHAUSTED",
         }:
             self._delete_terminal_job(persisted, reason=persisted.error_code)
+            return
+        safe_reserved_flow_retry = (
+            persisted.status is CloudJobStatus.TTS_READY
+            and persisted.checkpoint is CloudJobCheckpoint.TTS_READY
+            and persisted.current_step == "flow_workspace_retrying"
+            and 0 < persisted.flow_workspace_retry_attempts <= 2
+            and not persisted.flow_generation_unresolved
+            and persisted.flow_recovery_state is FlowRecoveryState.NONE
+        )
+        if exit_code not in (0, None) and safe_reserved_flow_retry:
             return
         if exit_code not in (0, None) and persisted.status not in {
             CloudJobStatus.COMPLETED,

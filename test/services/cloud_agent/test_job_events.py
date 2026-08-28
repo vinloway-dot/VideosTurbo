@@ -70,6 +70,49 @@ def test_status_patch_emits_safe_projection_after_commit(tmp_path):
     assert "must-not-leak" not in sink.events[0].model_dump_json()
 
 
+def test_flow_workspace_retry_reservation_emits_committed_job_update(tmp_path):
+    """Catches durable retry progress being invisible to the event-driven UI."""
+    sink = RecordingSink()
+    store = EventPublishingCloudJobStore(
+        str(tmp_path / "agent.sqlite3"), sink=sink
+    )
+    job = store.create_job(_request())
+    claimed = store.claim_next_job("worker-a", lease_seconds=60)
+    assert claimed is not None
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.TTS_READY,
+        checkpoint=CloudJobCheckpoint.TTS_READY,
+        current_step="tts_ready",
+        progress=30,
+    )
+    sink.events.clear()
+
+    reserved = store.reserve_flow_workspace_retry(
+        job.id,
+        delay_seconds=30.0,
+        worker_id="worker-a",
+    )
+
+    assert reserved is not None
+    assert reserved.current_step == "flow_workspace_retrying"
+    assert reserved.flow_workspace_retry_attempts == 1
+    assert len(sink.events) == 1
+    assert sink.events[0].type is CloudJobEventType.JOB_UPDATED
+    assert sink.events[0].current_step == "flow_workspace_retrying"
+
+    opening = store.begin_flow_workspace_retry_opening(
+        job.id,
+        worker_id="worker-a",
+    )
+
+    assert opening is not None
+    assert opening.current_step == "flow_workspace_retry_opening"
+    assert len(sink.events) == 2
+    assert sink.events[1].type is CloudJobEventType.JOB_UPDATED
+    assert sink.events[1].current_step == "flow_workspace_retry_opening"
+
+
 def test_non_progress_and_duplicate_patches_do_not_emit(tmp_path):
     sink = RecordingSink()
     store = EventPublishingCloudJobStore(str(tmp_path / "agent.sqlite3"), sink=sink)

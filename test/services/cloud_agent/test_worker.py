@@ -317,6 +317,134 @@ def test_supervisor_claims_and_child_completes_job(tmp_path):
     assert launcher.started == [(job.id, "worker-child")]
 
 
+def test_supervisor_requeues_safe_reserved_flow_retry_after_child_crash(tmp_path):
+    """Catches a transient Flow retry crash becoming HUMAN_REQUIRED."""
+
+    class RetryCrashChild:
+        def __init__(self, launcher, job_id, attempt):
+            self.launcher = launcher
+            self.job_id = job_id
+            self.attempt = attempt
+
+        def wait(self, timeout_seconds):
+            del timeout_seconds
+            if self.attempt == 1:
+                self.launcher.store.patch_job(
+                    self.job_id,
+                    status=CloudJobStatus.TTS_READY,
+                    checkpoint=CloudJobCheckpoint.TTS_READY,
+                    current_step="tts_ready",
+                )
+                self.launcher.store.reserve_flow_workspace_retry(
+                    self.job_id,
+                    delay_seconds=30.0,
+                    worker_id="worker-child",
+                )
+                return ChildWaitResult(
+                    exited=True,
+                    exit_code=1,
+                    progress_signal=None,
+                )
+            self.launcher.store.patch_job(
+                self.job_id,
+                status=CloudJobStatus.COMPLETED,
+                checkpoint=CloudJobCheckpoint.COMPLETED,
+                current_step="completed",
+                progress=100,
+            )
+            return ChildWaitResult(exited=True, exit_code=0, progress_signal=None)
+
+        def is_alive(self):
+            return False
+
+        def terminate_group(self, grace_seconds):
+            del grace_seconds
+            return True
+
+    class RetryCrashLauncher:
+        def __init__(self, store):
+            self.store = store
+            self.started = []
+
+        def start(self, job_id, worker_id):
+            self.started.append((job_id, worker_id))
+            return RetryCrashChild(self, job_id, len(self.started))
+
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+    launcher = RetryCrashLauncher(store)
+    worker = CloudAgentWorker(
+        store,
+        process_launcher=launcher,
+        worker_id="worker-child",
+    )
+
+    assert worker.run_once() is True
+    retrying = store.get_job(job.id)
+    assert retrying.status is CloudJobStatus.TTS_READY
+    assert retrying.current_step == "flow_workspace_retrying"
+    assert retrying.flow_workspace_retry_attempts == 1
+
+    assert worker.run_once() is True
+    assert store.get_job(job.id).status is CloudJobStatus.COMPLETED
+    assert launcher.started == [
+        (job.id, "worker-child"),
+        (job.id, "worker-child"),
+    ]
+
+
+def test_supervisor_does_not_requeue_crash_after_retry_workspace_opening(tmp_path):
+    """A crash after backoff cannot reuse one reservation without a bound."""
+
+    class OpeningCrashChild:
+        def __init__(self, store, job_id):
+            self.store = store
+            self.job_id = job_id
+
+        def wait(self, timeout_seconds):
+            del timeout_seconds
+            self.store.patch_job(
+                self.job_id,
+                status=CloudJobStatus.TTS_READY,
+                checkpoint=CloudJobCheckpoint.TTS_READY,
+                current_step="flow_workspace_retry_opening",
+                flow_workspace_retry_attempts=1,
+            )
+            return ChildWaitResult(exited=True, exit_code=1, progress_signal=None)
+
+        def is_alive(self):
+            return False
+
+        def terminate_group(self, grace_seconds):
+            del grace_seconds
+            return True
+
+    class OpeningCrashLauncher:
+        def __init__(self, store):
+            self.store = store
+            self.started = []
+
+        def start(self, job_id, worker_id):
+            self.started.append((job_id, worker_id))
+            return OpeningCrashChild(self.store, job_id)
+
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+    launcher = OpeningCrashLauncher(store)
+    worker = CloudAgentWorker(
+        store,
+        process_launcher=launcher,
+        worker_id="worker-child",
+    )
+
+    assert worker.run_once() is True
+    stopped = store.get_job(job.id)
+    assert stopped.status is CloudJobStatus.HUMAN_REQUIRED
+    assert stopped.error_code == "WORKER_RUNTIME_ERROR"
+    assert worker.run_once() is False
+    assert launcher.started == [(job.id, "worker-child")]
+
+
 def test_queued_wait_time_is_not_counted_as_active_stall(tmp_path):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     job = store.create_job(_request())

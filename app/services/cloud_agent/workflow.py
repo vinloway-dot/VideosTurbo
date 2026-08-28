@@ -1,6 +1,8 @@
 from contextlib import nullcontext
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import ContextManager, Protocol
+from time import sleep
+from typing import Callable, ContextManager, Protocol
 
 from loguru import logger
 
@@ -115,6 +117,8 @@ _CHECKPOINT_RANK = {
     CloudJobCheckpoint.COMPLETED: 5,
 }
 
+_FLOW_WORKSPACE_RETRY_DELAYS_SECONDS = (30.0, 120.0)
+
 
 class CloudAgentWorkflow:
     def __init__(
@@ -134,6 +138,8 @@ class CloudAgentWorkflow:
         expected_height: int,
         flow_recovery: FlowRecoveryCoordinator | None = None,
         reporter: ProgressReporter | None = None,
+        flow_workspace_retry_sleeper: Callable[[float], None] | None = None,
+        flow_workspace_retry_clock: Callable[[], datetime] | None = None,
     ):
         self.store = store
         self.storage = storage
@@ -148,6 +154,10 @@ class CloudAgentWorkflow:
         self.expected_width = expected_width
         self.expected_height = expected_height
         self.reporter = reporter
+        self.flow_workspace_retry_sleeper = flow_workspace_retry_sleeper or sleep
+        self.flow_workspace_retry_clock = flow_workspace_retry_clock or (
+            lambda: datetime.now(timezone.utc)
+        )
         self.flow_recovery = flow_recovery or FlowRecoveryCoordinator(
             store,
             reporter=reporter,
@@ -267,6 +277,117 @@ class CloudAgentWorkflow:
             return nullcontext(self.canva)
         return opener(job)
 
+    def _resume_reserved_flow_workspace_delay(self, job: CloudJobRecord) -> None:
+        if job.current_step != "flow_workspace_retrying":
+            return
+        raw_not_before = str(job.flow_workspace_retry_not_before or "").strip()
+        if not raw_not_before:
+            return
+        not_before = datetime.fromisoformat(raw_not_before)
+        if not_before.tzinfo is None:
+            not_before = not_before.replace(tzinfo=timezone.utc)
+        now = self.flow_workspace_retry_clock()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        remaining = (
+            not_before.astimezone(timezone.utc) - now.astimezone(timezone.utc)
+        ).total_seconds()
+        if remaining > 0:
+            self.flow_workspace_retry_sleeper(remaining)
+
+    def _process_flow_workspace(
+        self,
+        job: CloudJobRecord,
+        paths: JobPaths,
+        recovered,
+        workspace: FlowWorkspace,
+    ) -> CloudJobRecord:
+        if recovered is not None:
+            generated = recovered.paths
+        elif job.flow_recovery_state is not FlowRecoveryState.NONE:
+            generated = self.flow_recovery.resume_unresolved_recovery(
+                job,
+                workspace,
+                paths,
+            )
+        elif job.flow_generation_unresolved:
+            job = self.store.patch_job(
+                job.id,
+                status=CloudJobStatus.FLOW_GENERATING,
+                current_step="flow_reconciling",
+                progress=35,
+            )
+            try:
+                generated = workspace.reconcile_and_download(job, paths)
+            except FlowBatchIncompleteError:
+                generated = self.flow_recovery.recover_incomplete_batch(
+                    self._get_job(job.id),
+                    workspace,
+                    paths,
+                )
+        else:
+            workspace.prepare_for_generation()
+            workspace.prepare_agent_prompt(job.master_prompt)
+            job = self.store.patch_job(
+                job.id,
+                status=CloudJobStatus.FLOW_GENERATING,
+                checkpoint=CloudJobCheckpoint.TTS_READY,
+                current_step="flow_generating",
+                progress=35,
+                flow_generation_unresolved=True,
+            )
+            try:
+                generated = workspace.submit_prepared_generation_and_download(
+                    job,
+                    paths,
+                )
+            except FlowBatchIncompleteError:
+                generated = self.flow_recovery.recover_incomplete_batch(
+                    self._get_job(job.id),
+                    workspace,
+                    paths,
+                )
+        if len(generated) != 6:
+            raise MediaValidationError(
+                f"Flow step must produce exactly six clips; got {len(generated)}"
+            )
+        missing = [path for path in paths.flow_files if not path.is_file()]
+        if missing:
+            raise MediaValidationError(
+                f"Flow step did not produce canonical clip: {missing[0]}"
+            )
+        for path in paths.flow_files:
+            validate_flow_source_video(
+                path,
+                min_size_bytes=1,
+            )
+        job = self.store.patch_job(
+            job.id,
+            status=CloudJobStatus.FLOW_READY,
+            checkpoint=CloudJobCheckpoint.FLOW_READY,
+            current_step="flow_ready",
+            progress=60,
+            flow_generation_unresolved=False,
+            flow_cleanup_unresolved=True,
+            flow_recovery_state=FlowRecoveryState.NONE,
+            flow_missing_clip_index=0,
+            flow_recovery_baseline="",
+        )
+        self._report(job.id, "checkpoint.flow_ready")
+        try:
+            workspace.cleanup_and_verify_empty()
+        except Exception:
+            logger.warning(
+                "Flow workspace cleanup remains unresolved for cloud job {}",
+                job.id,
+            )
+        else:
+            job = self.store.patch_job(
+                job.id,
+                flow_cleanup_unresolved=False,
+            )
+        return job
+
     def run(self, job_id: str, *, worker_id: str) -> CloudJobRecord:
         job = self._get_job(job_id)
         if job.status is CloudJobStatus.COMPLETED or job.checkpoint is CloudJobCheckpoint.COMPLETED:
@@ -353,6 +474,16 @@ class CloudAgentWorkflow:
 
             job = self._get_job(job.id)
             if job.checkpoint is CloudJobCheckpoint.TTS_READY:
+                self._resume_reserved_flow_workspace_delay(job)
+                stopped = self._control_boundary(job.id)
+                if stopped is not None:
+                    return stopped
+                job = self._get_job(job.id)
+                if job.current_step == "flow_workspace_retry_opening":
+                    raise HumanRequiredError(
+                        "Google Flow automatic retry was interrupted while reopening; "
+                        "the workspace was not reopened again to avoid duplicate generation."
+                    )
                 recovered = recover_flow_artifacts(
                     self.storage,
                     job.id,
@@ -360,91 +491,74 @@ class CloudAgentWorkflow:
                     expected_width=self.expected_width,
                     expected_height=self.expected_height,
                 )
-                with self.flow.acquire_workspace(job) as workspace:
-                    if recovered is not None:
-                        generated = recovered.paths
-                    elif job.flow_recovery_state is not FlowRecoveryState.NONE:
-                        generated = self.flow_recovery.resume_unresolved_recovery(
-                            job,
-                            workspace,
-                            paths,
-                        )
-                    elif job.flow_generation_unresolved:
-                        job = self.store.patch_job(
+                while True:
+                    job = self._get_job(job.id)
+                    if job.current_step == "flow_workspace_retrying":
+                        stopped = self._control_boundary(job.id)
+                        if stopped is not None:
+                            return stopped
+                        opening = self.store.begin_flow_workspace_retry_opening(
                             job.id,
-                            status=CloudJobStatus.FLOW_GENERATING,
-                            current_step="flow_reconciling",
-                            progress=35,
+                            worker_id=worker_id,
                         )
-                        try:
-                            generated = workspace.reconcile_and_download(job, paths)
-                        except FlowBatchIncompleteError:
-                            generated = self.flow_recovery.recover_incomplete_batch(
-                                self._get_job(job.id),
-                                workspace,
-                                paths,
-                            )
-                    else:
-                        workspace.prepare_for_generation()
-                        workspace.prepare_agent_prompt(job.master_prompt)
-                        job = self.store.patch_job(
-                            job.id,
-                            status=CloudJobStatus.FLOW_GENERATING,
-                            checkpoint=CloudJobCheckpoint.TTS_READY,
-                            current_step="flow_generating",
-                            progress=35,
-                            flow_generation_unresolved=True,
-                        )
-                        try:
-                            generated = workspace.submit_prepared_generation_and_download(
+                        if opening is None:
+                            return self._get_job(job.id)
+                        job = opening
+                    try:
+                        with self.flow.acquire_workspace(job) as workspace:
+                            current = self._get_job(job.id)
+                            if current.worker_id and current.worker_id != worker_id:
+                                return current
+                            stopped = self._control_boundary(job.id)
+                            if stopped is not None:
+                                return stopped
+                            job = current
+                            if job.checkpoint is not CloudJobCheckpoint.TTS_READY:
+                                break
+                            job = self._process_flow_workspace(
                                 job,
                                 paths,
-                            )
-                        except FlowBatchIncompleteError:
-                            generated = self.flow_recovery.recover_incomplete_batch(
-                                self._get_job(job.id),
+                                recovered,
                                 workspace,
-                                paths,
                             )
-                    if len(generated) != 6:
-                        raise MediaValidationError(
-                            f"Flow step must produce exactly six clips; got {len(generated)}"
+                        break
+                    except FlowWorkspaceVerificationError:
+                        current = self._get_job(job.id)
+                        safe_to_reopen = (
+                            current.checkpoint is CloudJobCheckpoint.TTS_READY
+                            and not current.flow_generation_unresolved
+                            and current.flow_recovery_state is FlowRecoveryState.NONE
                         )
-                    missing = [path for path in paths.flow_files if not path.is_file()]
-                    if missing:
-                        raise MediaValidationError(
-                            f"Flow step did not produce canonical clip: {missing[0]}"
+                        if (
+                            not safe_to_reopen
+                            or current.flow_workspace_retry_attempts
+                            >= len(_FLOW_WORKSPACE_RETRY_DELAYS_SECONDS)
+                        ):
+                            raise
+                        next_attempt = current.flow_workspace_retry_attempts + 1
+                        delay = _FLOW_WORKSPACE_RETRY_DELAYS_SECONDS[next_attempt - 1]
+                        job = self.store.reserve_flow_workspace_retry(
+                            job.id,
+                            delay_seconds=delay,
+                            worker_id=worker_id,
                         )
-                    for path in paths.flow_files:
-                        validate_flow_source_video(
-                            path,
-                            min_size_bytes=1,
-                        )
-                    job = self.store.patch_job(
-                        job.id,
-                        status=CloudJobStatus.FLOW_READY,
-                        checkpoint=CloudJobCheckpoint.FLOW_READY,
-                        current_step="flow_ready",
-                        progress=60,
-                        flow_generation_unresolved=False,
-                        flow_cleanup_unresolved=True,
-                        flow_recovery_state=FlowRecoveryState.NONE,
-                        flow_missing_clip_index=0,
-                        flow_recovery_baseline="",
-                    )
-                    self._report(job.id, "checkpoint.flow_ready")
-                    try:
-                        workspace.cleanup_and_verify_empty()
-                    except Exception:
+                        if job is None:
+                            return self._get_job(current.id)
+                        attempt = job.flow_workspace_retry_attempts
+                        self._report(job.id, f"flow.workspace.retry.{attempt}")
                         logger.warning(
-                            "Flow workspace cleanup remains unresolved for cloud job {}",
+                            "Flow workspace unavailable for cloud job {}; "
+                            "reopening automatically attempt {}/{} after {} seconds",
                             job.id,
+                            attempt,
+                            len(_FLOW_WORKSPACE_RETRY_DELAYS_SECONDS),
+                            delay,
                         )
-                    else:
-                        job = self.store.patch_job(
-                            job.id,
-                            flow_cleanup_unresolved=False,
-                        )
+                        self.flow_workspace_retry_sleeper(delay)
+                        stopped = self._control_boundary(job.id)
+                        if stopped is not None:
+                            return stopped
+                        job = self._get_job(job.id)
                 stopped = self._control_boundary(job.id)
                 if stopped is not None:
                     return stopped

@@ -46,6 +46,8 @@ _COMPATIBLE_COLUMNS = {
     "last_progress_milestone": "TEXT NOT NULL DEFAULT ''",
     "stage_started_at": "TEXT NOT NULL DEFAULT ''",
     "flow_recovery_attempts": "INTEGER NOT NULL DEFAULT 0",
+    "flow_workspace_retry_attempts": "INTEGER NOT NULL DEFAULT 0",
+    "flow_workspace_retry_not_before": "TEXT NOT NULL DEFAULT ''",
     "flow_missing_clip_index": "INTEGER NOT NULL DEFAULT 0",
     "flow_recovery_state": "TEXT NOT NULL DEFAULT 'NONE'",
     "flow_recovery_baseline": "TEXT NOT NULL DEFAULT ''",
@@ -73,6 +75,8 @@ _MUTABLE_COLUMNS = {
     "last_progress_milestone",
     "stage_started_at",
     "flow_recovery_attempts",
+    "flow_workspace_retry_attempts",
+    "flow_workspace_retry_not_before",
     "flow_missing_clip_index",
     "flow_recovery_state",
     "flow_recovery_baseline",
@@ -151,6 +155,8 @@ class CloudJobStore:
                     last_progress_milestone TEXT NOT NULL DEFAULT '',
                     stage_started_at TEXT NOT NULL DEFAULT '',
                     flow_recovery_attempts INTEGER NOT NULL DEFAULT 0,
+                    flow_workspace_retry_attempts INTEGER NOT NULL DEFAULT 0,
+                    flow_workspace_retry_not_before TEXT NOT NULL DEFAULT '',
                     flow_missing_clip_index INTEGER NOT NULL DEFAULT 0,
                     flow_recovery_state TEXT NOT NULL DEFAULT 'NONE',
                     flow_recovery_baseline TEXT NOT NULL DEFAULT '',
@@ -226,6 +232,10 @@ class CloudJobStore:
             last_progress_milestone=row["last_progress_milestone"],
             stage_started_at=row["stage_started_at"],
             flow_recovery_attempts=row["flow_recovery_attempts"],
+            flow_workspace_retry_attempts=row["flow_workspace_retry_attempts"],
+            flow_workspace_retry_not_before=row[
+                "flow_workspace_retry_not_before"
+            ],
             flow_missing_clip_index=row["flow_missing_clip_index"],
             flow_recovery_state=FlowRecoveryState(row["flow_recovery_state"]),
             flow_recovery_baseline=row["flow_recovery_baseline"],
@@ -283,7 +293,9 @@ class CloudJobStore:
                     flow_generation_unresolved, flow_cleanup_unresolved,
                     canva_design_url, canva_audio_card_count,
                     last_progress_at, last_progress_milestone, stage_started_at,
-                    flow_recovery_attempts, flow_missing_clip_index,
+                    flow_recovery_attempts, flow_workspace_retry_attempts,
+                    flow_workspace_retry_not_before,
+                    flow_missing_clip_index,
                     flow_recovery_state, flow_recovery_baseline,
                     canva_restart_attempts, canva_attempt_started_at,
                     final_video, error_code,
@@ -292,7 +304,7 @@ class CloudJobStore:
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -325,6 +337,8 @@ class CloudJobStore:
                     record.last_progress_milestone,
                     record.stage_started_at,
                     record.flow_recovery_attempts,
+                    record.flow_workspace_retry_attempts,
+                    record.flow_workspace_retry_not_before,
                     record.flow_missing_clip_index,
                     record.flow_recovery_state.value,
                     record.flow_recovery_baseline,
@@ -546,6 +560,139 @@ class CloudJobStore:
                 """,
                 (now, now, job_id),
             )
+            updated = connection.execute(
+                "SELECT * FROM cloud_agent_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            connection.commit()
+            return self._row_to_record(updated)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def reserve_flow_workspace_retry(
+        self,
+        job_id: str,
+        *,
+        delay_seconds: float,
+        worker_id: str,
+    ) -> CloudJobRecord | None:
+        """Reserve one safe pre-generation Flow workspace reopen."""
+        delay = float(delay_seconds)
+        if delay <= 0:
+            raise ValueError("Flow workspace retry delay must be positive")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM cloud_agent_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            now = _utc_now()
+            status = CloudJobStatus(row["status"])
+            active_step = row["current_step"]
+            safe_active_state = (
+                status is CloudJobStatus.TTS_READY
+                and active_step in {"tts_ready", "flow_workspace_retry_opening"}
+            ) or (
+                status is CloudJobStatus.QUEUED
+                and active_step == "queued"
+            )
+            eligible = (
+                CloudJobCheckpoint(row["checkpoint"])
+                is CloudJobCheckpoint.TTS_READY
+                and safe_active_state
+                and CloudControlRequest(row["control_request"])
+                is CloudControlRequest.NONE
+                and row["worker_id"] == worker_id
+                and bool(row["worker_id"])
+                and bool(row["lease_until"])
+                and row["lease_until"] > now
+                and not bool(row["flow_generation_unresolved"])
+                and FlowRecoveryState(row["flow_recovery_state"])
+                is FlowRecoveryState.NONE
+            )
+            if not eligible:
+                connection.commit()
+                return None
+            if row["flow_workspace_retry_attempts"] >= 2:
+                raise RecoveryBudgetExhausted(
+                    "Flow workspace retry budget exhausted"
+                )
+            not_before = (
+                datetime.now(timezone.utc) + timedelta(seconds=delay)
+            ).isoformat(timespec="microseconds")
+            connection.execute(
+                """
+                UPDATE cloud_agent_jobs
+                SET flow_workspace_retry_attempts = flow_workspace_retry_attempts + 1,
+                    flow_workspace_retry_not_before = ?,
+                    status = ?, current_step = ?, progress = 30,
+                    error_code = '', error_message = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    not_before,
+                    CloudJobStatus.TTS_READY.value,
+                    "flow_workspace_retrying",
+                    now,
+                    job_id,
+                ),
+            )
+            updated = connection.execute(
+                "SELECT * FROM cloud_agent_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            connection.commit()
+            return self._row_to_record(updated)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def begin_flow_workspace_retry_opening(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+    ) -> CloudJobRecord | None:
+        """Atomically consume a reserved reopen only for its live lease owner."""
+        now = _utc_now()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            result = connection.execute(
+                """
+                UPDATE cloud_agent_jobs
+                SET current_step = ?, flow_workspace_retry_not_before = '',
+                    updated_at = ?
+                WHERE id = ?
+                  AND checkpoint = ?
+                  AND status = ?
+                  AND current_step = ?
+                  AND control_request = ?
+                  AND worker_id = ?
+                  AND worker_id <> ''
+                  AND lease_until <> ''
+                  AND lease_until > ?
+                """,
+                (
+                    "flow_workspace_retry_opening",
+                    now,
+                    job_id,
+                    CloudJobCheckpoint.TTS_READY.value,
+                    CloudJobStatus.TTS_READY.value,
+                    "flow_workspace_retrying",
+                    CloudControlRequest.NONE.value,
+                    worker_id,
+                    now,
+                ),
+            )
+            if result.rowcount != 1:
+                connection.commit()
+                return None
             updated = connection.execute(
                 "SELECT * FROM cloud_agent_jobs WHERE id = ?", (job_id,)
             ).fetchone()

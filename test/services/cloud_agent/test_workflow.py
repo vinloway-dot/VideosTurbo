@@ -1,5 +1,6 @@
 import importlib
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -321,6 +322,52 @@ class FenceFlow:
             self.events.append("workspace_exit")
 
 
+class SequencedFenceFlow:
+    def __init__(self, workspaces, events):
+        self.workspaces = list(workspaces)
+        self.events = events
+        self.acquire_calls = 0
+
+    @contextmanager
+    def acquire_workspace(self, job):
+        del job
+        workspace = self.workspaces[self.acquire_calls]
+        self.acquire_calls += 1
+        self.events.append(("workspace_enter", self.acquire_calls))
+        try:
+            yield workspace
+        finally:
+            self.events.append(("workspace_exit", self.acquire_calls))
+
+
+class AdvancingBeforeYieldFlow:
+    def __init__(self, store, storage, workspace, *, next_worker_id=None):
+        self.store = store
+        self.storage = storage
+        self.workspace = workspace
+        self.next_worker_id = next_worker_id
+        self.acquire_calls = 0
+
+    @contextmanager
+    def acquire_workspace(self, job):
+        self.acquire_calls += 1
+        if self.next_worker_id is not None:
+            self.store.patch_job(job.id, worker_id=self.next_worker_id)
+        else:
+            paths = self.storage.prepare(job.id)
+            for path in paths.flow_files:
+                path.write_bytes(b"completed-by-current-owner")
+            self.store.patch_job(
+                job.id,
+                status=CloudJobStatus.FLOW_READY,
+                checkpoint=CloudJobCheckpoint.FLOW_READY,
+                current_step="flow_ready",
+                progress=60,
+                flow_generation_unresolved=False,
+            )
+        yield self.workspace
+
+
 class SimulatedFlowProcessCrash(BaseException):
     """Models process death so the workflow cannot convert it into a job failure."""
 
@@ -453,6 +500,8 @@ def _workflow(
     canva=None,
     flow_recovery=None,
     reporter=None,
+    flow_workspace_retry_sleeper=lambda _seconds: None,
+    flow_workspace_retry_clock=None,
 ):
     return CloudAgentWorkflow(
         store,
@@ -469,6 +518,8 @@ def _workflow(
         expected_height=1920,
         flow_recovery=flow_recovery,
         reporter=reporter,
+        flow_workspace_retry_sleeper=flow_workspace_retry_sleeper,
+        flow_workspace_retry_clock=flow_workspace_retry_clock,
     )
 
 
@@ -817,6 +868,393 @@ def test_flow_workspace_error_before_paid_fence_fails_without_reconciliation_sta
     assert workspace.reconcile_calls == 0
 
 
+def test_flow_workspace_error_before_paid_fence_reopens_session_and_continues(
+    monkeypatch,
+    tmp_path,
+):
+    """Catches a transient editor boot forcing a manual Retry."""
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    events = []
+    first = FenceWorkspace(
+        store,
+        events,
+        prepare_error=FlowWorkspaceVerificationError("editor did not settle"),
+    )
+    second = FenceWorkspace(store, events)
+    flow = SequencedFenceFlow([first, second], events)
+    tts = RecordingTTS()
+    delays = []
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        flow=flow,
+        tts=tts,
+        flow_workspace_retry_sleeper=delays.append,
+    ).run(
+        job.id,
+        worker_id=WORKER_ID,
+    )
+
+    assert result.status is CloudJobStatus.COMPLETED
+    assert result.flow_workspace_retry_attempts == 1
+    assert flow.acquire_calls == 2
+    assert first.generate_calls == 0
+    assert second.generate_calls == 1
+    assert tts.calls == []
+    assert delays == [30.0]
+
+
+def test_flow_workspace_auto_retry_stops_after_two_safe_reopens(
+    monkeypatch,
+    tmp_path,
+):
+    """Catches an unbounded pre-paid retry loop when Flow remains unavailable."""
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    events = []
+    workspaces = [
+        FenceWorkspace(
+            store,
+            events,
+            prepare_error=FlowWorkspaceVerificationError("editor did not settle"),
+        )
+        for _ in range(3)
+    ]
+    flow = SequencedFenceFlow(workspaces, events)
+    delays = []
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        flow=flow,
+        flow_workspace_retry_sleeper=delays.append,
+    ).run(
+        job.id,
+        worker_id=WORKER_ID,
+    )
+
+    assert result.status is CloudJobStatus.FAILED
+    assert result.error_code == "FLOW_WORKSPACE_VERIFICATION_FAILED"
+    assert result.flow_workspace_retry_attempts == 2
+    assert result.flow_generation_unresolved is False
+    assert flow.acquire_calls == 3
+    assert all(workspace.generate_calls == 0 for workspace in workspaces)
+    assert delays == [30.0, 120.0]
+
+
+def test_resumed_tts_ready_job_consumes_flow_workspace_retry_budget(
+    monkeypatch,
+    tmp_path,
+):
+    """A paused TTS_READY job resumed as QUEUED must not reopen unboundedly."""
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.QUEUED,
+        current_step="queued",
+    )
+    events = []
+    workspaces = [
+        FenceWorkspace(
+            store,
+            events,
+            prepare_error=FlowWorkspaceVerificationError("editor did not settle"),
+        )
+        for _ in range(3)
+    ]
+    flow = SequencedFenceFlow(workspaces, events)
+    delays = []
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        flow=flow,
+        flow_workspace_retry_sleeper=delays.append,
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert result.status is CloudJobStatus.FAILED
+    assert result.error_code == "FLOW_WORKSPACE_VERIFICATION_FAILED"
+    assert result.flow_workspace_retry_attempts == 2
+    assert flow.acquire_calls == 3
+    assert delays == [30.0, 120.0]
+
+
+def test_flow_workspace_lock_refreshes_checkpoint_before_any_paid_submission(
+    monkeypatch,
+    tmp_path,
+):
+    """Catches a lock waiter submitting from stale pre-lock job state."""
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    events = []
+    workspace = FenceWorkspace(store, events)
+    flow = AdvancingBeforeYieldFlow(store, storage, workspace)
+    _accept_media(monkeypatch)
+
+    result = _workflow(tmp_path, store, flow=flow).run(
+        job.id,
+        worker_id=WORKER_ID,
+    )
+
+    assert result.status is CloudJobStatus.COMPLETED
+    assert workspace.generate_calls == 0
+    assert flow.acquire_calls == 1
+
+
+def test_flow_workspace_lock_abandons_stale_worker_after_lease_handoff(
+    monkeypatch,
+    tmp_path,
+):
+    """Catches an old child continuing after another worker owns the durable lease."""
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    events = []
+    workspace = FenceWorkspace(store, events)
+    flow = AdvancingBeforeYieldFlow(
+        store,
+        storage,
+        workspace,
+        next_worker_id="worker-new",
+    )
+    _accept_media(monkeypatch)
+
+    result = _workflow(tmp_path, store, flow=flow).run(
+        job.id,
+        worker_id=WORKER_ID,
+    )
+
+    assert result.worker_id == "worker-new"
+    assert result.checkpoint is CloudJobCheckpoint.TTS_READY
+    assert workspace.generate_calls == 0
+
+
+def test_flow_workspace_error_cannot_reserve_retry_after_lease_handoff(
+    monkeypatch,
+    tmp_path,
+):
+    """The stale exception handler cannot overwrite the new owner's state."""
+
+    class HandoffWorkspace(FenceWorkspace):
+        def prepare_for_generation(self):
+            self.store.patch_job(
+                job.id,
+                status=CloudJobStatus.HUMAN_REQUIRED,
+                current_step="human_required",
+                error_code="HUMAN_REQUIRED",
+                worker_id="worker-new",
+                lease_until="2026-08-28T23:59:59.999999+00:00",
+            )
+            raise FlowWorkspaceVerificationError("old workspace lost ownership")
+
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    events = []
+    workspace = HandoffWorkspace(store, events)
+    flow = FenceFlow(workspace, events)
+    _accept_media(monkeypatch)
+
+    result = _workflow(tmp_path, store, flow=flow).run(
+        job.id,
+        worker_id=WORKER_ID,
+    )
+
+    assert result.worker_id == "worker-new"
+    assert result.status is CloudJobStatus.HUMAN_REQUIRED
+    assert result.current_step == "human_required"
+    assert result.flow_workspace_retry_attempts == 0
+    assert flow.acquire_calls == 1
+
+
+def test_reserved_flow_workspace_retry_resumes_remaining_delay_after_restart(
+    monkeypatch,
+    tmp_path,
+):
+    """Catches a child restart consuming a new retry or skipping its backoff."""
+    now = datetime(2026, 8, 28, 16, 0, tzinfo=timezone.utc)
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    store.patch_job(
+        job.id,
+        current_step="flow_workspace_retrying",
+        flow_workspace_retry_attempts=1,
+        flow_workspace_retry_not_before=(
+            now + timedelta(seconds=17)
+        ).isoformat(timespec="microseconds"),
+    )
+    delays = []
+    flow = RecordingWorkspaceFlow(store)
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        flow=flow,
+        flow_workspace_retry_sleeper=delays.append,
+        flow_workspace_retry_clock=lambda: now,
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert result.status is CloudJobStatus.COMPLETED
+    assert delays == [17.0]
+    assert result.flow_workspace_retry_attempts == 1
+
+
+@pytest.mark.parametrize(
+    ("control_request", "expected_status"),
+    [
+        (CloudControlRequest.PAUSE, CloudJobStatus.PAUSED),
+        (CloudControlRequest.CANCEL, CloudJobStatus.CANCELLED),
+    ],
+)
+def test_reserved_flow_workspace_retry_honors_control_after_resumed_delay(
+    monkeypatch,
+    tmp_path,
+    control_request,
+    expected_status,
+):
+    """A resumed backoff must not reopen Flow after pause or cancel."""
+    now = datetime(2026, 8, 28, 16, 0, tzinfo=timezone.utc)
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    store.patch_job(
+        job.id,
+        current_step="flow_workspace_retrying",
+        flow_workspace_retry_attempts=1,
+        flow_workspace_retry_not_before=(
+            now + timedelta(seconds=17)
+        ).isoformat(timespec="microseconds"),
+    )
+    flow = RecordingWorkspaceFlow(store)
+
+    def request_control(_seconds):
+        store.patch_job(job.id, control_request=control_request)
+
+    _accept_media(monkeypatch)
+    result = _workflow(
+        tmp_path,
+        store,
+        flow=flow,
+        flow_workspace_retry_sleeper=request_control,
+        flow_workspace_retry_clock=lambda: now,
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert result.status is expected_status
+    assert flow.acquire_calls == []
+    assert flow.workspace.generate_calls == []
+
+
+def test_reserved_flow_workspace_retry_marks_opening_before_acquire(
+    monkeypatch,
+    tmp_path,
+):
+    """The supervisor may only auto-reclaim a child still in durable backoff."""
+
+    class OpeningStateFlow(RecordingWorkspaceFlow):
+        @contextmanager
+        def acquire_workspace(self, job):
+            current = self.store.get_job(job.id)
+            assert current.current_step == "flow_workspace_retry_opening"
+            with super().acquire_workspace(job) as workspace:
+                yield workspace
+
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    store.patch_job(
+        job.id,
+        current_step="flow_workspace_retrying",
+        flow_workspace_retry_attempts=1,
+    )
+    flow = OpeningStateFlow(store)
+    _accept_media(monkeypatch)
+
+    result = _workflow(tmp_path, store, flow=flow).run(
+        job.id,
+        worker_id=WORKER_ID,
+    )
+
+    assert result.status is CloudJobStatus.COMPLETED
+    assert flow.acquire_calls == [job.id]
+
+
+def test_persisted_flow_workspace_retry_opening_fails_closed_after_restart(
+    monkeypatch,
+    tmp_path,
+):
+    """A whole-worker restart must not reuse an already-started reopen."""
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    store.patch_job(
+        job.id,
+        current_step="flow_workspace_retry_opening",
+        flow_workspace_retry_attempts=1,
+    )
+    flow = RecordingWorkspaceFlow(store)
+    _accept_media(monkeypatch)
+
+    result = _workflow(tmp_path, store, flow=flow).run(
+        job.id,
+        worker_id=WORKER_ID,
+    )
+
+    assert result.status is CloudJobStatus.HUMAN_REQUIRED
+    assert result.error_code == "HUMAN_REQUIRED"
+    assert flow.acquire_calls == []
+    assert flow.workspace.generate_calls == []
+
+
+def test_flow_workspace_retry_transition_abandons_stale_lease_owner(
+    monkeypatch,
+    tmp_path,
+):
+    """A stale worker cannot change another worker's reserved retry state."""
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    store.patch_job(
+        job.id,
+        current_step="flow_workspace_retrying",
+        flow_workspace_retry_attempts=1,
+        worker_id="worker-new",
+    )
+    flow = RecordingWorkspaceFlow(store)
+    _accept_media(monkeypatch)
+
+    result = _workflow(tmp_path, store, flow=flow).run(
+        job.id,
+        worker_id=WORKER_ID,
+    )
+
+    assert result.worker_id == "worker-new"
+    assert result.current_step == "flow_workspace_retrying"
+    assert flow.acquire_calls == []
+
+
 def test_agent_activation_failure_before_paid_fence_does_not_set_generation_fence(
     monkeypatch,
     tmp_path,
@@ -844,12 +1282,17 @@ def test_agent_activation_failure_before_paid_fence_does_not_set_generation_fenc
     assert result.status is CloudJobStatus.FAILED
     assert result.checkpoint is CloudJobCheckpoint.TTS_READY
     assert result.flow_generation_unresolved is False
+    assert result.flow_workspace_retry_attempts == 2
     assert result.error_code == "FLOW_WORKSPACE_VERIFICATION_FAILED"
     assert events == [
-        "workspace_enter",
-        "prepare",
-        ("agent_prepare", _request().master_prompt),
-        "workspace_exit",
+        event
+        for _ in range(3)
+        for event in (
+            "workspace_enter",
+            "prepare",
+            ("agent_prepare", _request().master_prompt),
+            "workspace_exit",
+        )
     ]
     assert workspace.generate_calls == 0
     assert workspace.reconcile_calls == 0

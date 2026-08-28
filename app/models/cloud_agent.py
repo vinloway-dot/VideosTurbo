@@ -170,6 +170,8 @@ class CloudJobRecord(CloudJobCreate):
     last_progress_milestone: str = ""
     stage_started_at: str = ""
     flow_recovery_attempts: int = Field(default=0, ge=0, le=2)
+    flow_workspace_retry_attempts: int = Field(default=0, ge=0, le=2)
+    flow_workspace_retry_not_before: str = ""
     flow_missing_clip_index: int = Field(default=0, ge=0, le=6)
     flow_recovery_state: FlowRecoveryState = FlowRecoveryState.NONE
     flow_recovery_baseline: str = ""

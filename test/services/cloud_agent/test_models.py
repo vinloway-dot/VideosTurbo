@@ -154,6 +154,8 @@ def test_cloud_job_record_has_safe_recovery_defaults():
 
     assert record.flow_recovery_state is FlowRecoveryState.NONE
     assert record.flow_recovery_attempts == 0
+    assert record.flow_workspace_retry_attempts == 0
+    assert record.flow_workspace_retry_not_before == ""
     assert record.flow_missing_clip_index == 0
     assert record.flow_recovery_baseline == ""
     assert record.canva_restart_attempts == 0
