@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from app.models.cloud_agent import CloudJobCheckpoint, CloudJobCreate, CloudJobStatus
+from app.models.cloud_agent import (
+    CloudJobCheckpoint,
+    CloudJobCreate,
+    CloudJobStatus,
+    FlowRecoveryState,
+)
 from app.models.six_clip import empty_six_clip_plan
 from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.media_probe import MediaProbe
@@ -76,6 +81,18 @@ def _failed_tts_ready_job(store: CloudJobStore, storage: CloudJobStorage):
     ), paths
 
 
+def _failed_inventory_pending_job(store: CloudJobStore, storage: CloudJobStorage):
+    job, paths = _failed_tts_ready_job(store, storage)
+    snapshot = paths.flow_snapshots_dir / "partial-0.zip"
+    snapshot.write_bytes(b"complete recovery archive")
+    return store.patch_job(
+        job.id,
+        error_code="FLOW_ARCHIVE_VALIDATION_FAILED",
+        error_message="partial archive must contain exactly five unique clips",
+        flow_recovery_state=FlowRecoveryState.INVENTORY_PENDING,
+    ), paths, snapshot
+
+
 def _patch_valid_audio(monkeypatch, module):
     monkeypatch.setattr(module, "validate_audio", lambda path, **_: _probe(Path(path)))
 
@@ -100,6 +117,73 @@ def test_failed_tts_ready_retry_reuses_same_audio_and_recomputes_timing(monkeypa
     assert retried.flow_cleanup_unresolved is False
     assert retried.error_code == ""
     assert retried.error_message == ""
+
+
+def test_inventory_pending_retry_preserves_archive_and_recovery_state(
+    monkeypatch, tmp_path
+):
+    module = _retry_module()
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    storage = CloudJobStorage(tmp_path / "jobs")
+    job, paths, snapshot = _failed_inventory_pending_job(store, storage)
+    _patch_valid_audio(monkeypatch, module)
+
+    retried = _retry_service(module, store, storage).retry(job.id)
+
+    assert retried.status is CloudJobStatus.QUEUED
+    assert retried.checkpoint is CloudJobCheckpoint.TTS_READY
+    assert retried.flow_recovery_state is FlowRecoveryState.INVENTORY_PENDING
+    assert retried.flow_recovery_attempts == 0
+    assert retried.flow_missing_clip_index == 0
+    assert retried.error_code == ""
+    assert snapshot.read_bytes() == b"complete recovery archive"
+    assert paths.voice_file.read_bytes() == b"canonical voice"
+
+
+@pytest.mark.parametrize("artifact", ["extra_snapshot", "canonical_clip"])
+def test_inventory_pending_retry_rejects_ambiguous_flow_artifacts(
+    monkeypatch, tmp_path, artifact
+):
+    module = _retry_module()
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    storage = CloudJobStorage(tmp_path / "jobs")
+    job, paths, _ = _failed_inventory_pending_job(store, storage)
+    _patch_valid_audio(monkeypatch, module)
+    if artifact == "extra_snapshot":
+        (paths.flow_snapshots_dir / "unexpected.zip").write_bytes(b"unexpected")
+    else:
+        paths.flow_files[0].write_bytes(b"ambiguous clip")
+
+    with pytest.raises(
+        module.PreFlowRetryEligibilityError,
+        match="incomplete or ambiguous",
+    ):
+        _retry_service(module, store, storage).retry(job.id)
+
+    assert store.get_job(job.id).status is CloudJobStatus.FAILED
+
+
+def test_two_simultaneous_inventory_retries_accept_once(monkeypatch, tmp_path):
+    module = _retry_module()
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    storage = CloudJobStorage(tmp_path / "jobs")
+    job, _, _ = _failed_inventory_pending_job(store, storage)
+    _patch_valid_audio(monkeypatch, module)
+
+    def retry_once():
+        try:
+            return _retry_service(module, store, storage).retry(job.id)
+        except module.PreFlowRetryEligibilityError as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: retry_once(), range(2)))
+
+    accepted = [result for result in results if not isinstance(result, Exception)]
+    rejected = [result for result in results if isinstance(result, Exception)]
+    assert len(accepted) == 1
+    assert len(rejected) == 1
+    assert accepted[0].status is CloudJobStatus.QUEUED
 
 
 @pytest.mark.parametrize("artifact", ["canonical", "archive", "staging", "quarantine"])

@@ -814,6 +814,75 @@ class CloudJobStore:
         finally:
             connection.close()
 
+    def requeue_flow_inventory_retry(
+        self,
+        job_id: str,
+        *,
+        voice_file: str,
+        audio_duration_seconds: float,
+        canva_playback_speed: float,
+        target_final_duration_seconds: float,
+    ) -> CloudJobRecord:
+        """Atomically requeue the exact failed inventory-recovery boundary."""
+        now = _utc_now()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM cloud_agent_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("cloud agent job not found")
+            current = self._row_to_record(row)
+            if not (
+                current.status is CloudJobStatus.FAILED
+                and current.checkpoint is CloudJobCheckpoint.TTS_READY
+                and current.error_code == "FLOW_ARCHIVE_VALIDATION_FAILED"
+                and current.flow_recovery_state is FlowRecoveryState.INVENTORY_PENDING
+                and current.flow_recovery_attempts == 0
+                and current.flow_missing_clip_index == 0
+                and not current.flow_recovery_baseline
+                and not current.flow_generation_unresolved
+                and not current.flow_cleanup_unresolved
+                and not current.worker_id
+                and not current.lease_until
+            ):
+                raise ValueError("job is not in a retryable Flow recovery state")
+
+            connection.execute(
+                """
+                UPDATE cloud_agent_jobs
+                SET status = ?, current_step = ?, control_request = ?,
+                    voice_file = ?, audio_duration_seconds = ?,
+                    canva_playback_speed = ?, target_final_duration_seconds = ?,
+                    error_code = ?, error_message = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    CloudJobStatus.QUEUED.value,
+                    "queued",
+                    CloudControlRequest.NONE.value,
+                    voice_file,
+                    audio_duration_seconds,
+                    canva_playback_speed,
+                    target_final_duration_seconds,
+                    "",
+                    "",
+                    now,
+                    job_id,
+                ),
+            )
+            retried_row = connection.execute(
+                "SELECT * FROM cloud_agent_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            connection.commit()
+            return self._row_to_record(retried_row)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def renew_lease(self, job_id: str, worker_id: str, lease_seconds: int) -> bool:
         now = _utc_now()
         new_lease_until = _lease_until(lease_seconds)
