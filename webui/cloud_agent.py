@@ -266,10 +266,8 @@ def _research_source_urls(value):
 
 
 def _research_mode_options(enabled):
-    options = ["Standard Script"]
-    if enabled:
-        options.append("Research Script")
-    return options
+    """Keep Research visible so a disabled feature can be re-enabled in its settings."""
+    return ["Standard Script", "Research Script"]
 
 
 def _research_url_row_count(value):
@@ -610,7 +608,8 @@ def _render_video_brief(
                         st.error(message)
                 except requests.RequestException as exc:
                     st.error(_api_error_message(exc))
-        script_mode_options = _research_mode_options(research_settings["enabled"])
+        research_enabled = bool(research_settings.get("enabled", True))
+        script_mode_options = _research_mode_options(research_enabled)
         if ui_state.get("cloud_agent_script_mode") not in script_mode_options:
             ui_state["cloud_agent_script_mode"] = "Standard Script"
         script_mode = _render_script_mode_control(
@@ -639,6 +638,8 @@ def _render_video_brief(
                     except requests.RequestException as exc:
                         st.error(_api_error_message(exc))
         else:
+            if not research_enabled:
+                st.caption("Research is disabled. Open Advanced settings and save Research Settings to enable it.")
             for key, value in (
                 ("cloud_agent_research_provider", research_settings["provider"]),
                 ("cloud_agent_research_openrouter_model", research_settings["openrouter_model"]),
@@ -673,6 +674,7 @@ def _render_video_brief(
                 type="primary",
                 icon=":material/auto_awesome:",
                 width="stretch",
+                disabled=not research_enabled,
             ):
                 if not subject.strip():
                     st.error("Video Subject is required.")

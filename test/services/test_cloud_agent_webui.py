@@ -943,6 +943,13 @@ def test_research_mode_offers_fastapi_only_controls_and_shared_editor_handoff():
     assert "PersistentBrowserManager" not in source
 
 
+def test_research_script_mode_remains_available_when_settings_are_disabled():
+    assert cloud_agent._research_mode_options(False) == [
+        "Standard Script",
+        "Research Script",
+    ]
+
+
 def test_research_error_data_reads_safe_message_code_and_accounting():
     class Response:
         def json(self):
@@ -1038,7 +1045,10 @@ def test_research_payload_forwards_citation_toggle_and_bounded_timeout(monkeypat
 
 
 def test_research_mode_and_url_row_helpers_enforce_explicit_ui_bounds():
-    assert cloud_agent._research_mode_options(False) == ["Standard Script"]
+    assert cloud_agent._research_mode_options(False) == [
+        "Standard Script",
+        "Research Script",
+    ]
     assert cloud_agent._research_mode_options(True) == [
         "Standard Script",
         "Research Script",
