@@ -43,8 +43,16 @@ _MARKER_TEXT_LABELS = frozenset(
     {
         "primary",
         "alternative",
+        "alternate",
+        "alt",
         "option",
         "choice",
+        "variant",
+        "variation",
+        "version",
+        "concept",
+        "secondary",
+        "backup",
         "prompt",
         "response",
         "result",
@@ -56,14 +64,19 @@ _MARKER_SUFFIX_LABELS = frozenset(
     label.replace(" ", "") for label in _MARKER_TEXT_LABELS
 )
 _TEXT_MARKER_INITIALS = frozenset(label[0] for label in _MARKER_TEXT_LABELS)
-_TEXT_LABEL_DELIMITERS = frozenset({":", ".", ")", "-", "–", "—"})
-_INLINE_TEXT_LABEL_DELIMITERS = frozenset({":", ")", "–", "—"})
-_LETTER_LABEL_DELIMITERS = frozenset({":", ".", ")", "-", "–", "—"})
-_MARKER_PREFIX_WRAPPERS = frozenset({'"', "'", "“", "”", "‘", "’", "(", "[", "{"})
+_INLINE_TEXT_LABEL_DELIMITERS = frozenset(
+    {":", ")", "]", "}", "=", "|", "–", "—", "→", "⇒", "⟶", "⟹"}
+)
+_LETTER_LABEL_DELIMITERS = frozenset({":", ".", ")", "]", "}", "-", "–", "—"})
+_MARKER_PREFIX_WRAPPERS = frozenset(
+    {'"', "'", "“", "”", "‘", "’", "(", "[", "{"}
+)
+_ALLOWED_FORMAT_CONTROLS = frozenset({"\u200c", "\u200d"})
+_ROMAN_NUMERAL_SUFFIX = re.compile(r"[ivxlcdm]{1,8}\Z")
 _MAX_TEXT_MARKER_SPAN = 48
-_MAX_RATIO_COMPONENT = 1_000_000
-_MAX_RATIO_IMBALANCE = 100
 _MAX_NUMERIC_TOKEN_DIGITS = 12
+_MAX_RATIO_COMPONENT = (10**_MAX_NUMERIC_TOKEN_DIGITS) - 1
+_MAX_RATIO_IMBALANCE = 100
 # A deliberately narrow range keeps short ordinals and arbitrary numeric IDs labelled.
 _MIN_YEAR_PREFIX = 1900
 _MAX_YEAR_PREFIX = 2199
@@ -72,13 +85,36 @@ PROVIDER_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
 
 
 def _canonical_validation_text(text: str) -> str:
-    """Normalize compatibility forms and ignore invisible format separators."""
-    normalized = unicodedata.normalize("NFKC", text)
-    return "".join(
-        character
-        for character in normalized
-        if unicodedata.category(character) != "Cf"
-    )
+    """Normalize compatibility forms and remove marker-obfuscating characters."""
+    normalized = unicodedata.normalize("NFKD", text)
+    result: list[str] = []
+    for character in normalized:
+        category = unicodedata.category(character)
+        if category == "Cf":
+            continue
+        if (
+            category.startswith("M")
+            and result
+            and result[-1].isascii()
+            and result[-1].isalnum()
+        ):
+            continue
+        result.append(character)
+    return "".join(result)
+
+
+def _contains_disallowed_unicode(text: str) -> bool:
+    for character in text:
+        category = unicodedata.category(character)
+        if category in {"Cc", "Cs", "Zl", "Zp"}:
+            return True
+        if category == "Cf" and character not in _ALLOWED_FORMAT_CONTROLS:
+            return True
+    return False
+
+
+def _is_marker_delimiter(character: str) -> bool:
+    return unicodedata.category(character)[0] in {"P", "S"}
 
 
 def _has_alternative_marker(text: str) -> bool:
@@ -102,7 +138,7 @@ def _segment_starts(text: str):
             continue
         if character == ":" and _colon_belongs_to_ratio(text, index):
             continue
-        if unicodedata.category(character)[0] in {"P", "S"}:
+        if _is_marker_delimiter(character):
             yield index + 1
 
 
@@ -186,7 +222,7 @@ def _starts_with_numbered_marker(text: str, start: int) -> bool:
     number_end = cursor
     while cursor < len(text) and text[cursor].isspace():
         cursor += 1
-    if cursor == len(text) or text[cursor] not in _TEXT_LABEL_DELIMITERS:
+    if cursor == len(text) or not _is_marker_delimiter(text[cursor]):
         return False
 
     delimiter = text[cursor]
@@ -207,6 +243,10 @@ def _starts_with_numbered_marker(text: str, start: int) -> bool:
         )
     if delimiter in {"-", "–", "—"}:
         return cursor + 1 < len(text) and text[cursor + 1].isspace()
+    if delimiter == "," and _looks_like_grouped_number(text, cursor):
+        return False
+    if delimiter == "/" and _looks_like_fraction(text, cursor):
+        return False
     return True
 
 
@@ -224,6 +264,39 @@ def _read_decimal_token(text: str, start: int) -> tuple[int, int | None]:
     return cursor, int("".join(digits))
 
 
+def _looks_like_grouped_number(text: str, delimiter_index: int) -> bool:
+    cursor = delimiter_index
+    saw_group = False
+    while cursor < len(text) and text[cursor] == ",":
+        group_start = cursor + 1
+        group_end = group_start
+        while (
+            group_end < len(text)
+            and text[group_end].isdecimal()
+            and group_end - group_start < 3
+        ):
+            group_end += 1
+        if group_end - group_start != 3:
+            return False
+        if group_end < len(text) and text[group_end].isdecimal():
+            return False
+        saw_group = True
+        cursor = group_end
+    return saw_group
+
+
+def _looks_like_fraction(text: str, delimiter_index: int) -> bool:
+    rhs_start = delimiter_index + 1
+    while rhs_start < len(text) and text[rhs_start].isspace():
+        rhs_start += 1
+    rhs_end, rhs = _read_decimal_token(text, rhs_start)
+    return (
+        rhs is not None
+        and rhs_end > rhs_start
+        and (rhs_end == len(text) or not text[rhs_end].isalnum())
+    )
+
+
 def _is_complete_ratio(text: str, rhs_start: int, lhs: int | None) -> bool:
     if lhs is None or not 1 <= lhs <= _MAX_RATIO_COMPONENT:
         return False
@@ -237,7 +310,19 @@ def _is_complete_ratio(text: str, rhs_start: int, lhs: int | None) -> bool:
         return False
     smaller = min(lhs, rhs)
     larger = max(lhs, rhs)
-    return larger <= smaller * _MAX_RATIO_IMBALANCE
+    return (
+        larger <= smaller * _MAX_RATIO_IMBALANCE
+        or _has_explicit_contrast_ratio_context(text, rhs_end)
+    )
+
+
+def _has_explicit_contrast_ratio_context(text: str, rhs_end: int) -> bool:
+    cursor = rhs_end
+    while cursor < len(text) and (
+        text[cursor].isspace() or text[cursor] in {",", ";"}
+    ):
+        cursor += 1
+    return text[cursor:].casefold().startswith("contrast ratio")
 
 
 def _starts_with_letter_marker(text: str, start: int) -> bool:
@@ -281,22 +366,39 @@ def _text_marker(text: str, start: int) -> tuple[int, str] | None:
         text[cursor].isalnum() or text[cursor].isspace() or text[cursor] == "#"
     ):
         return None
-    if text[cursor] not in _TEXT_LABEL_DELIMITERS:
+    if not _is_marker_delimiter(text[cursor]):
         return None
 
     label = " ".join(text[start:cursor].casefold().split())
+    if not _matches_marker_label(label):
+        return None
+    return cursor, text[cursor]
+
+
+def _matches_marker_label(label: str) -> bool:
     if label in _MARKER_TEXT_LABELS:
-        return cursor, text[cursor]
+        return True
     compact_label = label.replace(" ", "")
     for base_label in _MARKER_SUFFIX_LABELS:
         if not compact_label.startswith(base_label):
             continue
-        suffix = compact_label[len(base_label) :]
-        if suffix.startswith("#"):
-            suffix = suffix[1:]
-        if suffix.isdecimal() or (len(suffix) == 1 and suffix.isalpha()):
-            return cursor, text[cursor]
-    return None
+        if _is_marker_suffix(compact_label[len(base_label) :]):
+            return True
+    return False
+
+
+def _is_marker_suffix(suffix: str) -> bool:
+    if suffix.startswith("#"):
+        suffix = suffix[1:]
+    if not suffix:
+        return False
+    if suffix.isdecimal():
+        return True
+    if len(suffix) == 1 and suffix.isalpha():
+        return True
+    if suffix.startswith("no") and suffix[2:].isdecimal():
+        return True
+    return _ROMAN_NUMERAL_SUFFIX.fullmatch(suffix) is not None
 
 
 def _has_inline_text_marker(text: str) -> bool:
@@ -427,15 +529,21 @@ class ThumbnailPromptService:
         content = cls._value(message, "content")
         if not isinstance(content, str):
             raise cls._invalid_response()
+        if (
+            len(content) > _MAX_OUTPUT_CHARACTERS
+            or _contains_disallowed_unicode(content)
+        ):
+            raise cls._invalid_response()
+
         normalized = content.strip()
+        if not normalized or "\n" in normalized or "\r" in normalized:
+            raise cls._invalid_response()
+
         validation_text = _canonical_validation_text(normalized)
         if (
-            not normalized
-            or len(normalized) > _MAX_OUTPUT_CHARACTERS
-            or "\n" in normalized
-            or "\r" in normalized
-            or any(unicodedata.category(character) == "Cc" for character in content)
+            _DISALLOWED_OUTPUT_MARKER.search(normalized)
             or _DISALLOWED_OUTPUT_MARKER.search(validation_text)
+            or _DISALLOWED_INLINE_MARKDOWN.search(normalized)
             or _DISALLOWED_INLINE_MARKDOWN.search(validation_text)
             or _has_alternative_marker(validation_text)
         ):
