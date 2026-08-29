@@ -52,10 +52,17 @@ _MARKER_TEXT_LABELS = frozenset(
         "thumbnail prompt",
     }
 )
-_MARKER_SUFFIX_LABELS = frozenset({"primary", "alternative", "option", "choice"})
-_TEXT_LABEL_DELIMITERS = frozenset({":", ".", ")", "-"})
+_MARKER_SUFFIX_LABELS = frozenset(
+    label.replace(" ", "") for label in _MARKER_TEXT_LABELS
+)
+_TEXT_LABEL_DELIMITERS = frozenset({":", ".", ")", "-", "–", "—"})
+_LETTER_LABEL_DELIMITERS = frozenset({".", ")"})
 _SIMPLE_SEGMENT_SEPARATORS = frozenset({";", "|"})
 _SPACED_SEGMENT_SEPARATORS = frozenset({"-", "–", "—", "/"})
+_MAX_RATIO_COMPONENT = 100
+# A deliberately narrow range keeps short ordinals and arbitrary numeric IDs labelled.
+_MIN_YEAR_PREFIX = 1900
+_MAX_YEAR_PREFIX = 2199
 _MAX_OUTPUT_CHARACTERS = 8000
 PROVIDER_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
 
@@ -88,6 +95,8 @@ def _segment_has_marker(text: str, start: int) -> bool:
         return False
     if text[cursor].isdigit():
         return _starts_with_numbered_marker(text, cursor)
+    if _starts_with_letter_marker(text, cursor):
+        return True
     return _starts_with_text_marker(text, cursor)
 
 
@@ -95,6 +104,8 @@ def _starts_with_numbered_marker(text: str, start: int) -> bool:
     cursor = start
     while cursor < len(text) and text[cursor].isdigit():
         cursor += 1
+    number_end = cursor
+    number = int(text[start:number_end])
     while cursor < len(text) and text[cursor].isspace():
         cursor += 1
     if cursor == len(text) or text[cursor] not in _TEXT_LABEL_DELIMITERS:
@@ -105,15 +116,47 @@ def _starts_with_numbered_marker(text: str, start: int) -> bool:
     while content_start < len(text) and text[content_start].isspace():
         content_start += 1
     if delimiter == ":":
-        return content_start == len(text) or not text[content_start].isdigit()
+        if content_start == len(text):
+            return True
+        if _MIN_YEAR_PREFIX <= number <= _MAX_YEAR_PREFIX:
+            return False
+        return not _is_complete_ratio(text, content_start, number)
+    if delimiter == ".":
+        return not (
+            cursor == number_end
+            and cursor + 1 < len(text)
+            and text[cursor + 1].isdigit()
+        )
     if delimiter == "-":
         return cursor + 1 < len(text) and text[cursor + 1].isspace()
     return True
 
 
+def _is_complete_ratio(text: str, rhs_start: int, lhs: int) -> bool:
+    if not 1 <= lhs <= _MAX_RATIO_COMPONENT:
+        return False
+    rhs_end = rhs_start
+    while rhs_end < len(text) and text[rhs_end].isdigit():
+        rhs_end += 1
+    if rhs_end == rhs_start or (rhs_end < len(text) and text[rhs_end].isalnum()):
+        return False
+    return 1 <= int(text[rhs_start:rhs_end]) <= _MAX_RATIO_COMPONENT
+
+
+def _starts_with_letter_marker(text: str, start: int) -> bool:
+    if not (text[start].isascii() and text[start].isalpha()):
+        return False
+    cursor = start + 1
+    while cursor < len(text) and text[cursor].isspace():
+        cursor += 1
+    return cursor < len(text) and text[cursor] in _LETTER_LABEL_DELIMITERS
+
+
 def _starts_with_text_marker(text: str, start: int) -> bool:
     cursor = start
-    while cursor < len(text) and (text[cursor].isalnum() or text[cursor].isspace()):
+    while cursor < len(text) and (
+        text[cursor].isalnum() or text[cursor].isspace() or text[cursor] == "#"
+    ):
         cursor += 1
     if cursor == len(text) or text[cursor] not in _TEXT_LABEL_DELIMITERS:
         return False
@@ -126,6 +169,8 @@ def _starts_with_text_marker(text: str, start: int) -> bool:
         if not compact_label.startswith(base_label):
             continue
         suffix = compact_label[len(base_label) :]
+        if suffix.startswith("#"):
+            suffix = suffix[1:]
         if suffix.isdigit() or (len(suffix) == 1 and suffix.isalpha()):
             return True
     return False
