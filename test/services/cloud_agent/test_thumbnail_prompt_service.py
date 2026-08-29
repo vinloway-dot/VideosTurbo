@@ -4,8 +4,13 @@ import pytest
 from pydantic import SecretStr
 
 from app.services.cloud_agent.storage import CloudJobStorage
+from app.config import config
+from app.config.config import THUMBNAIL_PROMPT_DEFAULTS
 from app.services.cloud_agent.thumbnail_prompt.errors import ThumbnailPromptError
 from app.services.cloud_agent.thumbnail_prompt.service import ThumbnailPromptService
+from app.services.cloud_agent.thumbnail_prompt.settings import (
+    ThumbnailPromptSettingsService,
+)
 
 
 class FakeCompletionClient:
@@ -40,6 +45,10 @@ class FakeSettings:
         assert provider_id == "aihubmix"
         return SimpleNamespace(base_url="https://thumbnail-provider.invalid/v1")
 
+    def get_base_url_for_generation(self, provider_id):
+        assert provider_id == "aihubmix"
+        return "https://thumbnail-provider.invalid/v1"
+
     def get_settings(self):
         return SimpleNamespace(master_prompt="Follow the thumbnail art direction.")
 
@@ -50,7 +59,9 @@ def ready_settings():
 
 def service_with_completion(tmp_path, completion):
     storage = CloudJobStorage(tmp_path / "jobs")
-    storage.write_inputs("job-1", script="script", master_prompt="FULL VIDEO MASTER PROMPT")
+    storage.write_inputs(
+        "job-1", script="script", master_prompt="FULL VIDEO MASTER PROMPT"
+    )
     return ThumbnailPromptService(
         storage=storage,
         settings=ready_settings(),
@@ -107,6 +118,25 @@ def test_generate_rejects_lettered_list_alternatives(tmp_path):
         service.generate_for_job("job-1")
 
 
+@pytest.mark.parametrize(
+    "completion",
+    [
+        "- Solar flare over Earth",
+        "* Solar flare over Earth",
+        "```text\nSolar flare over Earth\n```",
+        "**Solar flare over Earth**",
+        "First concept\n---\nSecond concept",
+    ],
+)
+def test_generate_rejects_markdown_or_multiple_alternatives(tmp_path, completion):
+    service = service_with_completion(tmp_path, completion)
+
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.generate_for_job("job-1")
+
+    assert error.value.code == "THUMBNAIL_PROMPT_RESPONSE_INVALID"
+
+
 def test_generate_keeps_normal_image_prompt_prose(tmp_path):
     prompt = "Cinematic solar flare above Earth with dramatic golden rim light, 16:9."
     service = service_with_completion(tmp_path, prompt)
@@ -123,7 +153,9 @@ def test_generate_rejects_an_empty_provider_response(tmp_path):
 
 def test_generate_sanitizes_client_factory_failures(tmp_path):
     storage = CloudJobStorage(tmp_path / "jobs")
-    storage.write_inputs("job-1", script="script", master_prompt="FULL VIDEO MASTER PROMPT")
+    storage.write_inputs(
+        "job-1", script="script", master_prompt="FULL VIDEO MASTER PROMPT"
+    )
 
     def broken_factory(**_kwargs):
         raise ValueError("base URL includes private configuration")
@@ -139,3 +171,63 @@ def test_generate_sanitizes_client_factory_failures(tmp_path):
 
     assert error.value.code == "PROVIDER_REQUEST_FAILED"
     assert "private configuration" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("config_key", "value"),
+    [
+        ("cloud_agent_thumbnail_prompt_default_provider", "unknown"),
+        ("cloud_agent_thumbnail_prompt_aihubmix_base_url", "not-a-url"),
+    ],
+)
+def test_generate_rejects_invalid_provider_configuration_before_client_creation(
+    tmp_path, monkeypatch, config_key, value
+):
+    app_config = dict(THUMBNAIL_PROMPT_DEFAULTS)
+    app_config.update(
+        {
+            "cloud_agent_thumbnail_prompt_master_prompt": "Art direction",
+            "cloud_agent_thumbnail_prompt_aihubmix_api_key": "secret",
+            config_key: value,
+        }
+    )
+    monkeypatch.setattr(config, "app", app_config)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    storage.write_inputs(
+        "job-1", script="script", master_prompt="FULL VIDEO MASTER PROMPT"
+    )
+    factory_calls = []
+
+    service = ThumbnailPromptService(
+        storage=storage,
+        settings=ThumbnailPromptSettingsService(),
+        client_factory=lambda **kwargs: factory_calls.append(kwargs),
+    )
+
+    with pytest.raises(ThumbnailPromptError):
+        service.generate_for_job("job-1")
+
+    assert factory_calls == []
+
+
+def test_provider_timeout_is_shorter_than_the_callers_request_timeout(tmp_path):
+    storage = CloudJobStorage(tmp_path / "jobs")
+    storage.write_inputs(
+        "job-1", script="script", master_prompt="FULL VIDEO MASTER PROMPT"
+    )
+    factory_calls = []
+
+    def client_factory(**kwargs):
+        factory_calls.append(kwargs)
+        return FakeCompletionClient("Solar flare over Earth")
+
+    service = ThumbnailPromptService(
+        storage=storage,
+        settings=ready_settings(),
+        client_factory=client_factory,
+    )
+
+    service.generate_for_job("job-1")
+
+    assert factory_calls[0]["timeout"] == 45
+    assert factory_calls[0]["max_retries"] == 0

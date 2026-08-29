@@ -53,11 +53,11 @@ def client(services):
     app = FastAPI()
     app.include_router(cloud_agent.router)
     app.add_exception_handler(HttpException, exception_handler)
-    app.dependency_overrides[cloud_agent.get_cloud_video_library_service] = (
-        lambda: services.library
+    app.dependency_overrides[cloud_agent.get_cloud_video_library_service] = lambda: (
+        services.library
     )
-    app.dependency_overrides[cloud_agent.get_thumbnail_prompt_service] = (
-        lambda: services.thumbnail
+    app.dependency_overrides[cloud_agent.get_thumbnail_prompt_service] = lambda: (
+        services.thumbnail
     )
     app.dependency_overrides[cloud_agent.get_thumbnail_prompt_settings_service] = (
         lambda: services.settings
@@ -71,14 +71,18 @@ def _settings_payload(**overrides):
         "default_provider": "aihubmix",
         "aihubmix_model": "gpt-5.6-sol",
         "aihubmix_custom_model_id": "",
+        "aihubmix_base_url": "https://aihubmix.com/v1",
         "openrouter_model": "openai/gpt-5.6-sol",
         "openrouter_custom_model_id": "",
+        "openrouter_base_url": "https://openrouter.ai/api/v1",
     }
     payload.update(overrides)
     return payload
 
 
-def test_thumbnail_prompt_endpoint_only_generates_for_visible_completed_job(client, services):
+def test_thumbnail_prompt_endpoint_only_generates_for_visible_completed_job(
+    client, services
+):
     response = client.post("/api/v1/cloud-agent/videos/visible/thumbnail-prompt")
 
     assert response.status_code == 200
@@ -86,7 +90,9 @@ def test_thumbnail_prompt_endpoint_only_generates_for_visible_completed_job(clie
     assert services.thumbnail.calls == ["visible"]
 
 
-def test_thumbnail_prompt_endpoint_rejects_queued_job_without_calling_provider(client, services):
+def test_thumbnail_prompt_endpoint_rejects_queued_job_without_calling_provider(
+    client, services
+):
     response = client.post("/api/v1/cloud-agent/videos/queued/thumbnail-prompt")
 
     assert response.status_code == 404
@@ -100,6 +106,7 @@ def test_thumbnail_prompt_endpoint_rejects_queued_job_without_calling_provider(c
         ("PROVIDER_AUTHENTICATION_FAILED", 401),
         ("PROVIDER_TIMEOUT", 504),
         ("PROVIDER_REQUEST_FAILED", 502),
+        ("THUMBNAIL_PROMPT_RESPONSE_INVALID", 502),
     ],
 )
 def test_thumbnail_prompt_endpoint_maps_typed_provider_errors(
@@ -112,6 +119,31 @@ def test_thumbnail_prompt_endpoint_maps_typed_provider_errors(
     assert response.status_code == status_code
     assert "provider secret detail" not in response.text
     assert services.thumbnail.calls == ["visible"]
+
+
+@pytest.mark.parametrize(
+    ("code", "public_message"),
+    [
+        (
+            "PROVIDER_UNSUPPORTED",
+            "thumbnail prompt default provider is invalid; update settings",
+        ),
+        (
+            "PROVIDER_BASE_URL_INVALID",
+            "thumbnail prompt provider base URL is invalid; update settings",
+        ),
+    ],
+)
+def test_invalid_provider_configuration_returns_actionable_settings_error(
+    client, services, code, public_message
+):
+    services.thumbnail.error = ThumbnailPromptError(code, "provider secret detail")
+
+    response = client.post("/api/v1/cloud-agent/videos/visible/thumbnail-prompt")
+
+    assert response.status_code == 422
+    assert response.json()["message"] == public_message
+    assert "provider secret detail" not in response.text
 
 
 def test_thumbnail_prompt_settings_and_providers_redact_api_keys(client, services):
@@ -143,6 +175,31 @@ def test_thumbnail_prompt_settings_validate_and_persist_dedicated_values(client)
     assert invalid.status_code == 422
     assert updated.status_code == 200
     assert updated.json()["data"]["master_prompt"] == "Create a striking thumbnail."
+
+
+def test_thumbnail_prompt_settings_persist_editable_provider_base_urls(client):
+    response = client.put(
+        "/api/v1/cloud-agent/thumbnail-prompt/settings",
+        json=_settings_payload(
+            aihubmix_base_url="https://aihubmix.example/v1",
+            openrouter_base_url="https://openrouter.example/api/v1",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["aihubmix_base_url"] == "https://aihubmix.example/v1"
+    assert response.json()["data"]["openrouter_base_url"] == (
+        "https://openrouter.example/api/v1"
+    )
+
+
+def test_thumbnail_prompt_settings_reject_invalid_base_url(client):
+    response = client.put(
+        "/api/v1/cloud-agent/thumbnail-prompt/settings",
+        json=_settings_payload(aihubmix_base_url="not-a-url"),
+    )
+
+    assert response.status_code == 422
 
 
 def test_thumbnail_prompt_provider_key_can_be_updated_and_removed(client):

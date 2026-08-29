@@ -24,11 +24,14 @@ def test_video_library_prompt_action_is_card_local_and_shows_one_copyable_result
             self.buttons = []
             self.codes = []
             self.errors = []
+            self.captions = []
+            self.column_counts = []
 
         def container(self, **_kwargs):
             return nullcontext()
 
         def columns(self, count):
+            self.column_counts.append(count)
             return [nullcontext() for _ in range(count)]
 
         def html(self, _body):
@@ -46,6 +49,9 @@ def test_video_library_prompt_action_is_card_local_and_shows_one_copyable_result
 
         def error(self, message):
             self.errors.append(message)
+
+        def caption(self, message):
+            self.captions.append(message)
 
         def warning(self, _message):
             return None
@@ -72,7 +78,9 @@ def test_video_library_prompt_action_is_card_local_and_shows_one_copyable_result
         on_delete_request=lambda _job_id: None,
         on_delete_confirm=lambda _job_id: None,
         on_delete_cancel=lambda _job_id: None,
-        on_thumbnail_prompt=lambda job_id: requested.append(job_id) or "ready image prompt",
+        on_thumbnail_prompt=lambda job_id: (
+            requested.append(job_id) or "ready image prompt"
+        ),
         thumbnail_prompt_results={"job-1": "prior prompt"},
         thumbnail_prompt_errors={"job-2": "provider timeout"},
         thumbnail_prompt_busy_ids={"job-2"},
@@ -80,17 +88,14 @@ def test_video_library_prompt_action_is_card_local_and_shows_one_copyable_result
     )
 
     assert requested == ["job-1"]
-    assert fake.codes == [
-        (
-            "ready image prompt",
-            {
-                "language": None,
-            },
-        )
-    ]
+    assert fake.codes == []
     assert fake.errors == ["provider timeout"]
+    assert fake.captions == ["กำลังสร้าง Prompt หน้าปก…"]
+    assert fake.column_counts.count(2) == 2
     assert any(
-        label == "Prompt หน้าปก" and config["key"] == "thumbnail_prompt_job-2" and config["disabled"]
+        label == "Prompt หน้าปก"
+        and config["key"] == "thumbnail_prompt_job-2"
+        and config["disabled"]
         for label, config in fake.buttons
     )
 
@@ -213,7 +218,9 @@ def test_video_library_renderer_uses_public_video_urls_and_numbered_pages(monkey
         ("2", True),
         ("3", False),
     ]
-    assert any(config.get("key") == "cloud_agent_delete_job-1" for _, config in fake.buttons)
+    assert any(
+        config.get("key") == "cloud_agent_delete_job-1" for _, config in fake.buttons
+    )
 
 
 def test_video_library_media_failure_isolated_to_one_card(monkeypatch):
@@ -245,12 +252,16 @@ def test_video_library_media_failure_isolated_to_one_card(monkeypatch):
     view = cloud_agent_ui.VideoLibraryView(
         items=tuple(
             cloud_agent_ui.VideoCardView(
-                job_id=f"job-{index}", subject=f"Video {index}",
+                job_id=f"job-{index}",
+                subject=f"Video {index}",
                 completed_at="2026-08-28T12:00:00+00:00",
                 final_url=f"/api/v1/cloud-agent/jobs/job-{index}/final",
-            ) for index in (1, 2)
+            )
+            for index in (1, 2)
         ),
-        page=1, total_pages=1, total_items=2,
+        page=1,
+        total_pages=1,
+        total_items=2,
     )
 
     def load_video(url):
@@ -259,7 +270,9 @@ def test_video_library_media_failure_isolated_to_one_card(monkeypatch):
         return b"second-video"
 
     cloud_agent_ui.render_video_library(
-        view, load_video=load_video, pending_delete_id="",
+        view,
+        load_video=load_video,
+        pending_delete_id="",
         on_delete_request=lambda _job_id: None,
         on_delete_confirm=lambda _job_id: None,
         on_delete_cancel=lambda _job_id: None,
@@ -446,7 +459,9 @@ def test_video_library_visual_order_stays_newest_first_at_responsive_widths(
         def container(self, *, key, **_kwargs):
             attributes = f'class="st-key-{key}"'
             if key.startswith("cloud_agent_video_card_"):
-                attributes += f' data-card="{key.removeprefix("cloud_agent_video_card_")}"'
+                attributes += (
+                    f' data-card="{key.removeprefix("cloud_agent_video_card_")}"'
+                )
             node = Node(attributes)
             self.stack[-1].children.append(node)
             return NodeContext(self, node)
@@ -573,9 +588,7 @@ def test_saved_indicator_requires_a_local_saved_draft(monkeypatch):
     assert cloud_agent_ui.has_saved_draft(saved_state)
     saved = ShellStreamlit()
     monkeypatch.setattr(cloud_agent_ui, "st", saved)
-    cloud_agent_ui.render_page_header(
-        saved=cloud_agent_ui.has_saved_draft(saved_state)
-    )
+    cloud_agent_ui.render_page_header(saved=cloud_agent_ui.has_saved_draft(saved_state))
     assert any("Saved" in body for body in saved.html_bodies)
 
 
@@ -588,11 +601,8 @@ def test_cloud_agent_theme_is_a_project_local_css_asset():
 def test_cloud_agent_text_entry_fields_use_white_surface():
     css = Path("webui/cloud_agent.css").read_text(encoding="utf-8")
 
-    assert (
-        'div[class*="st-key-cloud_agent_"] [data-testid="stTextInput"] input,'
-        in css
-    )
-    assert 'background: var(--vt-surface) !important;' in css
+    assert 'div[class*="st-key-cloud_agent_"] [data-testid="stTextInput"] input,' in css
+    assert "background: var(--vt-surface) !important;" in css
 
 
 def test_cloud_agent_theme_includes_responsive_and_reduced_motion_rules():
@@ -605,7 +615,7 @@ def test_cloud_agent_theme_includes_responsive_and_reduced_motion_rules():
     assert "flex: 1 1 100% !important;" in css
     assert "@media (max-width: 760px)" in css
     assert ".vt-workflow { grid-template-columns: 1fr; }" in css
-    assert "div[class*=\"st-key-cloud_agent_\"] button { width: 100%; }" in css
+    assert 'div[class*="st-key-cloud_agent_"] button { width: 100%; }' in css
     assert "@media (prefers-reduced-motion: reduce)" in css
     assert "transition-duration: 0.01ms !important;" in css
     assert "animation-iteration-count: 1 !important;" in css
@@ -674,9 +684,7 @@ def test_mobile_sidebar_expand_control_remains_visible_and_reachable():
             )
         browser.close()
 
-    assert all(
-        box["width"] > 0 and box["height"] > 0 for box in sizes
-    )
+    assert all(box["width"] > 0 and box["height"] > 0 for box in sizes)
 
 
 def test_workflow_step_advances_only_from_accepted_local_artifacts():
@@ -831,7 +839,9 @@ def test_production_status_renders_five_fixed_safe_stages(monkeypatch):
     )
 
     body = " ".join(fake.html_bodies)
-    assert all(label in body for label in ("Script", "Voice", "Flow", "Canva", "Export"))
+    assert all(
+        label in body for label in ("Script", "Voice", "Flow", "Canva", "Export")
+    )
     assert "job-123" in body
     assert 'role="progressbar"' in body
     assert 'aria-valuetext="รอคิว: รอ Worker รับงานเพื่อเริ่มการผลิต"' in body
@@ -1053,12 +1063,85 @@ def test_thumbnail_settings_payload_uses_dedicated_default_only():
             "thumbnail_prompt_default_provider": "openrouter",
             "thumbnail_prompt_master_prompt": "Style guide",
             "thumbnail_prompt_aihubmix_model": "gpt-5.6-sol",
+            "thumbnail_prompt_aihubmix_base_url": "https://aihubmix.example/v1",
             "thumbnail_prompt_openrouter_model": "openai/gpt-5.6-sol",
+            "thumbnail_prompt_openrouter_base_url": "https://openrouter.example/api/v1",
         }
     )
 
     assert payload["default_provider"] == "openrouter"
+    assert payload["aihubmix_base_url"] == "https://aihubmix.example/v1"
+    assert payload["openrouter_base_url"] == "https://openrouter.example/api/v1"
     assert "llm_provider" not in payload
+
+
+@pytest.mark.parametrize(
+    ("selected_provider", "label"),
+    [("aihubmix", "AIHubMix Base URL"), ("openrouter", "OpenRouter Base URL")],
+)
+def test_thumbnail_settings_render_selected_provider_base_url(
+    monkeypatch, selected_provider, label
+):
+    class ThumbnailSettingsStreamlit:
+        def __init__(self, state):
+            self.session_state = state
+            self.text_inputs = []
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def subheader(self, _label):
+            return None
+
+        def text_area(self, _label, **_kwargs):
+            return None
+
+        def selectbox(self, _label, *, options, key, **_kwargs):
+            return self.session_state.get(key, options[0])
+
+        def text_input(self, input_label, **kwargs):
+            self.text_inputs.append((input_label, kwargs))
+            return ""
+
+        def button(self, _label, **_kwargs):
+            return False
+
+        def caption(self, _label):
+            return None
+
+    state = {
+        "thumbnail_prompt_default_provider": selected_provider,
+        "thumbnail_prompt_aihubmix_model": "gpt-5.6-sol",
+        "thumbnail_prompt_openrouter_model": "openai/gpt-5.6-sol",
+    }
+    fake = ThumbnailSettingsStreamlit(state)
+    monkeypatch.setattr(cloud_agent, "st", fake)
+
+    cloud_agent._render_thumbnail_prompt_settings(
+        ui_state=state,
+        settings=cloud_agent._thumbnail_prompt_default_settings(),
+        provider_catalog=[
+            {
+                "id": "aihubmix",
+                "label": "AIHubMix",
+                "models": ["gpt-5.6-sol", "custom"],
+                "default_model": "gpt-5.6-sol",
+                "api_key_configured": False,
+            },
+            {
+                "id": "openrouter",
+                "label": "OpenRouter",
+                "models": ["openai/gpt-5.6-sol", "custom"],
+                "default_model": "openai/gpt-5.6-sol",
+                "api_key_configured": False,
+            },
+        ],
+    )
+
+    assert (
+        label,
+        {"key": f"thumbnail_prompt_{selected_provider}_base_url"},
+    ) in fake.text_inputs
 
 
 def test_research_summary_never_contains_raw_source_body_or_secret_fields():

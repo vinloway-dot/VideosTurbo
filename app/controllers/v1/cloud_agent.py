@@ -39,7 +39,10 @@ from app.services.cloud_agent.factory import (
     build_thumbnail_prompt_settings_service,
 )
 from app.services.cloud_agent.draft_voice import DraftVoiceError, DraftVoiceService
-from app.services.cloud_agent.defaults import CloudAgentDefaultsError, CloudAgentDefaultsService
+from app.services.cloud_agent.defaults import (
+    CloudAgentDefaultsError,
+    CloudAgentDefaultsService,
+)
 from app.services.cloud_agent.retry import PreFlowRetryService
 from app.services.cloud_agent.preflight import _probe_storage_writable
 from app.services.cloud_agent.research import (
@@ -57,9 +60,13 @@ from app.services.cloud_agent.tts_settings import (
 )
 from app.services.cloud_agent.storage import CloudJobStorage
 from app.services.cloud_agent.thumbnail_prompt.errors import ThumbnailPromptError
-from app.services.cloud_agent.thumbnail_prompt.models import ThumbnailPromptSettingsPayload
+from app.services.cloud_agent.thumbnail_prompt.models import (
+    ThumbnailPromptSettingsPayload,
+)
 from app.services.cloud_agent.thumbnail_prompt.service import ThumbnailPromptService
-from app.services.cloud_agent.thumbnail_prompt.settings import ThumbnailPromptSettingsService
+from app.services.cloud_agent.thumbnail_prompt.settings import (
+    ThumbnailPromptSettingsService,
+)
 from app.services.cloud_agent.video_library import (
     CloudVideoLibraryService,
     VideoLibraryNotFoundError,
@@ -138,8 +145,11 @@ _THUMBNAIL_PROMPT_HTTP_STATUS = {
     "PROVIDER_AUTHENTICATION_FAILED": 401,
     "PROVIDER_TIMEOUT": 504,
     "PROVIDER_REQUEST_FAILED": 502,
+    "THUMBNAIL_PROMPT_RESPONSE_INVALID": 502,
 }
 _THUMBNAIL_PROMPT_PUBLIC_MESSAGES = {
+    "PROVIDER_UNSUPPORTED": "thumbnail prompt default provider is invalid; update settings",
+    "PROVIDER_BASE_URL_INVALID": "thumbnail prompt provider base URL is invalid; update settings",
     "PROVIDER_API_KEY_MISSING": "thumbnail prompt provider API key is not configured",
     "PROVIDER_AUTHENTICATION_FAILED": "thumbnail prompt provider authentication failed",
     "PROVIDER_TIMEOUT": "thumbnail prompt provider timed out",
@@ -201,9 +211,7 @@ def get_cloud_video_library_service(
     store: CloudJobStore = Depends(get_cloud_job_store),
     storage: CloudJobStorage = Depends(get_cloud_job_storage),
 ) -> CloudVideoLibraryService:
-    return CloudVideoLibraryService(
-        store=store, storage=storage
-    )
+    return CloudVideoLibraryService(store=store, storage=storage)
 
 
 def get_cloud_agent_sessions() -> SessionManager:
@@ -327,9 +335,7 @@ def _safe_accounting(value) -> dict:
     safe_usage = {
         str(key): number
         for key, number in dict(usage).items()
-        if isinstance(number, int | float)
-        and math.isfinite(number)
-        and number >= 0
+        if isinstance(number, int | float) and math.isfinite(number) and number >= 0
     }
     cost = getattr(value, "cost", None)
     if not isinstance(cost, int | float) or not math.isfinite(cost) or cost < 0:
@@ -446,7 +452,9 @@ async def _parse_research_api_key_request(request: Request) -> str:
     try:
         raw_body = await request.body()
     except Exception as exc:
-        raise ResearchError("RESEARCH_RESPONSE_INVALID", "request body unavailable") from exc
+        raise ResearchError(
+            "RESEARCH_RESPONSE_INVALID", "request body unavailable"
+        ) from exc
 
     if not raw_body:
         parsed = {}
@@ -454,7 +462,9 @@ async def _parse_research_api_key_request(request: Request) -> str:
         try:
             parsed = json.loads(raw_body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ResearchError("RESEARCH_RESPONSE_INVALID", "invalid api key payload") from exc
+            raise ResearchError(
+                "RESEARCH_RESPONSE_INVALID", "invalid api key payload"
+            ) from exc
     return _parse_research_api_key(parsed)
 
 
@@ -657,7 +667,9 @@ def create_cloud_agent_draft_voice(
     try:
         artifact = voices.prepare(body)
     except DraftVoiceError as exc:
-        raise HttpException(task_id="cloud-agent-draft-voice", status_code=422, message=str(exc)) from exc
+        raise HttpException(
+            task_id="cloud-agent-draft-voice", status_code=422, message=str(exc)
+        ) from exc
     return utils.get_response(200, artifact.model_dump(mode="json"))
 
 
@@ -671,7 +683,9 @@ def get_cloud_agent_draft_voice_audio(
     try:
         path = voices.get(fingerprint)
     except DraftVoiceError as exc:
-        raise HttpException(task_id="cloud-agent-draft-voice", status_code=404, message=str(exc)) from exc
+        raise HttpException(
+            task_id="cloud-agent-draft-voice", status_code=404, message=str(exc)
+        ) from exc
     return FileResponse(path=str(path), media_type="audio/mpeg", filename="voice.mp3")
 
 
@@ -870,7 +884,9 @@ def create_cloud_agent_job(
         try:
             voices.get(prepared_voice)
         except DraftVoiceError as exc:
-            raise HttpException(task_id="cloud-agent-job", status_code=422, message=str(exc)) from exc
+            raise HttpException(
+                task_id="cloud-agent-job", status_code=422, message=str(exc)
+            ) from exc
     if research_draft_id:
         try:
             research_store = research_store_factory()
@@ -892,7 +908,11 @@ def create_cloud_agent_job(
                 error_code="PREPARED_VOICE_UNAVAILABLE",
                 error_message="prepared narration could not be materialized",
             )
-            raise HttpException(task_id=job.id, status_code=422, message="prepared narration could not be materialized") from exc
+            raise HttpException(
+                task_id=job.id,
+                status_code=422,
+                message="prepared narration could not be materialized",
+            ) from exc
     if research_draft_id:
         try:
             if research_store is None:
@@ -1162,7 +1182,10 @@ def check_cloud_agent_sessions(
     del request
     return utils.get_response(
         200,
-        {service: result.model_dump(mode="json") for service, result in sessions.check_all().items()},
+        {
+            service: result.model_dump(mode="json")
+            for service, result in sessions.check_all().items()
+        },
     )
 
 
@@ -1206,15 +1229,21 @@ def repair_canva_session(
 def open_cloud_agent_browser(service: str, request: Request):
     del request
     if service not in {"google_flow", "canva"}:
-        raise HttpException(task_id="", status_code=400, message="unsupported cloud agent service")
-    return utils.get_response(200, {"url": config.app["cloud_agent_remote_browser_url"]})
+        raise HttpException(
+            task_id="", status_code=400, message="unsupported cloud agent service"
+        )
+    return utils.get_response(
+        200, {"url": config.app["cloud_agent_remote_browser_url"]}
+    )
 
 
 def _session_data(sessions: SessionManager, service: str) -> dict:
     try:
         result = sessions.providers[service].check_session()
     except KeyError as exc:
-        raise HttpException(task_id="", status_code=400, message="unsupported cloud agent service") from exc
+        raise HttpException(
+            task_id="", status_code=400, message="unsupported cloud agent service"
+        ) from exc
     return result.model_dump(mode="json")
 
 
@@ -1224,4 +1253,6 @@ def _repair_session_data(sessions: SessionManager, service: str) -> dict:
     except HumanRequiredError as exc:
         return {"service": service, "status": "HUMAN_REQUIRED", "message": str(exc)}
     except ValueError as exc:
-        raise HttpException(task_id="", status_code=400, message="unsupported cloud agent service") from exc
+        raise HttpException(
+            task_id="", status_code=400, message="unsupported cloud agent service"
+        ) from exc

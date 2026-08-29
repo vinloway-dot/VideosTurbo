@@ -18,15 +18,19 @@ class ThumbnailPromptSettingsPayload(BaseModel):
     default_provider: Literal["aihubmix", "openrouter"]
     aihubmix_model: str = Field(max_length=256)
     aihubmix_custom_model_id: str = Field(default="", max_length=256)
+    aihubmix_base_url: str = Field(max_length=2048)
     openrouter_model: str = Field(max_length=256)
     openrouter_custom_model_id: str = Field(default="", max_length=256)
+    openrouter_base_url: str = Field(max_length=2048)
 
     @field_validator(
         "master_prompt",
         "aihubmix_model",
         "aihubmix_custom_model_id",
+        "aihubmix_base_url",
         "openrouter_model",
         "openrouter_custom_model_id",
+        "openrouter_base_url",
         mode="before",
     )
     @classmethod
@@ -41,5 +45,7 @@ class ThumbnailPromptSettings(BaseModel):
     default_provider: Literal["aihubmix", "openrouter"]
     aihubmix_model: str
     aihubmix_custom_model_id: str = Field(default="", max_length=256)
+    aihubmix_base_url: str = Field(max_length=2048)
     openrouter_model: str
     openrouter_custom_model_id: str = Field(default="", max_length=256)
+    openrouter_base_url: str = Field(max_length=2048)

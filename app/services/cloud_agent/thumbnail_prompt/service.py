@@ -10,14 +10,19 @@ from openai import OpenAI
 
 from app.services.cloud_agent.storage import CloudJobStorage
 from app.services.cloud_agent.thumbnail_prompt.errors import ThumbnailPromptError
-from app.services.cloud_agent.thumbnail_prompt.settings import ThumbnailPromptSettingsService
+from app.services.cloud_agent.thumbnail_prompt.settings import (
+    ThumbnailPromptSettingsService,
+)
 
 
 _DISALLOWED_OUTPUT_MARKER = re.compile(
-    r"(?im)^\s*(?:#{1,6}\s+\S|(?:option|alternative|choice)\b"
+    r"(?im)^\s*(?:#{1,6}\s+\S|[-+*]\s+\S|`{3}|~{3}|"
+    r"(?:-{3,}|\*{3,}|_{3,})\s*$|(?:option|alternative|choice)\b"
     r"(?:\s*(?:\d+|[a-z]))?\s*[:.)-]|(?:prompt|response|result)\s*:|"
     r"(?:[a-z]|\d+)[.)]\s+\S)"
 )
+_DISALLOWED_INLINE_MARKDOWN = re.compile(r"(?:\*\*|__)")
+PROVIDER_TIMEOUT_SECONDS = 45
 
 
 def _instruction(master_prompt: str, thumbnail_master_prompt: str) -> str:
@@ -52,12 +57,14 @@ class ThumbnailPromptService:
         try:
             video_master_prompt = self._storage.read_master_prompt(job_id)
         except ValueError as exc:
-            raise ThumbnailPromptError("JOB_MASTER_PROMPT_UNAVAILABLE", str(exc)) from exc
+            raise ThumbnailPromptError(
+                "JOB_MASTER_PROMPT_UNAVAILABLE", str(exc)
+            ) from exc
 
         provider_id = self._settings.get_configured_provider_id()
         api_key = self._settings.get_api_key_for_generation(provider_id)
         model_id = self._settings.resolve_model(provider_id)
-        provider = self._settings.get_provider(provider_id)
+        base_url = self._settings.get_base_url_for_generation(provider_id)
         thumbnail_master_prompt = str(
             self._settings.get_settings().master_prompt or ""
         ).strip()
@@ -72,7 +79,10 @@ class ThumbnailPromptService:
         try:
             if client is None:
                 client = self._client_factory(
-                    api_key=api_key.get_secret_value(), base_url=provider.base_url
+                    api_key=api_key.get_secret_value(),
+                    base_url=base_url,
+                    timeout=PROVIDER_TIMEOUT_SECONDS,
+                    max_retries=0,
                 )
             response = client.chat.completions.create(
                 model=model_id,
@@ -110,7 +120,11 @@ class ThumbnailPromptService:
         if not isinstance(content, str):
             raise cls._invalid_response()
         normalized = content.strip()
-        if not normalized or _DISALLOWED_OUTPUT_MARKER.search(normalized):
+        if (
+            not normalized
+            or _DISALLOWED_OUTPUT_MARKER.search(normalized)
+            or _DISALLOWED_INLINE_MARKDOWN.search(normalized)
+        ):
             raise cls._invalid_response()
         return normalized
 

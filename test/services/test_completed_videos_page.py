@@ -21,14 +21,34 @@ def test_prompt_action_requests_one_prompt_and_keeps_video_card_unchanged(monkey
         "POST",
         "videos/job-1/thumbnail-prompt",
     )
+    assert api.call_args.kwargs == {"timeout": 60}
 
 
 def test_prompt_action_error_is_scoped_to_its_job():
-    state = {"thumbnail_prompt_error_by_job": {}}
+    state = {
+        "thumbnail_prompt_error_by_job": {},
+        "thumbnail_prompt_result_by_job": {"job-1": "stale prompt"},
+    }
 
     completed_videos.store_thumbnail_prompt_error(state, "job-1", "provider timeout")
 
     assert state["thumbnail_prompt_error_by_job"] == {"job-1": "provider timeout"}
+    assert "job-1" not in state["thumbnail_prompt_result_by_job"]
+
+
+def test_retry_transition_is_observable_and_clears_stale_card_state():
+    state = {
+        "thumbnail_prompt_result_by_job": {"job-1": "stale prompt"},
+        "thumbnail_prompt_error_by_job": {"job-1": "old failure"},
+        "thumbnail_prompt_busy_by_job": {},
+    }
+
+    queued = completed_videos.queue_thumbnail_prompt(state, "job-1")
+
+    assert queued is True
+    assert state["thumbnail_prompt_busy_by_job"] == {"job-1": True}
+    assert "job-1" not in state["thumbnail_prompt_result_by_job"]
+    assert "job-1" not in state["thumbnail_prompt_error_by_job"]
 
 
 def test_completed_videos_page_uses_shared_navigation_and_session_state(monkeypatch):
@@ -50,8 +70,12 @@ def test_completed_videos_page_uses_shared_navigation_and_session_state(monkeypa
             calls.append(("caption", label))
 
     fake = Streamlit()
-    monkeypatch.setattr(cloud_agent_ui, "apply_cloud_agent_theme", lambda: calls.append(("theme",)))
-    monkeypatch.setattr(cloud_agent_ui, "render_sidebar", lambda: calls.append(("sidebar",)))
+    monkeypatch.setattr(
+        cloud_agent_ui, "apply_cloud_agent_theme", lambda: calls.append(("theme",))
+    )
+    monkeypatch.setattr(
+        cloud_agent_ui, "render_sidebar", lambda: calls.append(("sidebar",))
+    )
     monkeypatch.setattr(
         completed_videos,
         "render_video_library",

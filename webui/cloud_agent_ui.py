@@ -103,9 +103,7 @@ def render_video_library(
         if show_heading:
             st.html('<h2 class="vt-video-library__title">วีดีโอที่สร้าง</h2>')
         if not view.items:
-            st.html(
-                '<p class="vt-video-library__empty">ยังไม่มีวิดีโอที่สร้างเสร็จ</p>'
-            )
+            st.html('<p class="vt-video-library__empty">ยังไม่มีวิดีโอที่สร้างเสร็จ</p>')
         else:
             with st.container(key="cloud_agent_video_library_grid"):
                 cards = view.items[:10]
@@ -130,24 +128,39 @@ def render_video_library(
                                     f"{escape(card.completed_at)}</p>"
                                 )
                                 prompt = thumbnail_prompt_results.get(card.job_id)
+                                delete_requested = False
                                 if on_thumbnail_prompt is not None:
-                                    if st.button(
-                                        "Prompt หน้าปก",
-                                        key=f"thumbnail_prompt_{card.job_id}",
+                                    prompt_action, delete_action = st.columns(2)
+                                    with prompt_action:
+                                        if st.button(
+                                            "Prompt หน้าปก",
+                                            key=f"thumbnail_prompt_{card.job_id}",
+                                            type="secondary",
+                                            disabled=card.job_id
+                                            in thumbnail_prompt_busy_ids,
+                                        ):
+                                            on_thumbnail_prompt(card.job_id)
+                                            prompt = None
+                                    with delete_action:
+                                        delete_requested = st.button(
+                                            "ลบ",
+                                            key=f"cloud_agent_delete_{card.job_id}",
+                                            type="secondary",
+                                            disabled=False,
+                                        )
+                                else:
+                                    delete_requested = st.button(
+                                        "ลบ",
+                                        key=f"cloud_agent_delete_{card.job_id}",
                                         type="secondary",
-                                        disabled=card.job_id in thumbnail_prompt_busy_ids,
-                                    ):
-                                        prompt = on_thumbnail_prompt(card.job_id)
+                                        disabled=False,
+                                    )
+                                if card.job_id in thumbnail_prompt_busy_ids:
+                                    st.caption("กำลังสร้าง Prompt หน้าปก…")
                                 if prompt:
                                     st.code(prompt, language=None)
                                 if error := thumbnail_prompt_errors.get(card.job_id):
                                     st.error(error)
-                                delete_requested = st.button(
-                                    "ลบ",
-                                    key=f"cloud_agent_delete_{card.job_id}",
-                                    type="secondary",
-                                    disabled=False,
-                                )
                                 is_pending = pending_delete_id == card.job_id
                                 if delete_requested:
                                     on_delete_request(card.job_id)
@@ -173,11 +186,14 @@ def render_video_library(
         if view.total_pages > 1:
             with st.container(key="cloud_agent_video_library_pagination"):
                 for page in range(1, view.total_pages + 1):
-                    if st.button(
-                        str(page),
-                        key=f"cloud_agent_video_page_{page}",
-                        disabled=page == view.page,
-                    ) and on_page is not None:
+                    if (
+                        st.button(
+                            str(page),
+                            key=f"cloud_agent_video_page_{page}",
+                            disabled=page == view.page,
+                        )
+                        and on_page is not None
+                    ):
                         on_page(page)
 
 
@@ -289,15 +305,17 @@ def render_sidebar() -> None:
         st.html(
             '<div class="vt-nav-disabled" aria-disabled="true">'
             '<span class="vt-nav-icon" aria-hidden="true">▦</span> Projects'
-            '</div>'
+            "</div>"
             '<div class="vt-system-status">'
             '<span aria-hidden="true"></span> All systems operational'
-            '</div>'
+            "</div>"
         )
 
 
 def render_page_header(*, saved: bool) -> None:
-    saved_indicator = '<div class="vt-saved"><span>✓</span> Saved</div>' if saved else ""
+    saved_indicator = (
+        '<div class="vt-saved"><span>✓</span> Saved</div>' if saved else ""
+    )
     st.html(
         '<div class="vt-header-meta">'
         '<div class="vt-breadcrumb">Workspace&nbsp;&nbsp;/&nbsp;&nbsp;Cloud Agent</div>'
@@ -331,7 +349,7 @@ def render_workflow_rail(active_step: int) -> None:
             f'class="vt-workflow__item vt-workflow__item--{state}" '
             f'aria-label="{escape(label)}: {state_label}"{current}>'
             f'<span class="vt-workflow__number" aria-hidden="true">{index}</span>'
-            f'<strong>{escape(label)}</strong>'
+            f"<strong>{escape(label)}</strong>"
             f'<span class="vt-workflow__state">{state_label}</span></div>'
         )
     workflow_label = (
@@ -341,7 +359,7 @@ def render_workflow_rail(active_step: int) -> None:
     )
     st.html(
         f'<div class="vt-workflow" role="list" aria-label="{workflow_label}">'
-        f'{"".join(items)}</div>'
+        f"{''.join(items)}</div>"
     )
 
 
@@ -375,18 +393,29 @@ def build_production_progress(job: dict | None) -> ProductionProgressView:
     percent = max(0, min(100, percent))
 
     if not str(snapshot.get("id") or "").strip():
-        return ProductionProgressView(0, "not_started", "ยังไม่เริ่ม", "สร้างสคริปต์แล้วเริ่มการผลิต")
+        return ProductionProgressView(
+            0, "not_started", "ยังไม่เริ่ม", "สร้างสคริปต์แล้วเริ่มการผลิต"
+        )
     if status == "QUEUED":
-        return ProductionProgressView(0, "queued", "รอคิว", "รอ Worker รับงานเพื่อเริ่มการผลิต")
+        return ProductionProgressView(
+            0, "queued", "รอคิว", "รอ Worker รับงานเพื่อเริ่มการผลิต"
+        )
     if status == "PAUSED":
         return ProductionProgressView(percent, "paused", "หยุดชั่วคราว", "งานถูกหยุดชั่วคราว")
     if status == "HUMAN_REQUIRED":
-        return ProductionProgressView(percent, "attention", "ต้องดำเนินการ", "งานต้องการการตรวจสอบก่อนทำต่อ")
+        return ProductionProgressView(
+            percent, "attention", "ต้องดำเนินการ", "งานต้องการการตรวจสอบก่อนทำต่อ"
+        )
     if status == "FAILED":
-        return ProductionProgressView(percent, "error", "เกิดข้อผิดพลาด", "งานหยุดเนื่องจากข้อผิดพลาด")
+        return ProductionProgressView(
+            percent, "error", "เกิดข้อผิดพลาด", "งานหยุดเนื่องจากข้อผิดพลาด"
+        )
     if status == "CANCELLED":
         return ProductionProgressView(percent, "cancelled", "ยกเลิกแล้ว", "งานนี้ถูกยกเลิก")
-    if status == "COMPLETED" or str(snapshot.get("checkpoint") or "").upper() == "COMPLETED":
+    if (
+        status == "COMPLETED"
+        or str(snapshot.get("checkpoint") or "").upper() == "COMPLETED"
+    ):
         return ProductionProgressView(100, "complete", "เสร็จสมบูรณ์", "วิดีโอพร้อมใช้งาน")
     return ProductionProgressView(
         percent,
@@ -429,10 +458,14 @@ def build_production_stages(
     if status == "FAILED":
         current = str(snapshot.get("current_step") or "")
         active = (
-            "canva" if "canva" in current
-            else "flow" if "flow" in current
-            else "voice" if "tts" in current or "voice" in current
-            else "export" if "export" in current or "validat" in current
+            "canva"
+            if "canva" in current
+            else "flow"
+            if "flow" in current
+            else "voice"
+            if "tts" in current or "voice" in current
+            else "export"
+            if "export" in current or "validat" in current
             else active
         )
     return tuple(
@@ -440,9 +473,12 @@ def build_production_stages(
             key=key,
             label=_PRODUCTION_STAGE_LABELS[key],
             state=(
-                "complete" if complete[key]
-                else "error" if key == active and status == "FAILED"
-                else "active" if key == active
+                "complete"
+                if complete[key]
+                else "error"
+                if key == active and status == "FAILED"
+                else "active"
+                if key == active
                 else "pending"
             ),
         )
@@ -480,15 +516,15 @@ def render_production_status(stages: tuple[StageView, ...], job: dict | None) ->
     st.html(
         '<section class="vt-production-status" aria-label="Production status">'
         '<div class="vt-production-status__header"><strong>Production status</strong>'
-        f'<span>Job {job_id} · {status}</span></div>'
+        f"<span>Job {job_id} · {status}</span></div>"
         f'<div class="vt-production-status__progress vt-production-status__progress--{progress.state}">'
         '<div class="vt-production-status__progress-header">'
         f'<span class="vt-production-status__progress-label">{progress_label}</span>'
-        f'<strong>{progress.percent}%</strong></div>'
+        f"<strong>{progress.percent}%</strong></div>"
         f'<div class="vt-production-status__progress-track" role="progressbar" '
         f'aria-valuemin="0" aria-valuemax="100" aria-valuenow="{progress.percent}" '
         f'aria-valuetext="{progress_aria}">'
         f'<span style="width: {progress.percent}%"></span></div>'
-        f'<p>{progress_detail}</p></div>'
+        f"<p>{progress_detail}</p></div>"
         f'<ol class="vt-production-status__stages">{"".join(items)}</ol></section>'
     )

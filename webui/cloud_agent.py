@@ -85,7 +85,9 @@ def _tts_settings_payload(*, settings, secret_fields, clear_secret_fields):
     }
 
 
-def _verify_tts_settings_save(*, settings, secret_fields, clear_secret_fields, metadata):
+def _verify_tts_settings_save(
+    *, settings, secret_fields, clear_secret_fields, metadata
+):
     """Confirm safe, observable settings after the server has saved them."""
     fields = {field["name"]: field for field in metadata.get("settings", [])}
     verified = []
@@ -166,8 +168,10 @@ def _thumbnail_prompt_default_settings():
         "default_provider": "aihubmix",
         "aihubmix_model": "gpt-5.6-sol",
         "aihubmix_custom_model_id": "",
+        "aihubmix_base_url": "https://aihubmix.com/v1",
         "openrouter_model": "openai/gpt-5.6-sol",
         "openrouter_custom_model_id": "",
+        "openrouter_base_url": "https://openrouter.ai/api/v1",
     }
 
 
@@ -183,8 +187,7 @@ def _thumbnail_prompt_settings_payload(ui_state):
     return {
         "master_prompt": str(ui_state.get("thumbnail_prompt_master_prompt", "") or ""),
         "default_provider": str(
-            ui_state.get("thumbnail_prompt_default_provider", "aihubmix")
-            or "aihubmix"
+            ui_state.get("thumbnail_prompt_default_provider", "aihubmix") or "aihubmix"
         ),
         "aihubmix_model": str(
             ui_state.get("thumbnail_prompt_aihubmix_model", "gpt-5.6-sol")
@@ -193,14 +196,25 @@ def _thumbnail_prompt_settings_payload(ui_state):
         "aihubmix_custom_model_id": str(
             ui_state.get("thumbnail_prompt_aihubmix_custom_model_id", "") or ""
         ),
-        "openrouter_model": str(
+        "aihubmix_base_url": str(
             ui_state.get(
-                "thumbnail_prompt_openrouter_model", "openai/gpt-5.6-sol"
+                "thumbnail_prompt_aihubmix_base_url", "https://aihubmix.com/v1"
             )
+            or ""
+        ),
+        "openrouter_model": str(
+            ui_state.get("thumbnail_prompt_openrouter_model", "openai/gpt-5.6-sol")
             or "openai/gpt-5.6-sol"
         ),
         "openrouter_custom_model_id": str(
             ui_state.get("thumbnail_prompt_openrouter_custom_model_id", "") or ""
+        ),
+        "openrouter_base_url": str(
+            ui_state.get(
+                "thumbnail_prompt_openrouter_base_url",
+                "https://openrouter.ai/api/v1",
+            )
+            or ""
         ),
     }
 
@@ -248,7 +262,10 @@ def _submit_thumbnail_prompt_api_key(provider, *, remove):
 def _save_and_verify_research_settings(payload):
     saved = _api("PUT", "research/settings", json=payload)
     readback = _load_research_settings()
-    if all(saved.get(name) == value and readback.get(name) == value for name, value in payload.items()):
+    if all(
+        saved.get(name) == value and readback.get(name) == value
+        for name, value in payload.items()
+    ):
         return True, "Saved and verified."
     return (
         False,
@@ -410,7 +427,9 @@ def _store_research_result(draft):
 
 
 def _store_refreshed_draft(draft):
-    prior_script = str(st.session_state.get("cloud_agent_draft_script", "") or "").strip()
+    prior_script = str(
+        st.session_state.get("cloud_agent_draft_script", "") or ""
+    ).strip()
     retained = {
         key: st.session_state[key]
         for key in (
@@ -437,9 +456,7 @@ def _render_research_accounting(accounting):
     st.caption(
         f"Research tool calls: {tool_calls if tool_calls not in (None, '') else 'unavailable'}"
     )
-    st.caption(
-        f"Research usage: {usage if usage else 'unavailable'}"
-    )
+    st.caption(f"Research usage: {usage if usage else 'unavailable'}")
     st.caption(
         f"Research cost (USD): {cost if cost not in (None, '') else 'unavailable'}"
     )
@@ -580,9 +597,7 @@ def _store_job_snapshot(job, *, sync_lookup=False):
     st.session_state["cloud_agent_job_id"] = str(snapshot.get("id") or "")
     st.session_state["cloud_agent_job_snapshot"] = snapshot
     if sync_lookup:
-        st.session_state["cloud_agent_job_lookup_id"] = str(
-            snapshot.get("id") or ""
-        )
+        st.session_state["cloud_agent_job_lookup_id"] = str(snapshot.get("id") or "")
 
 
 def _start_and_store_job(inputs):
@@ -603,12 +618,12 @@ def _restore_latest_job_if_needed(ui_state):
 
 
 def _selected_job_id(ui_state, entered_job_id):
-    return str(
-        entered_job_id or ui_state.get("cloud_agent_job_id") or ""
-    ).strip()
+    return str(entered_job_id or ui_state.get("cloud_agent_job_id") or "").strip()
 
 
-def _render_event_driven_production_status(*, script_ready, prepared_voice_ready, ui_state):
+def _render_event_driven_production_status(
+    *, script_ready, prepared_voice_ready, ui_state
+):
     def render(snapshot):
         cloud_agent_ui.render_production_status(
             cloud_agent_ui.build_production_stages(
@@ -773,44 +788,93 @@ def _render_video_brief(
                     st.error("Video Subject is required.")
                 else:
                     try:
-                        _store_draft(_prepare_draft(
-                            subject=subject, language=language, target_words=words,
-                            script="", custom_system_prompt=custom_system_prompt,
-                        ))
+                        _store_draft(
+                            _prepare_draft(
+                                subject=subject,
+                                language=language,
+                                target_words=words,
+                                script="",
+                                custom_system_prompt=custom_system_prompt,
+                            )
+                        )
                         st.rerun()
                     except requests.RequestException as exc:
                         st.error(_api_error_message(exc))
         else:
             if not research_enabled:
-                st.caption("Research is disabled. Open Advanced settings and save Research Settings to enable it.")
+                st.caption(
+                    "Research is disabled. Open Advanced settings and save Research Settings to enable it."
+                )
             for key, value in (
                 ("cloud_agent_research_provider", research_settings["provider"]),
-                ("cloud_agent_research_openrouter_model", research_settings["openrouter_model"]),
-                ("cloud_agent_research_openrouter_custom_model_id", research_settings["openrouter_custom_model_id"]),
-                ("cloud_agent_research_aihubmix_model", research_settings["aihubmix_model"]),
-                ("cloud_agent_research_aihubmix_custom_model_id", research_settings["aihubmix_custom_model_id"]),
-                ("cloud_agent_research_custom_system_prompt", research_settings["custom_system_prompt"]),
+                (
+                    "cloud_agent_research_openrouter_model",
+                    research_settings["openrouter_model"],
+                ),
+                (
+                    "cloud_agent_research_openrouter_custom_model_id",
+                    research_settings["openrouter_custom_model_id"],
+                ),
+                (
+                    "cloud_agent_research_aihubmix_model",
+                    research_settings["aihubmix_model"],
+                ),
+                (
+                    "cloud_agent_research_aihubmix_custom_model_id",
+                    research_settings["aihubmix_custom_model_id"],
+                ),
+                (
+                    "cloud_agent_research_custom_system_prompt",
+                    research_settings["custom_system_prompt"],
+                ),
             ):
                 ui_state.setdefault(key, value)
             research_provider_labels = {
                 item["id"]: item["label"] for item in research_provider_catalog
             }
-            if ui_state.get("cloud_agent_research_provider") not in research_provider_labels:
+            if (
+                ui_state.get("cloud_agent_research_provider")
+                not in research_provider_labels
+            ):
                 ui_state["cloud_agent_research_provider"] = next(
                     iter(research_provider_labels), "openrouter"
                 )
             research_provider = st.selectbox(
-                "Research Provider", list(research_provider_labels),
+                "Research Provider",
+                list(research_provider_labels),
                 format_func=lambda value: research_provider_labels[value],
                 key="cloud_agent_research_provider",
             )
             with st.container(key="cloud_agent_research_source_area"):
                 st.caption("Up to 3 sources · Direct webpages and PDFs")
-                research_allow_citations = bool(st.checkbox("อนุญาตให้ใส่อ้างอิงในสคริปต์", value=False, key="cloud_agent_research_allow_citations"))
-                source_url_count = _research_url_row_count(st.number_input("Number of Source URLs", min_value=1, max_value=3, value=1, step=1, key="cloud_agent_research_source_url_count"))
-                source_url_values = [st.text_input(f"Source URL {index}", key=f"cloud_agent_research_source_url_{index}") for index in range(1, source_url_count + 1)]
+                research_allow_citations = bool(
+                    st.checkbox(
+                        "อนุญาตให้ใส่อ้างอิงในสคริปต์",
+                        value=False,
+                        key="cloud_agent_research_allow_citations",
+                    )
+                )
+                source_url_count = _research_url_row_count(
+                    st.number_input(
+                        "Number of Source URLs",
+                        min_value=1,
+                        max_value=3,
+                        value=1,
+                        step=1,
+                        key="cloud_agent_research_source_url_count",
+                    )
+                )
+                source_url_values = [
+                    st.text_input(
+                        f"Source URL {index}",
+                        key=f"cloud_agent_research_source_url_{index}",
+                    )
+                    for index in range(1, source_url_count + 1)
+                ]
             research_generation_status = st.empty()
-            st.caption("Research generation may call the selected provider up to 3 rounds.")
+            st.caption(
+                "Research generation may call the selected provider up to 3 rounds."
+            )
             if st.button(
                 "Generate research script",
                 key="cloud_agent_generate_research_script",
@@ -825,15 +889,31 @@ def _render_video_brief(
                     try:
                         with research_generation_status.container():
                             with st.spinner("Generating research-backed script..."):
-                                _store_research_result(_prepare_research_draft(
-                                    subject=subject, language=language, target_words=words,
-                                    provider=research_provider,
-                                    model_choice=_research_model_choice(research_provider, ui_state),
-                                    custom_model_id=_research_custom_model_id(research_provider, ui_state),
-                                    source_urls=_research_source_urls(source_url_values),
-                                    custom_system_prompt=str(ui_state.get("cloud_agent_research_custom_system_prompt", "") or ""),
-                                    allow_citations=research_allow_citations,
-                                ))
+                                _store_research_result(
+                                    _prepare_research_draft(
+                                        subject=subject,
+                                        language=language,
+                                        target_words=words,
+                                        provider=research_provider,
+                                        model_choice=_research_model_choice(
+                                            research_provider, ui_state
+                                        ),
+                                        custom_model_id=_research_custom_model_id(
+                                            research_provider, ui_state
+                                        ),
+                                        source_urls=_research_source_urls(
+                                            source_url_values
+                                        ),
+                                        custom_system_prompt=str(
+                                            ui_state.get(
+                                                "cloud_agent_research_custom_system_prompt",
+                                                "",
+                                            )
+                                            or ""
+                                        ),
+                                        allow_citations=research_allow_citations,
+                                    )
+                                )
                         st.rerun()
                     except requests.HTTPError as exc:
                         error = _research_error_data(exc.response)
@@ -841,12 +921,19 @@ def _render_video_brief(
                         _render_research_accounting(error.get("accounting", {}))
                     except requests.RequestException as exc:
                         st.error(_api_error_message(exc))
-        research_model = _research_model_choice(research_provider, ui_state) if research_provider else ""
+        research_model = (
+            _research_model_choice(research_provider, ui_state)
+            if research_provider
+            else ""
+        )
         return _BriefSelection(
-            subject=subject, words=words, language=language,
+            subject=subject,
+            words=words,
+            language=language,
             script_mode=str(script_mode or "Standard Script"),
             custom_system_prompt=custom_system_prompt,
-            research_provider=research_provider, research_model=research_model,
+            research_provider=research_provider,
+            research_model=research_model,
         )
 
 
@@ -920,9 +1007,7 @@ def _advanced_settings_container():
 def _render_settings_research_provider_selector(
     *, ui_state, research_settings, research_provider_catalog
 ):
-    provider_labels = {
-        item["id"]: item["label"] for item in research_provider_catalog
-    }
+    provider_labels = {item["id"]: item["label"] for item in research_provider_catalog}
     state_key = "cloud_agent_settings_research_provider"
     provider = str(ui_state.get(state_key) or research_settings["provider"])
     if provider not in provider_labels:
@@ -993,7 +1078,9 @@ def _render_thumbnail_prompt_settings(*, ui_state, settings, provider_catalog):
         selected_provider = st.selectbox(
             "Default Thumbnail Provider",
             options=provider_ids,
-            format_func=lambda provider: provider_by_id[provider].get("label", provider),
+            format_func=lambda provider: provider_by_id[provider].get(
+                "label", provider
+            ),
             key="thumbnail_prompt_default_provider",
         )
         selected_metadata = provider_by_id[selected_provider]
@@ -1009,6 +1096,10 @@ def _render_thumbnail_prompt_settings(*, ui_state, settings, provider_catalog):
                 f"{selected_metadata.get('label', selected_provider)} Custom Model ID",
                 key=custom_model_key,
             )
+        st.text_input(
+            f"{selected_metadata.get('label', selected_provider)} Base URL",
+            key=f"thumbnail_prompt_{selected_provider}_base_url",
+        )
         if st.button(
             "Save Thumbnail Prompt Settings",
             key="thumbnail_prompt_save_settings",
@@ -1019,7 +1110,9 @@ def _render_thumbnail_prompt_settings(*, ui_state, settings, provider_catalog):
                 )
                 for key, value in saved_settings.items():
                     ui_state[f"thumbnail_prompt_{key}"] = value
-                ui_state["thumbnail_prompt_settings_feedback"] = "Thumbnail settings saved."
+                ui_state["thumbnail_prompt_settings_feedback"] = (
+                    "Thumbnail settings saved."
+                )
                 st.rerun()
             except requests.RequestException as exc:
                 st.error(_api_error_message(exc))
@@ -1444,7 +1537,9 @@ def _render_generation_setup(
             voice=voice,
             speed=speed,
         ):
-            st.caption("Prepared narration is ready and will be reused when this job starts.")
+            st.caption(
+                "Prepared narration is ready and will be reused when this job starts."
+            )
             try:
                 st.markdown("**Audio preview**")
                 st.audio(
@@ -1533,8 +1628,7 @@ def _prepare_production_draft(*, brief, script, master_prompt, ui_state):
                 ),
                 source_urls=source_urls,
                 custom_system_prompt=str(
-                    ui_state.get("cloud_agent_research_custom_system_prompt", "")
-                    or ""
+                    ui_state.get("cloud_agent_research_custom_system_prompt", "") or ""
                 ),
                 allow_citations=bool(
                     ui_state.get("cloud_agent_research_allow_citations", False)
@@ -1557,14 +1651,12 @@ def _prepare_production_draft(*, brief, script, master_prompt, ui_state):
         research_sources = list(
             draft.get("sources")
             if "sources" in draft
-            else ui_state.get("cloud_agent_research_sources")
-            or []
+            else ui_state.get("cloud_agent_research_sources") or []
         )
         research_accounting = dict(
             draft.get("accounting")
             if "accounting" in draft
-            else ui_state.get("cloud_agent_research_accounting")
-            or {}
+            else ui_state.get("cloud_agent_research_accounting") or {}
         )
     pending_state = {
         "script": str(draft["script"]).strip(),
@@ -1710,7 +1802,10 @@ def render_cloud_agent_panel():
         speed=float(ui_state.get("cloud_agent_speed") or 1.0),
     )
     job_snapshot = dict(ui_state.get("cloud_agent_job_snapshot") or {})
-    if hasattr(st, "runtime") and not str(ui_state.get("cloud_agent_job_id") or "").strip():
+    if (
+        hasattr(st, "runtime")
+        and not str(ui_state.get("cloud_agent_job_id") or "").strip()
+    ):
         try:
             job_snapshot = _restore_latest_job_if_needed(ui_state)
         except requests.RequestException:
@@ -1783,11 +1878,14 @@ def render_cloud_agent_panel():
         for action, column in zip(
             ("Pause", "Resume", "Retry", "Cancel"), action_controls
         ):
-            if column.button(
-                action,
-                key=f"cloud_agent_{action.lower()}",
-                disabled=not bool(selected_job_id),
-            ) and selected_job_id:
+            if (
+                column.button(
+                    action,
+                    key=f"cloud_agent_{action.lower()}",
+                    disabled=not bool(selected_job_id),
+                )
+                and selected_job_id
+            ):
                 try:
                     job = _api("POST", f"jobs/{selected_job_id}/{action.lower()}")
                     _store_job_snapshot(job)
@@ -1800,11 +1898,14 @@ def render_cloud_agent_panel():
                         st.error(message)
                 except requests.RequestException as exc:
                     st.error(_api_error_message(exc))
-        if st.button(
-            "Load job",
-            key="cloud_agent_load_job",
-            disabled=not bool(selected_job_id),
-        ) and selected_job_id:
+        if (
+            st.button(
+                "Load job",
+                key="cloud_agent_load_job",
+                disabled=not bool(selected_job_id),
+            )
+            and selected_job_id
+        ):
             try:
                 job = _api("GET", f"jobs/{selected_job_id}")
                 _store_job_snapshot(job)

@@ -1,5 +1,7 @@
 """Configuration and credential ownership for Thumbnail Prompt."""
 
+from urllib.parse import urlsplit
+
 from pydantic import SecretStr
 
 from app.config import config
@@ -58,11 +60,16 @@ class ThumbnailPromptSettingsService:
 
     def get_settings(self) -> ThumbnailPromptSettings:
         return ThumbnailPromptSettings(
-            master_prompt=self._configured_text("cloud_agent_thumbnail_prompt_master_prompt"),
+            master_prompt=self._configured_text(
+                "cloud_agent_thumbnail_prompt_master_prompt"
+            ),
             default_provider=self.get_configured_provider_id(),
             aihubmix_model=self._configured_text(_PROVIDERS["aihubmix"]["model_name"]),
             aihubmix_custom_model_id=self._configured_text(
                 _PROVIDERS["aihubmix"]["custom_model_name"]
+            ),
+            aihubmix_base_url=self._configured_text(
+                _PROVIDERS["aihubmix"]["base_url_name"]
             ),
             openrouter_model=self._configured_text(
                 _PROVIDERS["openrouter"]["model_name"]
@@ -70,20 +77,33 @@ class ThumbnailPromptSettingsService:
             openrouter_custom_model_id=self._configured_text(
                 _PROVIDERS["openrouter"]["custom_model_name"]
             ),
+            openrouter_base_url=self._configured_text(
+                _PROVIDERS["openrouter"]["base_url_name"]
+            ),
         )
 
     def get_configured_provider_id(self) -> str:
-        configured = self._configured_text("cloud_agent_thumbnail_prompt_default_provider")
-        if configured in _PROVIDERS:
-            return configured
-        return self.DEFAULT_PROVIDER_ID
+        configured = self._configured_text(
+            "cloud_agent_thumbnail_prompt_default_provider"
+        )
+        return self._require_provider(configured)
 
     def update_settings(
         self, payload: ThumbnailPromptSettingsPayload
     ) -> ThumbnailPromptSettings:
         self._require_provider(payload.default_provider)
-        self._validate_model("aihubmix", payload.aihubmix_model, payload.aihubmix_custom_model_id)
-        self._validate_model("openrouter", payload.openrouter_model, payload.openrouter_custom_model_id)
+        self._validate_model(
+            "aihubmix", payload.aihubmix_model, payload.aihubmix_custom_model_id
+        )
+        self._validate_model(
+            "openrouter", payload.openrouter_model, payload.openrouter_custom_model_id
+        )
+        aihubmix_base_url = self._validate_base_url(
+            "aihubmix", payload.aihubmix_base_url
+        )
+        openrouter_base_url = self._validate_base_url(
+            "openrouter", payload.openrouter_base_url
+        )
 
         with config.runtime_config_lock():
             config.app.update(
@@ -91,9 +111,15 @@ class ThumbnailPromptSettingsService:
                     "cloud_agent_thumbnail_prompt_master_prompt": payload.master_prompt,
                     "cloud_agent_thumbnail_prompt_default_provider": payload.default_provider,
                     _PROVIDERS["aihubmix"]["model_name"]: payload.aihubmix_model,
-                    _PROVIDERS["aihubmix"]["custom_model_name"]: payload.aihubmix_custom_model_id,
+                    _PROVIDERS["aihubmix"][
+                        "custom_model_name"
+                    ]: payload.aihubmix_custom_model_id,
+                    _PROVIDERS["aihubmix"]["base_url_name"]: aihubmix_base_url,
                     _PROVIDERS["openrouter"]["model_name"]: payload.openrouter_model,
-                    _PROVIDERS["openrouter"]["custom_model_name"]: payload.openrouter_custom_model_id,
+                    _PROVIDERS["openrouter"][
+                        "custom_model_name"
+                    ]: payload.openrouter_custom_model_id,
+                    _PROVIDERS["openrouter"]["base_url_name"]: openrouter_base_url,
                 }
             )
             config.save_config()
@@ -143,6 +169,13 @@ class ThumbnailPromptSettingsService:
         self._validate_model(normalized, choice, custom_model)
         return custom_model if choice == "custom" else choice
 
+    def get_base_url_for_generation(self, provider_id: str) -> str:
+        normalized = self._require_provider(provider_id)
+        return self._validate_base_url(
+            normalized,
+            self._configured_text(_PROVIDERS[normalized]["base_url_name"]),
+        )
+
     def _validate_model(
         self, provider_id: str, model_choice: str, custom_model_id: str
     ) -> None:
@@ -167,6 +200,35 @@ class ThumbnailPromptSettingsService:
                 f"unsupported thumbnail prompt provider: {normalized or '<blank>'}",
             )
         return normalized
+
+    @staticmethod
+    def _validate_base_url(provider_id: str, value: str) -> str:
+        normalized = str(value or "").strip()
+        try:
+            parsed = urlsplit(normalized)
+            hostname = parsed.hostname
+            parsed.port
+        except ValueError as exc:
+            raise ThumbnailPromptError(
+                "PROVIDER_BASE_URL_INVALID",
+                f"invalid base URL for {provider_id}",
+            ) from exc
+        if (
+            not normalized
+            or any(character.isspace() for character in normalized)
+            or parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or not hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or bool(parsed.query)
+            or bool(parsed.fragment)
+        ):
+            raise ThumbnailPromptError(
+                "PROVIDER_BASE_URL_INVALID",
+                f"invalid base URL for {provider_id}",
+            )
+        return normalized.rstrip("/")
 
     @staticmethod
     def _configured_text(key: str) -> str:
