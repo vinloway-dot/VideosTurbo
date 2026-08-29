@@ -35,17 +35,33 @@ def test_asgi_import_survives_without_thumbnail_prompt_posix_capabilities():
         import builtins
         import json
         import os
+        import sys
 
-        import app.services.cloud_agent.browser_lock
+        cold_before_application_import = all(
+            module_name not in sys.modules
+            for module_name in (
+                "app.asgi",
+                "app.services.cloud_agent.browser_lock",
+                "app.services.cloud_agent.thumbnail_prompt.settings",
+                "app.services.cloud_agent.thumbnail_prompt._settings_posix",
+            )
+        )
 
         real_import = builtins.__import__
+        thumbnail_fcntl_import_attempts = []
 
-        def block_fcntl(name, *args, **kwargs):
-            if name == "fcntl":
+        def block_thumbnail_fcntl(
+            name, globals=None, locals=None, fromlist=(), level=0
+        ):
+            importer = str((globals or {}).get("__name__", ""))
+            if name == "fcntl" and importer.startswith(
+                "app.services.cloud_agent.thumbnail_prompt"
+            ):
+                thumbnail_fcntl_import_attempts.append(importer)
                 raise ImportError("fcntl is unavailable on this simulated platform")
-            return real_import(name, *args, **kwargs)
+            return real_import(name, globals, locals, fromlist, level)
 
-        builtins.__import__ = block_fcntl
+        builtins.__import__ = block_thumbnail_fcntl
         for capability in ("O_DIRECTORY", "O_NOFOLLOW"):
             delattr(os, capability)
 
@@ -76,6 +92,12 @@ def test_asgi_import_survives_without_thumbnail_prompt_posix_capabilities():
                 factory_errors.append(exc.code)
 
         print(json.dumps({
+            "cold_before_application_import": cold_before_application_import,
+            "posix_settings_backend_loaded": (
+                "app.services.cloud_agent.thumbnail_prompt._settings_posix"
+                in sys.modules
+            ),
+            "thumbnail_fcntl_import_attempts": thumbnail_fcntl_import_attempts,
             "other_status": other_route.status_code,
             "thumbnail_status": thumbnail_route.status_code,
             "thumbnail_code": thumbnail_route.json()["data"]["code"],
@@ -94,6 +116,9 @@ def test_asgi_import_survives_without_thumbnail_prompt_posix_capabilities():
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout.strip().splitlines()[-1])
     assert result == {
+        "cold_before_application_import": True,
+        "posix_settings_backend_loaded": False,
+        "thumbnail_fcntl_import_attempts": [],
         "other_status": 200,
         "thumbnail_status": 501,
         "thumbnail_code": "THUMBNAIL_PROMPT_PLATFORM_UNSUPPORTED",

@@ -243,6 +243,7 @@ def test_generate_rejects_non_plain_or_unlabelled_multiple_prompts(
     [
         "Solar flare over Earth; Alternative: eclipse over Earth",
         "1: solar flare over Earth; 2: eclipse over Earth",
+        "Solar flare over Earth; 2: eclipse over Earth",
     ],
 )
 def test_generate_rejects_inline_labelled_alternatives_after_separator(
@@ -254,6 +255,22 @@ def test_generate_rejects_inline_labelled_alternatives_after_separator(
         service.generate_for_job("job-1")
 
     assert error.value.code == "THUMBNAIL_PROMPT_RESPONSE_INVALID"
+
+
+@pytest.mark.parametrize(
+    "completion",
+    [
+        "Cinematic Earth from orbit; 16:9 aspect ratio, golden rim light",
+        "Cinematic diptych; 2:1 aspect ratio, no text",
+        "Vintage editorial portrait; 35-mm grain, 3-point lighting",
+    ],
+)
+def test_generate_accepts_numeric_ratios_and_hyphenated_descriptors(
+    tmp_path, completion
+):
+    service = service_with_completion(tmp_path, completion)
+
+    assert service.generate_for_job("job-1") == completion
 
 
 @pytest.mark.parametrize("control", ["\x00", "\t", "\x7f", "\u0085"])

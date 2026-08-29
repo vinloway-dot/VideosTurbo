@@ -41,10 +41,15 @@ _DISALLOWED_INLINE_MARKDOWN = re.compile(
     r"(?<![\w_])_[^_\r\n]+_(?!\w))",
     re.IGNORECASE,
 )
-_DISALLOWED_INLINE_ALTERNATIVE = re.compile(
+_DISALLOWED_INLINE_LABELLED_ALTERNATIVE = re.compile(
     r"(?:;|\||\s+[—–]\s+|\s+/\s+)\s*"
-    r"(?:(?:option|alternative|choice)(?:\s*(?:\d+|[a-z]))?|\d+)"
-    r"\s*[:.)-]\s*\S",
+    r"(?:option|alternative|choice)(?:\s*(?:\d+|[a-z]))?"
+    r"\s*[:.)-]\s+\S",
+    re.IGNORECASE,
+)
+_DISALLOWED_INLINE_NUMBERED_OPTION = re.compile(
+    r"(?:;|\||\s+[—–]\s+|\s+/\s+)\s*"
+    r"\d+\s*[:.)-]\s+\S",
     re.IGNORECASE,
 )
 _MAX_OUTPUT_CHARACTERS = 8000
@@ -146,7 +151,8 @@ class ThumbnailPromptService:
             or any(unicodedata.category(character) == "Cc" for character in content)
             or _DISALLOWED_OUTPUT_MARKER.search(normalized)
             or _DISALLOWED_INLINE_MARKDOWN.search(normalized)
-            or _DISALLOWED_INLINE_ALTERNATIVE.search(normalized)
+            or _DISALLOWED_INLINE_LABELLED_ALTERNATIVE.search(normalized)
+            or _DISALLOWED_INLINE_NUMBERED_OPTION.search(normalized)
         ):
             raise cls._invalid_response()
         return normalized
