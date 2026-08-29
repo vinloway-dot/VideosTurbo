@@ -84,8 +84,51 @@ def test_generate_rejects_empty_or_multichoice_provider_output(tmp_path):
         service.generate_for_job("job-1")
 
 
+@pytest.mark.parametrize(
+    "completion",
+    [
+        "Option 1: Solar flare over Earth",
+        "## Prompt\nSolar flare over Earth",
+        "Choice A: Solar flare over Earth",
+        "Solar flare over Earth\nAlternative: Eclipse over Earth",
+    ],
+)
+def test_generate_rejects_labelled_or_alternative_provider_output(tmp_path, completion):
+    service = service_with_completion(tmp_path, completion)
+
+    with pytest.raises(ThumbnailPromptError, match="ผลลัพธ์"):
+        service.generate_for_job("job-1")
+
+
+def test_generate_keeps_normal_image_prompt_prose(tmp_path):
+    prompt = "Cinematic solar flare above Earth with dramatic golden rim light, 16:9."
+    service = service_with_completion(tmp_path, prompt)
+
+    assert service.generate_for_job("job-1") == prompt
+
+
 def test_generate_rejects_an_empty_provider_response(tmp_path):
     service = service_with_completion(tmp_path, "  ")
 
     with pytest.raises(ThumbnailPromptError, match="ผลลัพธ์"):
         service.generate_for_job("job-1")
+
+
+def test_generate_sanitizes_client_factory_failures(tmp_path):
+    storage = CloudJobStorage(tmp_path / "jobs")
+    storage.write_inputs("job-1", script="script", master_prompt="FULL VIDEO MASTER PROMPT")
+
+    def broken_factory(**_kwargs):
+        raise ValueError("base URL includes private configuration")
+
+    service = ThumbnailPromptService(
+        storage=storage,
+        settings=ready_settings(),
+        client_factory=broken_factory,
+    )
+
+    with pytest.raises(ThumbnailPromptError, match="ผู้ให้บริการ") as error:
+        service.generate_for_job("job-1")
+
+    assert error.value.code == "PROVIDER_REQUEST_FAILED"
+    assert "private configuration" not in str(error.value)

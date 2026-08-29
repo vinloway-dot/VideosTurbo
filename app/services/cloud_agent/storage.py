@@ -167,8 +167,23 @@ class CloudJobStorage:
     def read_master_prompt(self, job_id: str) -> str:
         path = self._paths(job_id).master_prompt_file
         try:
-            value = path.read_text(encoding="utf-8").strip()
-        except FileNotFoundError as exc:
+            input_fd = os.open(path.parent, self._directory_open_flags())
+            try:
+                prompt_fd = os.open(
+                    path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=input_fd
+                )
+            finally:
+                os.close(input_fd)
+            try:
+                if not stat.S_ISREG(os.fstat(prompt_fd).st_mode):
+                    raise ValueError("job master prompt is unavailable")
+                with os.fdopen(prompt_fd, "r", encoding="utf-8") as prompt_file:
+                    prompt_fd = -1
+                    value = prompt_file.read().strip()
+            finally:
+                if prompt_fd >= 0:
+                    os.close(prompt_fd)
+        except OSError as exc:
             raise ValueError("job master prompt is unavailable") from exc
         if not value:
             raise ValueError("job master prompt is empty")

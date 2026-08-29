@@ -83,6 +83,22 @@ def test_read_master_prompt_rejects_unavailable_or_empty_job_prompt(
         storage.read_master_prompt("job-123")
 
 
+def test_read_master_prompt_rejects_symlink_outside_the_job(tmp_path):
+    storage = CloudJobStorage(tmp_path / "jobs")
+    paths = storage.prepare("job-123")
+    outside_prompt = tmp_path / "outside-master-prompt.txt"
+    outside_prompt.write_text("outside prompt", encoding="utf-8")
+    try:
+        paths.master_prompt_file.symlink_to(outside_prompt)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are unavailable in this environment")
+
+    with pytest.raises(ValueError, match="unavailable"):
+        storage.read_master_prompt("job-123")
+
+    assert outside_prompt.read_text(encoding="utf-8") == "outside prompt"
+
+
 def test_default_root_reuses_repository_storage_helper(monkeypatch, tmp_path):
     expected_root = tmp_path / "repo-storage" / "jobs"
     calls = []

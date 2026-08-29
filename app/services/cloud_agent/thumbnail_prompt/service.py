@@ -13,8 +13,9 @@ from app.services.cloud_agent.thumbnail_prompt.errors import ThumbnailPromptErro
 from app.services.cloud_agent.thumbnail_prompt.settings import ThumbnailPromptSettingsService
 
 
-_MULTI_OPTION_LABEL = re.compile(
-    r"(?im)^\s*(?:option|alternative|choice)\s*\d+\s*[:.)-]"
+_DISALLOWED_OUTPUT_MARKER = re.compile(
+    r"(?im)^\s*(?:#{1,6}\s+\S|(?:option|alternative|choice)\b"
+    r"(?:\s*(?:\d+|[a-z]))?\s*[:.)-]|(?:prompt|response|result)\s*:)"
 )
 
 
@@ -67,11 +68,11 @@ class ThumbnailPromptService:
 
         instruction = _instruction(video_master_prompt, thumbnail_master_prompt)
         client = self._clients.get(provider_id)
-        if client is None:
-            client = self._client_factory(
-                api_key=api_key.get_secret_value(), base_url=provider.base_url
-            )
         try:
+            if client is None:
+                client = self._client_factory(
+                    api_key=api_key.get_secret_value(), base_url=provider.base_url
+                )
             response = client.chat.completions.create(
                 model=model_id,
                 messages=[{"role": "user", "content": instruction}],
@@ -108,7 +109,7 @@ class ThumbnailPromptService:
         if not isinstance(content, str):
             raise cls._invalid_response()
         normalized = content.strip()
-        if not normalized or len(_MULTI_OPTION_LABEL.findall(normalized)) > 1:
+        if not normalized or _DISALLOWED_OUTPUT_MARKER.search(normalized):
             raise cls._invalid_response()
         return normalized
 
