@@ -155,8 +155,6 @@ def test_oversized_output_is_rejected_before_unicode_normalization(monkeypatch):
     )
 
     with pytest.raises(ThumbnailPromptError) as error:
-        ThumbnailPromptService._normalize_completion(
-            _provider_response("x" * 8001)
-        )
+        ThumbnailPromptService._normalize_completion(_provider_response("x" * 8001))
 
     assert error.value.code == "THUMBNAIL_PROMPT_RESPONSE_INVALID"

@@ -68,9 +68,7 @@ _INLINE_TEXT_LABEL_DELIMITERS = frozenset(
     {":", ")", "]", "}", "=", "|", "–", "—", "→", "⇒", "⟶", "⟹"}
 )
 _LETTER_LABEL_DELIMITERS = frozenset({":", ".", ")", "]", "}", "-", "–", "—"})
-_MARKER_PREFIX_WRAPPERS = frozenset(
-    {'"', "'", "“", "”", "‘", "’", "(", "[", "{"}
-)
+_MARKER_PREFIX_WRAPPERS = frozenset({'"', "'", "“", "”", "‘", "’", "(", "[", "{"})
 _ALLOWED_FORMAT_CONTROLS = frozenset({"\u200c", "\u200d"})
 _ROMAN_NUMERAL_SUFFIX = re.compile(r"[ivxlcdm]{1,8}\Z")
 _MAX_TEXT_MARKER_SPAN = 48
@@ -318,9 +316,7 @@ def _is_complete_ratio(text: str, rhs_start: int, lhs: int | None) -> bool:
 
 def _has_explicit_contrast_ratio_context(text: str, rhs_end: int) -> bool:
     cursor = rhs_end
-    while cursor < len(text) and (
-        text[cursor].isspace() or text[cursor] in {",", ";"}
-    ):
+    while cursor < len(text) and (text[cursor].isspace() or text[cursor] in {",", ";"}):
         cursor += 1
     return text[cursor:].casefold().startswith("contrast ratio")
 
@@ -529,9 +525,8 @@ class ThumbnailPromptService:
         content = cls._value(message, "content")
         if not isinstance(content, str):
             raise cls._invalid_response()
-        if (
-            len(content) > _MAX_OUTPUT_CHARACTERS
-            or _contains_disallowed_unicode(content)
+        if len(content) > _MAX_OUTPUT_CHARACTERS or _contains_disallowed_unicode(
+            content
         ):
             raise cls._invalid_response()
 
