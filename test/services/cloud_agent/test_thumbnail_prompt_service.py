@@ -8,6 +8,7 @@ import toml
 
 from app.services.cloud_agent.storage import CloudJobStorage
 from app.services.cloud_agent.thumbnail_prompt.errors import ThumbnailPromptError
+from app.services.cloud_agent.thumbnail_prompt import service as thumbnail_prompt_module
 from app.services.cloud_agent.thumbnail_prompt.service import ThumbnailPromptService
 from app.services.cloud_agent.thumbnail_prompt.settings import (
     ThumbnailPromptSettingsService,
@@ -244,6 +245,10 @@ def test_generate_rejects_non_plain_or_unlabelled_multiple_prompts(
         "Solar flare over Earth; Alternative: eclipse over Earth",
         "1: solar flare over Earth; 2: eclipse over Earth",
         "Solar flare over Earth; 2: eclipse over Earth",
+        "Primary:solar flare; Alternative:eclipse",
+        "1:first prompt;2:second prompt",
+        "Solar flare; Option 2:eclipse",
+        "Solar flare - Alternative: eclipse",
     ],
 )
 def test_generate_rejects_inline_labelled_alternatives_after_separator(
@@ -262,6 +267,9 @@ def test_generate_rejects_inline_labelled_alternatives_after_separator(
     [
         "Cinematic Earth from orbit; 16:9 aspect ratio, golden rim light",
         "Cinematic diptych; 2:1 aspect ratio, no text",
+        "Cinematic Earth from orbit; 16 : 9 aspect ratio, golden rim light",
+        "Cinematic Earth from orbit; 16: 9 aspect ratio, golden rim light",
+        "Cinematic Earth from orbit; 16 :9 aspect ratio, golden rim light",
         "Vintage editorial portrait; 35-mm grain, 3-point lighting",
     ],
 )
@@ -271,6 +279,32 @@ def test_generate_accepts_numeric_ratios_and_hyphenated_descriptors(
     service = service_with_completion(tmp_path, completion)
 
     assert service.generate_for_job("job-1") == completion
+
+
+@pytest.mark.parametrize(
+    ("completion", "expected"),
+    [
+        ("Primary:solar flare; Alternative:eclipse", True),
+        ("1:first prompt;2:second prompt", True),
+        ("Solar flare; Option 2:eclipse", True),
+        ("Solar flare - Alternative: eclipse", True),
+        ("Solar flare – Choice A:eclipse", True),
+        ("Solar flare — 2)eclipse", True),
+        ("Solar flare / 2.first prompt", True),
+        ("Prompt:solar flare", True),
+        ("Solar flare; Response:two prompts", True),
+        ("Cinematic Earth; 16 : 9 aspect ratio", False),
+        ("Cinematic Earth; 16: 9 aspect ratio", False),
+        ("Cinematic Earth; 16 :9 aspect ratio", False),
+        ("Cinematic Earth; 16:9 aspect ratio", False),
+        ("Cinematic diptych; 2:1 aspect ratio", False),
+        ("Vintage portrait; 35-mm grain", False),
+        ("Studio portrait; 3-point lighting", False),
+        ("Cinematic thumbnail prompt lighting with Earth", False),
+    ],
+)
+def test_alternative_marker_parser_boundaries(completion, expected):
+    assert thumbnail_prompt_module._has_alternative_marker(completion) is expected
 
 
 @pytest.mark.parametrize("control", ["\x00", "\t", "\x7f", "\u0085"])
