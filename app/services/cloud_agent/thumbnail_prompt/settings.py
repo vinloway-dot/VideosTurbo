@@ -35,6 +35,10 @@ _INVALID_DEFAULT_PROVIDER_MESSAGE = (
     "Saved default thumbnail provider is invalid. "
     "Select AIHubMix or OpenRouter and save Thumbnail Prompt Settings."
 )
+_INVALID_BASE_URL_MESSAGE = (
+    "Saved thumbnail provider base URL is invalid. "
+    "Enter valid HTTP(S) Base URLs and save Thumbnail Prompt Settings."
+)
 
 
 class ThumbnailPromptSettingsService:
@@ -52,13 +56,14 @@ class ThumbnailPromptSettingsService:
     def get_provider(self, provider_id: str) -> ThumbnailPromptProviderMetadata:
         normalized = self._require_provider(provider_id)
         metadata = _PROVIDERS[normalized]
+        readable_base_url, _ = self._readable_base_url(normalized)
         return ThumbnailPromptProviderMetadata(
             id=normalized,
             label=str(metadata["label"]),
             models=[str(metadata["default_model"]), "custom"],
             default_model=str(metadata["default_model"]),
             custom_model_id=self._configured_text(metadata["custom_model_name"]),
-            base_url=self._configured_text(metadata["base_url_name"]),
+            base_url=readable_base_url,
             api_key_configured=bool(self._configured_text(metadata["api_key_name"])),
         )
 
@@ -69,30 +74,33 @@ class ThumbnailPromptSettingsService:
         readable_provider = (
             configured_provider if configured_provider in _PROVIDERS else None
         )
+        aihubmix_base_url, aihubmix_base_url_valid = self._readable_base_url("aihubmix")
+        openrouter_base_url, openrouter_base_url_valid = self._readable_base_url(
+            "openrouter"
+        )
+        configuration_errors = []
+        if not readable_provider:
+            configuration_errors.append(_INVALID_DEFAULT_PROVIDER_MESSAGE)
+        if not (aihubmix_base_url_valid and openrouter_base_url_valid):
+            configuration_errors.append(_INVALID_BASE_URL_MESSAGE)
         return ThumbnailPromptSettings(
             master_prompt=self._configured_text(
                 "cloud_agent_thumbnail_prompt_master_prompt"
             ),
             default_provider=readable_provider,
-            configuration_error=(
-                None if readable_provider else _INVALID_DEFAULT_PROVIDER_MESSAGE
-            ),
+            configuration_error=" ".join(configuration_errors) or None,
             aihubmix_model=self._configured_text(_PROVIDERS["aihubmix"]["model_name"]),
             aihubmix_custom_model_id=self._configured_text(
                 _PROVIDERS["aihubmix"]["custom_model_name"]
             ),
-            aihubmix_base_url=self._configured_text(
-                _PROVIDERS["aihubmix"]["base_url_name"]
-            ),
+            aihubmix_base_url=aihubmix_base_url,
             openrouter_model=self._configured_text(
                 _PROVIDERS["openrouter"]["model_name"]
             ),
             openrouter_custom_model_id=self._configured_text(
                 _PROVIDERS["openrouter"]["custom_model_name"]
             ),
-            openrouter_base_url=self._configured_text(
-                _PROVIDERS["openrouter"]["base_url_name"]
-            ),
+            openrouter_base_url=openrouter_base_url,
         )
 
     def get_configured_provider_id(self) -> str:
@@ -228,6 +236,7 @@ class ThumbnailPromptSettingsService:
             ) from exc
         if (
             not normalized
+            or len(normalized) > 2048
             or any(character.isspace() for character in normalized)
             or parsed.scheme not in {"http", "https"}
             or not parsed.netloc
@@ -242,6 +251,14 @@ class ThumbnailPromptSettingsService:
                 f"invalid base URL for {provider_id}",
             )
         return normalized.rstrip("/")
+
+    def _readable_base_url(self, provider_id: str) -> tuple[str, bool]:
+        metadata = _PROVIDERS[provider_id]
+        configured = self._configured_text(metadata["base_url_name"])
+        try:
+            return self._validate_base_url(provider_id, configured), True
+        except ThumbnailPromptError:
+            return "", False
 
     @staticmethod
     def _configured_text(key: str) -> str:

@@ -141,6 +141,8 @@ _RESEARCH_HTTP_STATUS = {
     "URL_FETCH_FAILED": 502,
 }
 _THUMBNAIL_PROMPT_HTTP_STATUS = {
+    "PROVIDER_MODEL_UNSUPPORTED": 422,
+    "PROVIDER_CUSTOM_MODEL_REQUIRED": 422,
     "PROVIDER_API_KEY_MISSING": 422,
     "PROVIDER_AUTHENTICATION_FAILED": 401,
     "PROVIDER_TIMEOUT": 504,
@@ -149,6 +151,8 @@ _THUMBNAIL_PROMPT_HTTP_STATUS = {
 }
 _THUMBNAIL_PROMPT_PUBLIC_MESSAGES = {
     "PROVIDER_UNSUPPORTED": "thumbnail prompt default provider is invalid; update settings",
+    "PROVIDER_MODEL_UNSUPPORTED": "thumbnail prompt provider model is unsupported; update settings",
+    "PROVIDER_CUSTOM_MODEL_REQUIRED": "thumbnail prompt custom model ID is required; update settings",
     "PROVIDER_BASE_URL_INVALID": "thumbnail prompt provider base URL is invalid; update settings",
     "PROVIDER_API_KEY_MISSING": "thumbnail prompt provider API key is not configured",
     "PROVIDER_AUTHENTICATION_FAILED": "thumbnail prompt provider authentication failed",

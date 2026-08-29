@@ -200,6 +200,7 @@ def test_generate_keeps_normal_image_prompt_prose(tmp_path):
     [
         "[](https://example.invalid)",
         "![](https://example.invalid/image.png)",
+        "[Earth]()",
         "[Earth]: https://example.invalid",
         "<mailto:user@example.invalid>",
     ],
@@ -207,6 +208,24 @@ def test_generate_keeps_normal_image_prompt_prose(tmp_path):
 def test_generate_rejects_markdown_links_autolinks_and_reference_definitions(
     tmp_path, completion
 ):
+    service = service_with_completion(tmp_path, completion)
+
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.generate_for_job("job-1")
+
+    assert error.value.code == "THUMBNAIL_PROMPT_RESPONSE_INVALID"
+
+
+@pytest.mark.parametrize(
+    "completion",
+    [
+        "Cinematic <strong>Earth</strong> with dramatic rim light",
+        "<div>Earth viewed from orbit</div>",
+        "<!-- hidden alternative -->Solar flare over Earth",
+        "<?thumbnail style='cinematic'?>Solar flare over Earth",
+    ],
+)
+def test_generate_rejects_raw_html_markup(tmp_path, completion):
     service = service_with_completion(tmp_path, completion)
 
     with pytest.raises(ThumbnailPromptError) as error:
@@ -249,6 +268,18 @@ def test_generate_sanitizes_client_factory_failures(tmp_path):
     [
         ("cloud_agent_thumbnail_prompt_default_provider", "unknown"),
         ("cloud_agent_thumbnail_prompt_aihubmix_base_url", "not-a-url"),
+        (
+            "cloud_agent_thumbnail_prompt_aihubmix_base_url",
+            "https://user:secret@example.invalid/v1",
+        ),
+        (
+            "cloud_agent_thumbnail_prompt_aihubmix_base_url",
+            "https://example.invalid/v1?api_key=secret",
+        ),
+        (
+            "cloud_agent_thumbnail_prompt_aihubmix_base_url",
+            "https://example.invalid/" + "x" * 2048,
+        ),
     ],
 )
 def test_generate_rejects_invalid_provider_configuration_before_client_creation(

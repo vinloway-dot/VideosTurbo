@@ -129,6 +129,14 @@ def test_thumbnail_prompt_endpoint_maps_typed_provider_errors(
             "thumbnail prompt default provider is invalid; update settings",
         ),
         (
+            "PROVIDER_MODEL_UNSUPPORTED",
+            "thumbnail prompt provider model is unsupported; update settings",
+        ),
+        (
+            "PROVIDER_CUSTOM_MODEL_REQUIRED",
+            "thumbnail prompt custom model ID is required; update settings",
+        ),
+        (
             "PROVIDER_BASE_URL_INVALID",
             "thumbnail prompt provider base URL is invalid; update settings",
         ),
@@ -184,6 +192,57 @@ def test_invalid_saved_default_provider_returns_recoverable_settings_and_catalog
         "aihubmix",
         "openrouter",
     ]
+
+
+def test_invalid_saved_base_urls_return_redacted_recoverable_settings_and_catalog(
+    client,
+):
+    config.app["cloud_agent_thumbnail_prompt_aihubmix_base_url"] = (
+        "https://user:userinfo-secret-marker@example.invalid/v1"
+    )
+    config.app["cloud_agent_thumbnail_prompt_openrouter_base_url"] = (
+        "https://example.invalid/v1?api_key=query-secret-marker"
+    )
+
+    settings = client.get("/api/v1/cloud-agent/thumbnail-prompt/settings")
+    providers = client.get("/api/v1/cloud-agent/thumbnail-prompt/providers")
+
+    assert settings.status_code == 200
+    assert settings.json()["data"]["aihubmix_base_url"] == ""
+    assert settings.json()["data"]["openrouter_base_url"] == ""
+    assert settings.json()["data"]["configuration_error"] == (
+        "Saved thumbnail provider base URL is invalid. "
+        "Enter valid HTTP(S) Base URLs and save Thumbnail Prompt Settings."
+    )
+    assert providers.status_code == 200
+    assert {item["id"]: item["base_url"] for item in providers.json()["data"]} == {
+        "aihubmix": "",
+        "openrouter": "",
+    }
+    for response in (settings, providers):
+        assert "userinfo-secret-marker" not in response.text
+        assert "query-secret-marker" not in response.text
+
+
+def test_oversized_saved_base_url_returns_redacted_recoverable_state(client):
+    oversized_marker = "oversized-secret-marker-" + "x" * 2048
+    config.app["cloud_agent_thumbnail_prompt_aihubmix_base_url"] = (
+        f"https://example.invalid/{oversized_marker}"
+    )
+
+    settings = client.get("/api/v1/cloud-agent/thumbnail-prompt/settings")
+    providers = client.get("/api/v1/cloud-agent/thumbnail-prompt/providers")
+
+    assert settings.status_code == 200
+    assert settings.json()["data"]["aihubmix_base_url"] == ""
+    assert settings.json()["data"]["configuration_error"]
+    assert providers.status_code == 200
+    provider = next(
+        item for item in providers.json()["data"] if item["id"] == "aihubmix"
+    )
+    assert provider["base_url"] == ""
+    assert oversized_marker not in settings.text
+    assert oversized_marker not in providers.text
 
 
 def test_thumbnail_prompt_settings_validate_and_persist_dedicated_values(client):
