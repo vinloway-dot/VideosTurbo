@@ -2,6 +2,10 @@ import pytest
 
 from app.models.cloud_agent import FlowRecoveryState
 from app.models.six_clip import SixClipPlan, SixClipSegment
+from app.services.cloud_agent.errors import (
+    FlowArchiveValidationError,
+    FlowWorkspaceVerificationError,
+)
 from app.services.cloud_agent.flow_archive import (
     FlowPartialInventory,
     FlowRecoveryMaterialization,
@@ -86,6 +90,17 @@ class RecoveryWorkspace:
         return self.observations.pop(0)
 
 
+class CaptureErrorWorkspace(RecoveryWorkspace):
+    def __init__(self, store, job_id, error):
+        super().__init__(store, job_id, inventory=None, observations=[])
+        self.error = error
+
+    def capture_partial_inventory(self, paths, *, attempt):
+        del paths, attempt
+        self.events.append("capture_inventory")
+        raise self.error
+
+
 def _coordinator(store, inventory, materialized_paths):
     def materialize(_snapshot, _inventory, _paths, **_kwargs):
         for path in materialized_paths:
@@ -165,6 +180,37 @@ def test_complete_capture_skips_paid_replacement_and_clears_recovery_state(tmp_p
     assert result == paths.flow_files
     assert workspace.submit_calls == 0
     assert store.get_job(job.id).flow_recovery_state is FlowRecoveryState.NONE
+
+
+@pytest.mark.parametrize(
+    "capture_error",
+    [
+        FlowArchiveValidationError("archive contains fewer than five clips"),
+        FlowWorkspaceVerificationError("survivor names could not be verified"),
+    ],
+)
+def test_ambiguous_timeout_archive_stops_before_paid_replacement(
+    tmp_path,
+    capture_error,
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _job_with_prompts(store)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare(job.id)
+    inventory = _inventory(paths)
+    workspace = CaptureErrorWorkspace(
+        store,
+        job.id,
+        capture_error,
+    )
+
+    with pytest.raises(FlowRecoveryMappingError, match="could not be mapped safely"):
+        _coordinator(store, inventory, paths.flow_files).recover_incomplete_batch(
+            job, workspace, paths
+        )
+
+    assert workspace.events == ["capture_inventory"]
+    assert workspace.submit_calls == 0
+    assert store.get_job(job.id).flow_recovery_attempts == 0
 
 
 def test_unresolved_attempt_reconciles_without_second_submit(tmp_path):

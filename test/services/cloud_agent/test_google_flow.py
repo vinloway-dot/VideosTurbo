@@ -10,6 +10,7 @@ from app.models.cloud_agent import ServiceSessionStatus
 from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
     FlowBatchIncompleteError,
+    FlowGenerationTimeoutError,
     FlowWorkspaceVerificationError,
     HumanRequiredError,
     MediaValidationError,
@@ -2325,7 +2326,7 @@ def test_flow_workspace_partial_reconciliation_retains_remote_results(
     monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
 
     with client.acquire_workspace(_job()) as workspace:
-        with pytest.raises(FlowWorkspaceVerificationError, match="reconcil"):
+        with pytest.raises(FlowGenerationTimeoutError, match="timed out"):
             workspace.reconcile_and_download(_job(), paths)
 
     assert not any(action[0] == "check" for action in page.actions)
@@ -2968,11 +2969,14 @@ def test_google_flow_generation_timeout_is_bounded(monkeypatch, tmp_path):
     assert ("click", "bulk_download") not in page.actions
 
 
-def test_google_flow_generation_timeout_is_typed_workspace_failure_after_submit(
+def test_google_flow_generation_timeout_is_typed_recovery_signal_after_submit(
     monkeypatch,
     tmp_path,
 ):
-    page = FakePage(progress_html=["<div>Generation progress 2 / 6</div>"])
+    page = FakePage(
+        progress_html=["<div>Generation progress 5 / 6</div>"],
+        completed_video_polls=[_completed_video_cards()[:5]],
+    )
     client, _ = _client(page, timeout_seconds=1.0)
     paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
     clock = [-0.5]
@@ -2985,11 +2989,36 @@ def test_google_flow_generation_timeout_is_typed_workspace_failure_after_submit(
     monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
 
     with client.acquire_workspace(_job()) as workspace:
-        with pytest.raises(FlowWorkspaceVerificationError, match="timed out"):
+        page.progressbar = True
+        with pytest.raises(FlowGenerationTimeoutError, match="timed out"):
             workspace.generate_and_download(_job(), paths)
 
     assert ("click", "generate") in page.actions
     assert ("click", "bulk_download") not in page.actions
+
+
+def test_google_flow_reconciliation_preserves_typed_generation_timeout(
+    monkeypatch,
+    tmp_path,
+):
+    page = FakePage(progress_html=["<div>Generation progress 5 / 6</div>"])
+    client, _ = _client(page)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+
+    def timeout(_page, _expected_count):
+        raise FlowGenerationTimeoutError(
+            "Google Flow generation timed out before 6/6"
+        )
+
+    monkeypatch.setattr(client, "_wait_for_generation", timeout)
+
+    with pytest.raises(FlowGenerationTimeoutError, match="timed out"):
+        google_flow.FlowWorkspaceRun(client, page).reconcile_and_download(
+            _job(flow_generation_unresolved=True),
+            paths,
+        )
+
+    assert ("click", "generate") not in page.actions
 
 
 def test_post_reload_settled_inventory_uses_editor_timeout_not_generation_timeout(

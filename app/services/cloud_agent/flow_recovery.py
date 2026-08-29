@@ -4,7 +4,11 @@ from pathlib import Path
 from typing import Protocol
 
 from app.models.cloud_agent import CloudJobRecord, FlowRecoveryState
-from app.services.cloud_agent.errors import RecoveryBudgetExhausted
+from app.services.cloud_agent.errors import (
+    FlowArchiveValidationError,
+    FlowWorkspaceVerificationError,
+    RecoveryBudgetExhausted,
+)
 from app.services.cloud_agent.flow_archive import (
     FlowPartialInventory,
     FlowRecoveryCapture,
@@ -118,7 +122,12 @@ class FlowRecoveryCoordinator:
             flow_generation_unresolved=False,
             flow_recovery_state=FlowRecoveryState.INVENTORY_PENDING,
         )
-        capture = workspace.capture_partial_inventory(paths, attempt=0)
+        try:
+            capture = workspace.capture_partial_inventory(paths, attempt=0)
+        except (FlowArchiveValidationError, FlowWorkspaceVerificationError) as exc:
+            raise FlowRecoveryMappingError(
+                "Flow partial inventory could not be mapped safely"
+            ) from exc
         if isinstance(capture, FlowRecoveryMaterialization):
             self.store.patch_job(
                 current.id,

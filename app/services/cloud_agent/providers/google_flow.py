@@ -15,6 +15,7 @@ from app.models.cloud_agent import CloudJobRecord, ServiceSessionStatus
 from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
     FlowBatchIncompleteError,
+    FlowGenerationTimeoutError,
     FlowWorkspaceVerificationError,
     HumanRequiredError,
     MediaValidationError,
@@ -454,7 +455,7 @@ class FlowWorkspaceRun:
             raise ValueError("Google Flow workspace requires exactly six clips")
         try:
             self.client._wait_for_generation(self.page, expected_count)
-        except FlowBatchIncompleteError:
+        except (FlowBatchIncompleteError, FlowGenerationTimeoutError):
             raise
         except MediaValidationError as exc:
             raise FlowWorkspaceVerificationError(
@@ -1077,7 +1078,7 @@ class GoogleFlowClient:
             if stable_polls >= self.settled_poll_count:
                 return
             if time.monotonic() >= deadline:
-                raise FlowWorkspaceVerificationError(
+                raise FlowGenerationTimeoutError(
                     f"Google Flow generation timed out before {expected_count}/{expected_count}"
                 )
             time.sleep(self.poll_seconds)

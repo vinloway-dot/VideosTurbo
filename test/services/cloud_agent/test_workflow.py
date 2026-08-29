@@ -16,6 +16,7 @@ from app.models.six_clip import empty_six_clip_plan
 from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
     FlowBatchIncompleteError,
+    FlowGenerationTimeoutError,
     FlowWorkspaceVerificationError,
     HumanRequiredError,
     MediaValidationError,
@@ -1378,6 +1379,97 @@ def test_incomplete_original_batch_delegates_to_targeted_recovery(
 
     assert len(recovery.calls) == 1
     assert workspace.generate_calls == 1
+    assert result.status is CloudJobStatus.COMPLETED
+
+
+def test_generation_timeout_delegates_to_archive_recovery_without_resubmit(
+    monkeypatch,
+    tmp_path,
+):
+    class CompletingRecovery:
+        def __init__(self):
+            self.calls = []
+
+        def recover_incomplete_batch(self, current_job, workspace, paths):
+            self.calls.append((current_job.id, workspace))
+            for path in paths.flow_files:
+                path.write_bytes(b"recovered")
+            return paths.flow_files
+
+        def resume_unresolved_recovery(self, current_job, workspace, paths):
+            raise AssertionError("fresh timeout must inspect the current batch")
+
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    events = []
+    workspace = FenceWorkspace(
+        store,
+        events,
+        generate_error=FlowGenerationTimeoutError(
+            "Google Flow generation timed out before 6/6"
+        ),
+    )
+    recovery = CompletingRecovery()
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        flow=FenceFlow(workspace, events),
+        flow_recovery=recovery,
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert len(recovery.calls) == 1
+    assert workspace.generate_calls == 1
+    assert workspace.reconcile_calls == 0
+    assert result.status is CloudJobStatus.COMPLETED
+
+
+def test_unresolved_generation_timeout_recovers_without_original_batch_resubmit(
+    monkeypatch,
+    tmp_path,
+):
+    class CompletingRecovery:
+        def __init__(self):
+            self.calls = []
+
+        def recover_incomplete_batch(self, current_job, workspace, paths):
+            self.calls.append((current_job.id, workspace))
+            for path in paths.flow_files:
+                path.write_bytes(b"recovered")
+            return paths.flow_files
+
+        def resume_unresolved_recovery(self, current_job, workspace, paths):
+            raise AssertionError("original generation timeout is not targeted recovery")
+
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id, unresolved=True)
+    events = []
+    workspace = FenceWorkspace(
+        store,
+        events,
+        reconcile_error=FlowGenerationTimeoutError(
+            "Google Flow generation timed out before 6/6"
+        ),
+    )
+    recovery = CompletingRecovery()
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        flow=FenceFlow(workspace, events),
+        flow_recovery=recovery,
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert len(recovery.calls) == 1
+    assert workspace.generate_calls == 0
+    assert workspace.reconcile_calls == 1
+    assert "prepare" not in events
     assert result.status is CloudJobStatus.COMPLETED
 
 

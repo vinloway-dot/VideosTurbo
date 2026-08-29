@@ -9,6 +9,10 @@ class FlowWorkspaceVerificationError(MediaValidationError):
     """Raised when the shared Flow workspace state cannot be proven safe."""
 
 
+class FlowGenerationTimeoutError(FlowWorkspaceVerificationError):
+    """Raised when a paid Flow batch needs archive reconciliation after timeout."""
+
+
 class FlowArchiveValidationError(MediaValidationError):
     """Raised when a Flow bulk-download archive is unsafe or incomplete."""
 

@@ -16,6 +16,7 @@ from app.models.cloud_agent import (
 from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
     FlowBatchIncompleteError,
+    FlowGenerationTimeoutError,
     FlowWorkspaceVerificationError,
     HumanRequiredError,
     MediaValidationError,
@@ -319,7 +320,7 @@ class CloudAgentWorkflow:
             )
             try:
                 generated = workspace.reconcile_and_download(job, paths)
-            except FlowBatchIncompleteError:
+            except (FlowBatchIncompleteError, FlowGenerationTimeoutError):
                 generated = self.flow_recovery.recover_incomplete_batch(
                     self._get_job(job.id),
                     workspace,
@@ -341,7 +342,7 @@ class CloudAgentWorkflow:
                     job,
                     paths,
                 )
-            except FlowBatchIncompleteError:
+            except (FlowBatchIncompleteError, FlowGenerationTimeoutError):
                 generated = self.flow_recovery.recover_incomplete_batch(
                     self._get_job(job.id),
                     workspace,
