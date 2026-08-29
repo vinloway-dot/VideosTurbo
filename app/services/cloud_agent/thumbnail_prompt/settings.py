@@ -118,6 +118,12 @@ class _DirectoryHandles:
     leaf_identity: tuple[int, int]
 
 
+@dataclass(frozen=True)
+class _PreservedBackup:
+    name: str
+    identity: tuple[int, int]
+
+
 class _UnsafeSettingsPath(Exception):
     """The dedicated settings filesystem boundary cannot be trusted."""
 
@@ -435,14 +441,24 @@ class ThumbnailPromptSettingsService:
                         leaf_name=component,
                         leaf_identity=(leaf_stat.st_dev, leaf_stat.st_ino),
                     )
-                os.close(current_fd)
+                closing_fd = current_fd
+                current_fd = None
+                try:
+                    os.close(closing_fd)
+                except Exception:
+                    try:
+                        os.close(next_fd)
+                    except OSError:
+                        pass
+                    raise
                 current_fd = next_fd
             raise _UnsafeSettingsPath("dedicated settings leaf is missing")
         except Exception:
-            try:
-                os.close(current_fd)
-            except OSError:
-                pass
+            if current_fd is not None:
+                try:
+                    os.close(current_fd)
+                except OSError:
+                    pass
             raise
 
     @staticmethod
@@ -673,6 +689,7 @@ class ThumbnailPromptSettingsService:
         temporary_name = f".{self._settings_name}.{uuid4().hex}.tmp"
         temporary_fd = None
         temporary_identity = None
+        preserved_backup = None
         try:
             temporary_fd = self._open_regular_file_locked(
                 directory_fd,
@@ -681,13 +698,21 @@ class ThumbnailPromptSettingsService:
                 require_single_link=True,
             )
             os.fchmod(temporary_fd, 0o600)
-            self._write_all(temporary_fd, serialized)
-            os.fsync(temporary_fd)
             temporary_stat = self._private_regular_file_stat(temporary_fd)
             temporary_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+            self._verify_temporary_file_locked(
+                directory_fd,
+                temporary_name,
+                temporary_fd,
+                temporary_identity,
+            )
+            self._write_all(temporary_fd, serialized)
+            os.fsync(temporary_fd)
             self._verify_canonical_identity_locked(directory_fd, loaded.file_identity)
             if loaded.preservable:
-                self._copy_corrupt_backup_locked(directory_fd, loaded.file_identity)
+                preserved_backup = self._copy_corrupt_backup_locked(
+                    directory_fd, loaded.file_identity
+                )
             self._verify_canonical_identity_locked(directory_fd, loaded.file_identity)
             self._verify_leaf_identity_locked(handles)
             self._verify_lock_identity_locked(directory_fd, lock_fd)
@@ -718,6 +743,10 @@ class ThumbnailPromptSettingsService:
                 self._unlink_matching_file_locked(
                     directory_fd, temporary_name, temporary_identity
                 )
+            if preserved_backup is not None and loaded.file_identity is not None:
+                self._rollback_corrupt_backup_locked(
+                    directory_fd, preserved_backup, loaded.file_identity
+                )
             raise
         finally:
             if temporary_fd is not None:
@@ -732,7 +761,7 @@ class ThumbnailPromptSettingsService:
 
     def _copy_corrupt_backup_locked(
         self, directory_fd: int, expected_identity: tuple[int, int] | None
-    ) -> None:
+    ) -> _PreservedBackup:
         if expected_identity is None:
             raise _UnsafeSettingsPath("corrupt settings identity is missing")
         try:
@@ -777,6 +806,7 @@ class ThumbnailPromptSettingsService:
             backup_fd = None
             os.fsync(directory_fd)
             backup_complete = True
+            return _PreservedBackup(backup_name, backup_identity)
         finally:
             active_exception = sys.exc_info()[0] is not None
             cleanup_error = None
@@ -801,6 +831,26 @@ class ThumbnailPromptSettingsService:
                 raise _UnsafeSettingsPath("settings backup cleanup failed") from (
                     cleanup_error
                 )
+
+    def _rollback_corrupt_backup_locked(
+        self,
+        directory_fd: int,
+        preserved_backup: _PreservedBackup,
+        expected_canonical_identity: tuple[int, int],
+    ) -> None:
+        try:
+            self._verify_canonical_identity_locked(
+                directory_fd, expected_canonical_identity
+            )
+        except (OSError, _UnsafeSettingsPath):
+            return
+        if self._unlink_matching_file_locked(
+            directory_fd, preserved_backup.name, preserved_backup.identity
+        ):
+            try:
+                os.fsync(directory_fd)
+            except OSError:
+                pass
 
     def _verify_named_private_file_locked(
         self, directory_fd: int, name: str, expected_identity: tuple[int, int]

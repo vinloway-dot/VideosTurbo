@@ -194,7 +194,7 @@ def test_corrupt_backup_is_private_and_preserves_secret_bytes(tmp_path):
     assert "corrupt-secret-sentinel" not in updated.model_dump_json()
 
 
-def test_failed_atomic_repair_leaves_canonical_corrupt_state_unchanged(
+def test_repeated_failed_atomic_repairs_do_not_accumulate_corrupt_backups(
     tmp_path, monkeypatch
 ):
     settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
@@ -211,13 +211,15 @@ def test_failed_atomic_repair_leaves_canonical_corrupt_state_unchanged(
         "app.services.cloud_agent.thumbnail_prompt.settings.os.replace", fail_replace
     )
 
-    with pytest.raises(OSError, match="injected replace failure"):
-        service.update_settings(_valid_payload())
+    for _ in range(3):
+        with pytest.raises(OSError, match="injected replace failure"):
+            service.update_settings(_valid_payload())
 
     assert settings_path.read_bytes() == corrupt_bytes
     recovered = service.get_settings()
     assert recovered.configuration_error == _CORRUPT_SETTINGS_MESSAGE
     assert "canonical-secret-sentinel" not in recovered.model_dump_json()
+    assert list(settings_path.parent.glob(".corrupt-*")) == []
     assert list(settings_path.parent.glob(".settings.toml.*.tmp")) == []
 
 
@@ -372,6 +374,62 @@ def test_temp_substitution_is_rejected_and_attacker_file_is_not_deleted(tmp_path
     assert len(remaining_temps) == 1
     assert remaining_temps[0].read_bytes() == attacker_bytes
     assert stat.S_IMODE(remaining_temps[0].stat().st_mode) == 0o644
+
+
+@pytest.mark.parametrize(
+    "failure_mode",
+    ["partial-write", "full-write-then-raise", "fsync"],
+)
+def test_failed_temp_persistence_removes_created_temp_and_submitted_secret(
+    tmp_path, monkeypatch, failure_mode
+):
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+    submitted_secret = "submitted-temp-secret-sentinel"
+    real_write = os.write
+    real_fsync = os.fsync
+    temp_write_calls = 0
+
+    def is_temporary_descriptor(file_descriptor):
+        target = os.readlink(f"/proc/self/fd/{file_descriptor}")
+        return target.endswith(".tmp") and "/.settings.toml." in target
+
+    def fail_temp_write(file_descriptor, content):
+        nonlocal temp_write_calls
+        if not is_temporary_descriptor(file_descriptor) or failure_mode == "fsync":
+            return real_write(file_descriptor, content)
+        temp_write_calls += 1
+        if failure_mode == "partial-write" and temp_write_calls == 1:
+            return real_write(file_descriptor, content[:-1])
+        if failure_mode == "full-write-then-raise":
+            real_write(file_descriptor, content)
+        raise OSError(f"injected {failure_mode} failure")
+
+    def fail_temp_fsync(file_descriptor):
+        if failure_mode == "fsync" and is_temporary_descriptor(file_descriptor):
+            raise OSError("injected fsync failure")
+        return real_fsync(file_descriptor)
+
+    monkeypatch.setattr(
+        "app.services.cloud_agent.thumbnail_prompt.settings.os.write",
+        fail_temp_write,
+    )
+    monkeypatch.setattr(
+        "app.services.cloud_agent.thumbnail_prompt.settings.os.fsync",
+        fail_temp_fsync,
+    )
+
+    with pytest.raises(OSError, match=f"injected {failure_mode} failure"):
+        service.set_api_key("aihubmix", submitted_secret)
+
+    assert not settings_path.exists()
+    assert list(settings_path.parent.glob(".settings.toml.*.tmp")) == []
+    persisted_directory_bytes = b"".join(
+        entry.read_bytes()
+        for entry in settings_path.parent.iterdir()
+        if entry.is_file()
+    )
+    assert submitted_secret.encode() not in persisted_directory_bytes
 
 
 def test_post_replace_canonical_mode_is_verified_before_success(tmp_path, monkeypatch):
@@ -624,6 +682,53 @@ def test_lock_fstat_failure_does_not_leak_open_descriptors(tmp_path, monkeypatch
 
     assert recovered.configuration_error == _CORRUPT_SETTINGS_MESSAGE
     assert len(os.listdir("/proc/self/fd")) == descriptor_count_before
+
+
+def test_ancestor_close_failure_closes_newly_opened_descriptor(tmp_path, monkeypatch):
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+    real_open_directory = service._open_or_create_directory_locked
+    real_close = os.close
+    opened_descriptors = []
+    close_failed = False
+
+    def record_opened_directory(parent_fd, component, *, allow_create):
+        opened_fd = real_open_directory(parent_fd, component, allow_create=allow_create)
+        opened_descriptors.append(opened_fd)
+        return opened_fd
+
+    def close_then_report_failure(file_descriptor):
+        nonlocal close_failed
+        if (
+            not close_failed
+            and opened_descriptors
+            and file_descriptor != opened_descriptors[-1]
+        ):
+            close_failed = True
+            real_close(file_descriptor)
+            raise OSError("injected ancestor close failure")
+        return real_close(file_descriptor)
+
+    service._open_or_create_directory_locked = record_opened_directory
+    monkeypatch.setattr(
+        "app.services.cloud_agent.thumbnail_prompt.settings.os.close",
+        close_then_report_failure,
+    )
+
+    try:
+        with pytest.raises(OSError, match="injected ancestor close failure"):
+            service._open_directory_handles()
+
+        assert close_failed is True
+        for file_descriptor in opened_descriptors:
+            with pytest.raises(OSError):
+                os.fstat(file_descriptor)
+    finally:
+        for file_descriptor in opened_descriptors:
+            try:
+                real_close(file_descriptor)
+            except OSError:
+                pass
 
 
 def test_unlock_failure_still_closes_all_directory_descriptors(tmp_path, monkeypatch):
