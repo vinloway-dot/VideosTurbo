@@ -2,6 +2,7 @@ import os
 import stat
 from dataclasses import FrozenInstanceError
 import multiprocessing
+from pathlib import Path
 import threading
 
 import pytest
@@ -32,21 +33,31 @@ def _write_provider_key(
     done,
     save_entered=None,
     release_save=None,
+    results=None,
 ):
-    service = ThumbnailPromptSettingsService(settings_path=settings_path)
-    if save_entered is not None and release_save is not None:
-        original_save = service._save_locked
+    try:
+        service = ThumbnailPromptSettingsService(settings_path=settings_path)
+        if save_entered is not None and release_save is not None:
+            original_save = service._save_locked
 
-        def paused_save(*args, **kwargs):
-            save_entered.set()
-            if not release_save.wait(timeout=10):
-                raise RuntimeError("timed out waiting to release settings save")
-            return original_save(*args, **kwargs)
+            def paused_save(*args, **kwargs):
+                save_entered.set()
+                if not release_save.wait(timeout=10):
+                    raise RuntimeError("timed out waiting to release settings save")
+                return original_save(*args, **kwargs)
 
-        service._save_locked = paused_save
-    started.set()
-    service.set_api_key(provider_id, value)
-    done.set()
+            service._save_locked = paused_save
+        started.set()
+        service.set_api_key(provider_id, value)
+        if results is not None:
+            results.put((provider_id, "ok"))
+    except ThumbnailPromptError as exc:
+        if results is not None:
+            results.put((provider_id, exc.code))
+        else:
+            raise
+    finally:
+        done.set()
 
 
 def _valid_payload(**overrides):
@@ -162,6 +173,71 @@ def test_successful_api_key_repair_preserves_corrupt_file(tmp_path):
     assert preserved[0].read_bytes() == corrupt_bytes
 
 
+def test_corrupt_backup_is_private_and_preserves_secret_bytes(tmp_path):
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    settings_path.parent.mkdir()
+    corrupt_bytes = b'[broken = "corrupt-secret-sentinel"'
+    settings_path.write_bytes(corrupt_bytes)
+    settings_path.chmod(0o644)
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+
+    updated = service.update_settings(_valid_payload())
+
+    preserved = list(settings_path.parent.glob(".corrupt-*"))
+    assert len(preserved) == 1
+    assert preserved[0].read_bytes() == corrupt_bytes
+    assert stat.S_IMODE(preserved[0].stat().st_mode) == 0o600
+    assert "corrupt-secret-sentinel" not in updated.model_dump_json()
+
+
+def test_failed_atomic_repair_leaves_canonical_corrupt_state_unchanged(
+    tmp_path, monkeypatch
+):
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    settings_path.parent.mkdir()
+    corrupt_bytes = b'[broken = "canonical-secret-sentinel"'
+    settings_path.write_bytes(corrupt_bytes)
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+
+    def fail_replace(*args, **kwargs):
+        raise OSError("injected replace failure")
+
+    monkeypatch.setattr(
+        "app.services.cloud_agent.thumbnail_prompt.settings.os.replace", fail_replace
+    )
+
+    with pytest.raises(OSError, match="injected replace failure"):
+        service.update_settings(_valid_payload())
+
+    assert settings_path.read_bytes() == corrupt_bytes
+    recovered = service.get_settings()
+    assert recovered.configuration_error == _CORRUPT_SETTINGS_MESSAGE
+    assert "canonical-secret-sentinel" not in recovered.model_dump_json()
+    assert list(settings_path.parent.glob(".settings.toml.*.tmp")) == []
+
+
+def test_hard_linked_settings_file_is_unsafe_and_cannot_be_repaired(tmp_path):
+    settings_dir = tmp_path / "thumbnail_prompt"
+    settings_dir.mkdir()
+    outside = tmp_path / "outside-settings.toml"
+    outside_bytes = b'[broken = "hard-link-secret-sentinel"'
+    outside.write_bytes(outside_bytes)
+    settings_path = settings_dir / "settings.toml"
+    os.link(outside, settings_path)
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+
+    recovered = service.get_settings()
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.update_settings(_valid_payload())
+
+    assert recovered.configuration_error == _CORRUPT_SETTINGS_MESSAGE
+    assert "hard-link-secret-sentinel" not in recovered.model_dump_json()
+    assert error.value.code == "THUMBNAIL_PROMPT_SETTINGS_UNSAFE"
+    assert outside.read_bytes() == outside_bytes
+    assert settings_path.read_bytes() == outside_bytes
+    assert list(settings_dir.glob(".corrupt-*")) == []
+
+
 def test_failed_validation_does_not_overwrite_or_preserve_corrupt_file(tmp_path):
     settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
     settings_path.parent.mkdir()
@@ -209,22 +285,109 @@ def test_concurrent_process_api_key_updates_both_survive(tmp_path):
         ),
     )
 
-    first.start()
-    assert first_started.wait(timeout=5)
-    assert first_save_entered.wait(timeout=5)
-    second.start()
-    assert second_started.wait(timeout=5)
-    second_finished_while_first_save_was_paused = second_done.wait(timeout=1)
-    release_first_save.set()
-    first.join(timeout=10)
-    second.join(timeout=10)
+    started_processes = []
+    try:
+        first.start()
+        started_processes.append(first)
+        assert first_started.wait(timeout=5)
+        assert first_save_entered.wait(timeout=5)
+        second.start()
+        started_processes.append(second)
+        assert second_started.wait(timeout=5)
+        second_finished_while_first_save_was_paused = second_done.wait(timeout=1)
+        release_first_save.set()
+        first.join(timeout=10)
+        second.join(timeout=10)
 
-    assert first.exitcode == 0
-    assert second.exitcode == 0
-    assert second_finished_while_first_save_was_paused is False
-    service = ThumbnailPromptSettingsService(settings_path=settings_path)
-    assert service.get_provider("aihubmix").api_key_configured is True
-    assert service.get_provider("openrouter").api_key_configured is True
+        assert first.exitcode == 0
+        assert second.exitcode == 0
+        assert second_finished_while_first_save_was_paused is False
+        service = ThumbnailPromptSettingsService(settings_path=settings_path)
+        assert service.get_provider("aihubmix").api_key_configured is True
+        assert service.get_provider("openrouter").api_key_configured is True
+    finally:
+        release_first_save.set()
+        for process in started_processes:
+            if process.is_alive():
+                process.terminate()
+        for process in started_processes:
+            process.join(timeout=5)
+
+
+def test_replaced_lock_inode_aborts_stale_writer_without_lost_update(tmp_path):
+    context = multiprocessing.get_context("fork")
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    first_started = context.Event()
+    first_done = context.Event()
+    first_save_entered = context.Event()
+    release_first_save = context.Event()
+    second_started = context.Event()
+    second_done = context.Event()
+    results = context.Queue()
+    first = context.Process(
+        target=_write_provider_key,
+        args=(
+            settings_path,
+            "aihubmix",
+            "stale-writer-key",
+            first_started,
+            first_done,
+            first_save_entered,
+            release_first_save,
+            results,
+        ),
+    )
+    second = context.Process(
+        target=_write_provider_key,
+        args=(
+            settings_path,
+            "openrouter",
+            "replacement-lock-key",
+            second_started,
+            second_done,
+            None,
+            None,
+            results,
+        ),
+    )
+    started_processes = []
+
+    try:
+        first.start()
+        started_processes.append(first)
+        assert first_started.wait(timeout=5)
+        assert first_save_entered.wait(timeout=5)
+        lock_path = settings_path.parent / ".settings.lock"
+        lock_path.unlink()
+        recreated_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(recreated_fd)
+
+        second.start()
+        started_processes.append(second)
+        assert second_started.wait(timeout=5)
+        assert second_done.wait(timeout=5)
+        release_first_save.set()
+        assert first_done.wait(timeout=5)
+        first.join(timeout=10)
+        second.join(timeout=10)
+
+        assert first.exitcode == 0
+        assert second.exitcode == 0
+        outcomes = {results.get(timeout=2) for _ in range(2)}
+        assert outcomes == {
+            ("aihubmix", "THUMBNAIL_PROMPT_SETTINGS_UNSAFE"),
+            ("openrouter", "ok"),
+        }
+        service = ThumbnailPromptSettingsService(settings_path=settings_path)
+        assert service.get_provider("aihubmix").api_key_configured is False
+        assert service.get_provider("openrouter").api_key_configured is True
+    finally:
+        release_first_save.set()
+        for process in started_processes:
+            if process.is_alive():
+                process.terminate()
+        for process in started_processes:
+            process.join(timeout=5)
 
 
 def test_symlinked_settings_parent_is_rejected_without_outside_write(tmp_path):
@@ -300,6 +463,49 @@ def test_atomic_save_fsyncs_file_and_containing_directory(tmp_path, monkeypatch)
 
     assert stat.S_IFREG in fsync_modes
     assert stat.S_IFDIR in fsync_modes
+
+
+@pytest.mark.parametrize(
+    "settings_path",
+    [
+        Path("thumbnail_prompt/settings.toml"),
+        Path("/settings.toml"),
+        Path.cwd() / "thumbnail_prompt" / "settings.toml",
+        Path("/tmp/thumbnail_prompt/settings.toml"),
+        Path("/tmp/not-thumbnail-prompt/settings.toml"),
+        Path("/tmp/thumbnail_prompt/not-settings.toml"),
+    ],
+)
+def test_settings_path_must_target_an_absolute_dedicated_leaf(settings_path):
+    with pytest.raises(ValueError, match="dedicated Thumbnail Prompt settings path"):
+        ThumbnailPromptSettingsService(settings_path=settings_path)
+
+
+def test_existing_parent_and_dedicated_leaf_permissions_are_unchanged(tmp_path):
+    parent = tmp_path / "caller-owned"
+    parent.mkdir(mode=0o751)
+    settings_dir = parent / "thumbnail_prompt"
+    settings_dir.mkdir(mode=0o755)
+    parent.chmod(0o751)
+    settings_dir.chmod(0o755)
+
+    ThumbnailPromptSettingsService(
+        settings_path=settings_dir / "settings.toml"
+    ).get_settings()
+
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o751
+    assert stat.S_IMODE(settings_dir.stat().st_mode) == 0o755
+    assert stat.S_IMODE((settings_dir / ".settings.lock").stat().st_mode) == 0o600
+
+
+def test_only_dedicated_leaf_may_be_created(tmp_path):
+    settings_path = tmp_path / "missing-parent" / "thumbnail_prompt" / "settings.toml"
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+
+    settings = service.get_settings()
+
+    assert settings.configuration_error == _CORRUPT_SETTINGS_MESSAGE
+    assert not (tmp_path / "missing-parent").exists()
 
 
 def test_production_factory_does_not_invoke_creating_storage_helper(
@@ -423,7 +629,9 @@ def test_production_factory_uses_dedicated_storage_path(tmp_path, monkeypatch):
 
 
 def test_generation_snapshot_is_resolved_validated_and_immutable(tmp_path):
-    service = ThumbnailPromptSettingsService(settings_path=tmp_path / "settings.toml")
+    service = ThumbnailPromptSettingsService(
+        settings_path=tmp_path / "thumbnail_prompt" / "settings.toml"
+    )
     service.update_settings(
         ThumbnailPromptSettingsPayload(
             master_prompt="Create a striking thumbnail.",
@@ -451,7 +659,9 @@ def test_generation_snapshot_is_resolved_validated_and_immutable(tmp_path):
 
 
 def test_generation_snapshot_holds_subsystem_lock_through_resolution(tmp_path):
-    service = ThumbnailPromptSettingsService(settings_path=tmp_path / "settings.toml")
+    service = ThumbnailPromptSettingsService(
+        settings_path=tmp_path / "thumbnail_prompt" / "settings.toml"
+    )
     service.update_settings(_valid_payload(master_prompt="Thumbnail direction"))
     service.set_api_key("aihubmix", "snapshot-key")
     original_validate_model = service._validate_model
@@ -485,7 +695,9 @@ def test_generation_snapshot_holds_subsystem_lock_through_resolution(tmp_path):
 
 
 def test_defaults_are_dedicated_and_aihubmix_is_selected(tmp_path):
-    service = ThumbnailPromptSettingsService(settings_path=tmp_path / "settings.toml")
+    service = ThumbnailPromptSettingsService(
+        settings_path=tmp_path / "thumbnail_prompt" / "settings.toml"
+    )
 
     assert service.get_settings().default_provider == "aihubmix"
     assert service.get_provider("aihubmix").default_model == "gpt-5.6-sol"
@@ -493,7 +705,9 @@ def test_defaults_are_dedicated_and_aihubmix_is_selected(tmp_path):
 
 
 def test_settings_hide_api_key_and_allow_custom_model(tmp_path):
-    service = ThumbnailPromptSettingsService(settings_path=tmp_path / "settings.toml")
+    service = ThumbnailPromptSettingsService(
+        settings_path=tmp_path / "thumbnail_prompt" / "settings.toml"
+    )
     service.set_api_key("aihubmix", "secret-value")
 
     updated = service.update_settings(
@@ -519,7 +733,8 @@ def test_settings_hide_api_key_and_allow_custom_model(tmp_path):
 def test_invalid_configured_default_provider_is_not_silently_replaced(
     tmp_path, configured
 ):
-    settings_path = tmp_path / "settings.toml"
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    settings_path.parent.mkdir()
     settings_path.write_text(toml.dumps({"default_provider": configured}))
 
     with pytest.raises(ThumbnailPromptError) as error:
@@ -541,7 +756,8 @@ def test_invalid_configured_default_provider_is_not_silently_replaced(
     ],
 )
 def test_invalid_provider_base_url_is_rejected_for_generation(tmp_path, base_url):
-    settings_path = tmp_path / "settings.toml"
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    settings_path.parent.mkdir()
     settings_path.write_text(toml.dumps({"aihubmix_base_url": base_url}))
 
     with pytest.raises(ThumbnailPromptError) as error:

@@ -7,6 +7,7 @@ import fcntl
 import os
 from pathlib import Path
 import stat
+import tempfile
 import threading
 import unicodedata
 from urllib.parse import urlsplit
@@ -96,6 +97,7 @@ class _PersistedSettings(BaseModel):
 class _LoadedSettings:
     configured: dict[str, object]
     status: str
+    file_identity: tuple[int, int] | None = None
 
     @property
     def corrupt(self) -> bool:
@@ -122,8 +124,18 @@ class ThumbnailPromptSettingsService:
     def __init__(self, *, settings_path: Path) -> None:
         self._settings_path = Path(settings_path)
         self._settings_name = self._settings_path.name
-        if self._settings_name in {"", ".", ".."}:
-            raise ValueError("settings path must identify a file")
+        shared_temp_root = Path(tempfile.gettempdir())
+        dedicated_root = self._settings_path.parent.parent
+        if (
+            not self._settings_path.is_absolute()
+            or ".." in self._settings_path.parts
+            or self._settings_name != "settings.toml"
+            or self._settings_path.parent.name != "thumbnail_prompt"
+            or dedicated_root in {Path("/"), Path.cwd(), shared_temp_root}
+        ):
+            raise ValueError(
+                "expected an absolute dedicated Thumbnail Prompt settings path"
+            )
 
     @property
     def settings_path(self) -> Path:
@@ -174,9 +186,9 @@ class ThumbnailPromptSettingsService:
 
         with _SETTINGS_LOCK:
             try:
-                with self._locked_directory() as directory_fd:
+                with self._locked_directory() as (directory_fd, lock_fd):
                     loaded = self._load_locked(directory_fd)
-                    configured = self._configuration_for_write(directory_fd, loaded)
+                    configured = self._configuration_for_write(loaded)
                     configured.update(
                         {
                             "master_prompt": payload.master_prompt,
@@ -199,7 +211,7 @@ class ThumbnailPromptSettingsService:
                             ]: openrouter_base_url,
                         }
                     )
-                    self._save_locked(directory_fd, configured)
+                    self._save_locked(directory_fd, lock_fd, configured, loaded)
             except _UnsafeSettingsPath as exc:
                 raise self._unsafe_settings_error() from exc
         return self._settings_from_config(configured, corrupt=False)
@@ -218,11 +230,11 @@ class ThumbnailPromptSettingsService:
 
         with _SETTINGS_LOCK:
             try:
-                with self._locked_directory() as directory_fd:
+                with self._locked_directory() as (directory_fd, lock_fd):
                     loaded = self._load_locked(directory_fd)
-                    configured = self._configuration_for_write(directory_fd, loaded)
+                    configured = self._configuration_for_write(loaded)
                     configured[self.KEY_NAMES[normalized]] = cleaned_value
-                    self._save_locked(directory_fd, configured)
+                    self._save_locked(directory_fd, lock_fd, configured, loaded)
             except _UnsafeSettingsPath as exc:
                 raise self._unsafe_settings_error() from exc
         return self._provider_from_config(normalized, configured)
@@ -237,11 +249,11 @@ class ThumbnailPromptSettingsService:
             )
         with _SETTINGS_LOCK:
             try:
-                with self._locked_directory() as directory_fd:
+                with self._locked_directory() as (directory_fd, lock_fd):
                     loaded = self._load_locked(directory_fd)
-                    configured = self._configuration_for_write(directory_fd, loaded)
+                    configured = self._configuration_for_write(loaded)
                     configured[self.KEY_NAMES[normalized]] = ""
-                    self._save_locked(directory_fd, configured)
+                    self._save_locked(directory_fd, lock_fd, configured, loaded)
             except _UnsafeSettingsPath as exc:
                 raise self._unsafe_settings_error() from exc
         return self._provider_from_config(normalized, configured)
@@ -282,7 +294,7 @@ class ThumbnailPromptSettingsService:
     def get_generation_snapshot(self) -> ThumbnailPromptGenerationSettings:
         with _SETTINGS_LOCK:
             try:
-                with self._locked_directory() as directory_fd:
+                with self._locked_directory() as (directory_fd, _lock_fd):
                     loaded = self._load_locked(directory_fd)
                     self._require_usable(loaded)
                     configured = loaded.configured
@@ -331,7 +343,7 @@ class ThumbnailPromptSettingsService:
     def _read_loaded_settings(self) -> _LoadedSettings:
         with _SETTINGS_LOCK:
             try:
-                with self._locked_directory() as directory_fd:
+                with self._locked_directory() as (directory_fd, _lock_fd):
                     return self._load_locked(directory_fd)
             except _UnsafeSettingsPath:
                 return _LoadedSettings(dict(_RECOVERY_CONFIG), "unsafe")
@@ -350,7 +362,8 @@ class ThumbnailPromptSettingsService:
             )
             os.fchmod(lock_fd, 0o600)
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            yield directory_fd
+            self._verify_lock_identity_locked(directory_fd, lock_fd)
+            yield directory_fd, lock_fd
         finally:
             if lock_fd is not None:
                 try:
@@ -361,47 +374,69 @@ class ThumbnailPromptSettingsService:
 
     def _open_directory_fd(self) -> int:
         parent = self._settings_path.parent
-        if parent.is_absolute():
-            current_fd = os.open(
-                "/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
-            )
-            components = parent.parts[1:]
-        else:
-            current_fd = os.open(
-                ".", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
-            )
-            components = parent.parts
+        current_fd = os.open(
+            "/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+        )
+        components = parent.parts[1:]
         try:
-            for component in components:
+            for index, component in enumerate(components):
                 if component in {"", "."}:
                     continue
                 if component == "..":
                     raise _UnsafeSettingsPath("parent traversal is not allowed")
-                next_fd = self._open_or_create_directory_locked(current_fd, component)
+                next_fd = self._open_or_create_directory_locked(
+                    current_fd,
+                    component,
+                    allow_create=index == len(components) - 1,
+                )
                 os.close(current_fd)
                 current_fd = next_fd
-            os.fchmod(current_fd, 0o700)
             return current_fd
         except Exception:
             os.close(current_fd)
             raise
 
     @staticmethod
-    def _open_or_create_directory_locked(parent_fd: int, component: str) -> int:
+    def _open_or_create_directory_locked(
+        parent_fd: int, component: str, *, allow_create: bool
+    ) -> int:
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
         try:
             return os.open(component, flags, dir_fd=parent_fd)
         except FileNotFoundError:
+            if not allow_create:
+                raise _UnsafeSettingsPath("settings ancestor does not exist")
             try:
                 os.mkdir(component, mode=0o700, dir_fd=parent_fd)
             except FileExistsError:
                 pass
             try:
-                return os.open(component, flags, dir_fd=parent_fd)
+                directory_fd = os.open(component, flags, dir_fd=parent_fd)
             except OSError as exc:
                 raise _UnsafeSettingsPath("unsafe settings directory") from exc
+            return directory_fd
         except OSError as exc:
             raise _UnsafeSettingsPath("unsafe settings directory") from exc
+
+    @staticmethod
+    def _verify_lock_identity_locked(directory_fd: int, lock_fd: int) -> None:
+        try:
+            held = os.fstat(lock_fd)
+            named = os.stat(
+                _LOCK_FILE_NAME,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise _UnsafeSettingsPath("settings lock identity changed") from exc
+        if (
+            not stat.S_ISREG(held.st_mode)
+            or not stat.S_ISREG(named.st_mode)
+            or held.st_nlink != 1
+            or named.st_nlink != 1
+            or (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino)
+        ):
+            raise _UnsafeSettingsPath("settings lock identity changed")
 
     @staticmethod
     def _open_regular_file_locked(
@@ -431,13 +466,14 @@ class ThumbnailPromptSettingsService:
 
     def _load_locked(self, directory_fd: int) -> _LoadedSettings:
         try:
-            file_descriptor = self._open_regular_file_locked(
-                directory_fd,
+            file_descriptor = os.open(
                 self._settings_name,
-                os.O_RDONLY,
-                require_single_link=True,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
             )
-        except _UnsafeSettingsPath as exc:
+        except FileNotFoundError:
+            return _LoadedSettings(dict(_DEFAULTS), "missing")
+        except OSError as exc:
             try:
                 file_stat = os.stat(
                     self._settings_name,
@@ -446,16 +482,30 @@ class ThumbnailPromptSettingsService:
                 )
             except FileNotFoundError:
                 return _LoadedSettings(dict(_DEFAULTS), "missing")
-            except OSError:
-                return _LoadedSettings(dict(_RECOVERY_CONFIG), "corrupt")
-            if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
-                raise exc
-            return _LoadedSettings(dict(_RECOVERY_CONFIG), "corrupt")
+            except OSError as stat_error:
+                raise _UnsafeSettingsPath("unsafe settings file") from stat_error
+            if (
+                stat.S_ISLNK(file_stat.st_mode)
+                or not stat.S_ISREG(file_stat.st_mode)
+                or file_stat.st_nlink != 1
+            ):
+                raise _UnsafeSettingsPath("unsafe settings file") from exc
+            return _LoadedSettings(
+                dict(_RECOVERY_CONFIG),
+                "corrupt",
+                (file_stat.st_dev, file_stat.st_ino),
+            )
+
+        file_stat = os.fstat(file_descriptor)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            os.close(file_descriptor)
+            raise _UnsafeSettingsPath("unsafe settings file")
+        file_identity = (file_stat.st_dev, file_stat.st_ino)
 
         try:
             persisted_bytes = self._read_bounded(file_descriptor)
         except OSError:
-            return _LoadedSettings(dict(_RECOVERY_CONFIG), "corrupt")
+            return _LoadedSettings(dict(_RECOVERY_CONFIG), "corrupt", file_identity)
         finally:
             os.close(file_descriptor)
         try:
@@ -463,14 +513,14 @@ class ThumbnailPromptSettingsService:
             persisted = toml.loads(persisted_text)
             configured = dict(_DEFAULTS)
             if not isinstance(persisted, dict):
-                return _LoadedSettings(dict(_RECOVERY_CONFIG), "corrupt")
+                return _LoadedSettings(dict(_RECOVERY_CONFIG), "corrupt", file_identity)
             configured.update(
                 {key: persisted[key] for key in _DEFAULTS if key in persisted}
             )
             validated = _PersistedSettings.model_validate(configured)
         except (UnicodeDecodeError, toml.TomlDecodeError, ValidationError, TypeError):
-            return _LoadedSettings(dict(_RECOVERY_CONFIG), "corrupt")
-        return _LoadedSettings(validated.model_dump(), "valid")
+            return _LoadedSettings(dict(_RECOVERY_CONFIG), "corrupt", file_identity)
+        return _LoadedSettings(validated.model_dump(), "valid", file_identity)
 
     @staticmethod
     def _read_bounded(file_descriptor: int) -> bytes:
@@ -487,30 +537,21 @@ class ThumbnailPromptSettingsService:
             raise OSError(errno.EFBIG, "settings file exceeds size limit")
         return content
 
-    def _configuration_for_write(
-        self, directory_fd: int, loaded: _LoadedSettings
-    ) -> dict[str, object]:
+    @staticmethod
+    def _configuration_for_write(loaded: _LoadedSettings) -> dict[str, object]:
         if loaded.status == "unsafe":
             raise _UnsafeSettingsPath("unsafe settings state")
         if loaded.preservable:
-            self._preserve_corrupt_locked(directory_fd)
             return dict(_DEFAULTS)
         return dict(loaded.configured)
 
-    def _preserve_corrupt_locked(self, directory_fd: int) -> None:
-        corrupt_name = f".corrupt-{uuid4().hex}"
-        try:
-            os.rename(
-                self._settings_name,
-                corrupt_name,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
-            )
-            os.fsync(directory_fd)
-        except OSError as exc:
-            raise _UnsafeSettingsPath("could not preserve corrupt settings") from exc
-
-    def _save_locked(self, directory_fd: int, configured: dict[str, object]) -> None:
+    def _save_locked(
+        self,
+        directory_fd: int,
+        lock_fd: int,
+        configured: dict[str, object],
+        loaded: _LoadedSettings,
+    ) -> None:
         validated = _PersistedSettings.model_validate(configured).model_dump()
         serialized = toml.dumps(validated).encode("utf-8")
         temporary_name = f".{self._settings_name}.{uuid4().hex}.tmp"
@@ -527,6 +568,11 @@ class ThumbnailPromptSettingsService:
             os.fchmod(temporary_fd, 0o600)
             os.close(temporary_fd)
             temporary_fd = None
+            self._verify_canonical_identity_locked(directory_fd, loaded.file_identity)
+            if loaded.preservable:
+                self._copy_corrupt_backup_locked(directory_fd, loaded.file_identity)
+            self._verify_canonical_identity_locked(directory_fd, loaded.file_identity)
+            self._verify_lock_identity_locked(directory_fd, lock_fd)
             os.replace(
                 temporary_name,
                 self._settings_name,
@@ -542,6 +588,82 @@ class ThumbnailPromptSettingsService:
             except FileNotFoundError:
                 pass
             raise
+
+    def _copy_corrupt_backup_locked(
+        self, directory_fd: int, expected_identity: tuple[int, int] | None
+    ) -> None:
+        if expected_identity is None:
+            raise _UnsafeSettingsPath("corrupt settings identity is missing")
+        try:
+            source_fd = os.open(
+                self._settings_name,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+        except OSError as exc:
+            raise _UnsafeSettingsPath("could not preserve corrupt settings") from exc
+        backup_name = f".corrupt-{uuid4().hex}"
+        backup_fd = None
+        backup_complete = False
+        try:
+            source_stat = os.fstat(source_fd)
+            if (
+                not stat.S_ISREG(source_stat.st_mode)
+                or source_stat.st_nlink != 1
+                or (source_stat.st_dev, source_stat.st_ino) != expected_identity
+            ):
+                raise _UnsafeSettingsPath("corrupt settings identity changed")
+            backup_fd = self._open_regular_file_locked(
+                directory_fd,
+                backup_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                mode=0o600,
+                require_single_link=True,
+            )
+            os.fchmod(backup_fd, 0o600)
+            while True:
+                chunk = os.read(source_fd, 8192)
+                if not chunk:
+                    break
+                self._write_all(backup_fd, chunk)
+            os.fsync(backup_fd)
+            os.close(backup_fd)
+            backup_fd = None
+            os.fsync(directory_fd)
+            backup_complete = True
+        finally:
+            os.close(source_fd)
+            if backup_fd is not None:
+                os.close(backup_fd)
+            if not backup_complete:
+                try:
+                    os.unlink(backup_name, dir_fd=directory_fd)
+                    os.fsync(directory_fd)
+                except FileNotFoundError:
+                    pass
+
+    def _verify_canonical_identity_locked(
+        self, directory_fd: int, expected_identity: tuple[int, int] | None
+    ) -> None:
+        try:
+            file_stat = os.stat(
+                self._settings_name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            if expected_identity is None:
+                return
+            raise _UnsafeSettingsPath("settings identity changed") from None
+        except OSError as exc:
+            raise _UnsafeSettingsPath("settings identity changed") from exc
+        if (
+            expected_identity is None
+            or not stat.S_ISREG(file_stat.st_mode)
+            or file_stat.st_nlink != 1
+            or (file_stat.st_dev, file_stat.st_ino) != expected_identity
+        ):
+            raise _UnsafeSettingsPath("settings identity changed")
 
     @staticmethod
     def _write_all(file_descriptor: int, content: bytes) -> None:

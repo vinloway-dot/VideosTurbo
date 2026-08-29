@@ -372,7 +372,8 @@ def test_generate_sanitizes_client_factory_failures(tmp_path):
 def test_generate_rejects_invalid_provider_configuration_before_client_creation(
     tmp_path, config_key, value
 ):
-    settings_path = tmp_path / "settings.toml"
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    settings_path.parent.mkdir()
     persisted = toml.dumps(
         {
             "master_prompt": "Art direction",
