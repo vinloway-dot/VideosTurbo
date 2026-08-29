@@ -139,12 +139,7 @@ def render_video_library(
                                     ):
                                         prompt = on_thumbnail_prompt(card.job_id)
                                 if prompt:
-                                    st.text_area(
-                                        "Thumbnail Prompt",
-                                        value=prompt,
-                                        key=f"thumbnail_prompt_output_{card.job_id}",
-                                        disabled=True,
-                                    )
+                                    st.code(prompt, language=None)
                                 if error := thumbnail_prompt_errors.get(card.job_id):
                                     st.error(error)
                                 delete_requested = st.button(

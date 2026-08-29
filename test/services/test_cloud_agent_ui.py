@@ -22,7 +22,7 @@ def test_video_library_prompt_action_is_card_local_and_shows_one_copyable_result
     class PromptStreamlit:
         def __init__(self):
             self.buttons = []
-            self.text_areas = []
+            self.codes = []
             self.errors = []
 
         def container(self, **_kwargs):
@@ -41,8 +41,8 @@ def test_video_library_prompt_action_is_card_local_and_shows_one_copyable_result
             self.buttons.append((label, kwargs))
             return kwargs.get("key") == "thumbnail_prompt_job-1"
 
-        def text_area(self, label, **kwargs):
-            self.text_areas.append((label, kwargs))
+        def code(self, value, **kwargs):
+            self.codes.append((value, kwargs))
 
         def error(self, message):
             self.errors.append(message)
@@ -80,13 +80,11 @@ def test_video_library_prompt_action_is_card_local_and_shows_one_copyable_result
     )
 
     assert requested == ["job-1"]
-    assert fake.text_areas == [
+    assert fake.codes == [
         (
-            "Thumbnail Prompt",
+            "ready image prompt",
             {
-                "value": "ready image prompt",
-                "key": "thumbnail_prompt_output_job-1",
-                "disabled": True,
+                "language": None,
             },
         )
     ]

@@ -132,9 +132,6 @@ def render_video_library(
     """Render completed videos and keep pagination/deletion state page-local."""
     ui_state.setdefault("cloud_agent_video_library_page", 1)
     ui_state.setdefault("cloud_agent_video_delete_pending_id", "")
-    ui_state.setdefault("thumbnail_prompt_result_by_job", {})
-    ui_state.setdefault("thumbnail_prompt_error_by_job", {})
-    ui_state.setdefault("thumbnail_prompt_busy_by_job", {})
     page = max(1, int(ui_state["cloud_agent_video_library_page"] or 1))
     ui_state["cloud_agent_video_library_page"] = page
     try:
@@ -160,9 +157,10 @@ def render_video_library(
                 rerun()
 
     def request_thumbnail_prompt(job_id: str) -> str | None:
-        busy = ui_state["thumbnail_prompt_busy_by_job"]
+        busy = ui_state.setdefault("thumbnail_prompt_busy_by_job", {})
         busy[job_id] = True
-        ui_state["thumbnail_prompt_error_by_job"].pop(job_id, None)
+        errors = ui_state.setdefault("thumbnail_prompt_error_by_job", {})
+        errors.pop(job_id, None)
         try:
             prompt = generate_thumbnail_prompt(job_id)
         except (requests.RequestException, ValueError) as exc:
@@ -170,7 +168,7 @@ def render_video_library(
             return None
         finally:
             busy.pop(job_id, None)
-        ui_state["thumbnail_prompt_result_by_job"][job_id] = prompt
+        ui_state.setdefault("thumbnail_prompt_result_by_job", {})[job_id] = prompt
         return prompt
 
     def select_page(selected_page: int) -> None:
@@ -189,11 +187,11 @@ def render_video_library(
             on_delete_confirm=confirm_delete,
             on_delete_cancel=cancel_delete,
             on_thumbnail_prompt=request_thumbnail_prompt,
-            thumbnail_prompt_results=ui_state["thumbnail_prompt_result_by_job"],
-            thumbnail_prompt_errors=ui_state["thumbnail_prompt_error_by_job"],
+            thumbnail_prompt_results=ui_state.get("thumbnail_prompt_result_by_job", {}),
+            thumbnail_prompt_errors=ui_state.get("thumbnail_prompt_error_by_job", {}),
             thumbnail_prompt_busy_ids={
                 job_id
-                for job_id, is_busy in ui_state["thumbnail_prompt_busy_by_job"].items()
+                for job_id, is_busy in ui_state.get("thumbnail_prompt_busy_by_job", {}).items()
                 if is_busy
             },
             on_page=select_page,
