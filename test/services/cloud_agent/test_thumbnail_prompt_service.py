@@ -100,6 +100,13 @@ def test_generate_rejects_labelled_or_alternative_provider_output(tmp_path, comp
         service.generate_for_job("job-1")
 
 
+def test_generate_rejects_lettered_list_alternatives(tmp_path):
+    service = service_with_completion(tmp_path, "A. first prompt\nB. second prompt")
+
+    with pytest.raises(ThumbnailPromptError, match="ผลลัพธ์"):
+        service.generate_for_job("job-1")
+
+
 def test_generate_keeps_normal_image_prompt_prose(tmp_path):
     prompt = "Cinematic solar flare above Earth with dramatic golden rim light, 16:9."
     service = service_with_completion(tmp_path, prompt)

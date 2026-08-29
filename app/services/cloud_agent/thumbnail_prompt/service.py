@@ -15,7 +15,8 @@ from app.services.cloud_agent.thumbnail_prompt.settings import ThumbnailPromptSe
 
 _DISALLOWED_OUTPUT_MARKER = re.compile(
     r"(?im)^\s*(?:#{1,6}\s+\S|(?:option|alternative|choice)\b"
-    r"(?:\s*(?:\d+|[a-z]))?\s*[:.)-]|(?:prompt|response|result)\s*:)"
+    r"(?:\s*(?:\d+|[a-z]))?\s*[:.)-]|(?:prompt|response|result)\s*:|"
+    r"(?:[a-z]|\d+)[.)]\s+\S)"
 )
 
 
