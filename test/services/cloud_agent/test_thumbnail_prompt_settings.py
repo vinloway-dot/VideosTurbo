@@ -223,6 +223,100 @@ def test_repeated_failed_atomic_repairs_do_not_accumulate_corrupt_backups(
     assert list(settings_path.parent.glob(".settings.toml.*.tmp")) == []
 
 
+def test_repeated_source_close_failures_remove_provisional_corrupt_backups(
+    tmp_path, monkeypatch
+):
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    settings_path.parent.mkdir(mode=0o700)
+    corrupt_bytes = b'[broken = "source-close-secret-sentinel"'
+    settings_path.write_bytes(corrupt_bytes)
+    settings_path.chmod(0o600)
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+    real_close = os.close
+    real_fsync = os.fsync
+    canonical_close_count = 0
+    directory_fsync_count = 0
+
+    def close_backup_source_then_report_failure(file_descriptor):
+        nonlocal canonical_close_count
+        target = os.readlink(f"/proc/self/fd/{file_descriptor}")
+        if target == str(settings_path):
+            canonical_close_count += 1
+            if canonical_close_count % 2 == 0:
+                real_close(file_descriptor)
+                raise OSError("injected backup source close failure")
+        return real_close(file_descriptor)
+
+    def record_fsync(file_descriptor):
+        nonlocal directory_fsync_count
+        if stat.S_ISDIR(os.fstat(file_descriptor).st_mode):
+            directory_fsync_count += 1
+        return real_fsync(file_descriptor)
+
+    monkeypatch.setattr(
+        "app.services.cloud_agent.thumbnail_prompt.settings.os.close",
+        close_backup_source_then_report_failure,
+    )
+    monkeypatch.setattr(
+        "app.services.cloud_agent.thumbnail_prompt.settings.os.fsync", record_fsync
+    )
+
+    for _ in range(3):
+        with pytest.raises(ThumbnailPromptError) as error:
+            service.update_settings(_valid_payload())
+        assert error.value.code == "THUMBNAIL_PROMPT_SETTINGS_UNSAFE"
+
+    assert canonical_close_count == 6
+    assert settings_path.read_bytes() == corrupt_bytes
+    assert list(settings_path.parent.glob(".corrupt-*")) == []
+    assert list(settings_path.parent.glob(".settings.toml.*.tmp")) == []
+    assert directory_fsync_count == 6
+
+
+def test_backup_close_failure_does_not_close_reused_descriptor(tmp_path, monkeypatch):
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    settings_path.parent.mkdir(mode=0o700)
+    corrupt_bytes = b'[broken = "backup-close-secret-sentinel"'
+    settings_path.write_bytes(corrupt_bytes)
+    settings_path.chmod(0o600)
+    unrelated_path = tmp_path / "unrelated-open-file"
+    unrelated_path.write_bytes(b"unrelated-open-file-sentinel")
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+    real_close = os.close
+    replacement_fd = None
+
+    def close_backup_then_reuse_descriptor(file_descriptor):
+        nonlocal replacement_fd
+        target = os.readlink(f"/proc/self/fd/{file_descriptor}")
+        if replacement_fd is None and Path(target).name.startswith(".corrupt-"):
+            real_close(file_descriptor)
+            replacement_fd = os.open(unrelated_path, os.O_RDONLY | os.O_CLOEXEC)
+            assert replacement_fd == file_descriptor
+            raise OSError("injected backup close failure")
+        return real_close(file_descriptor)
+
+    monkeypatch.setattr(
+        "app.services.cloud_agent.thumbnail_prompt.settings.os.close",
+        close_backup_then_reuse_descriptor,
+    )
+
+    try:
+        with pytest.raises(OSError, match="injected backup close failure"):
+            service.update_settings(_valid_payload())
+
+        assert replacement_fd is not None
+        assert os.read(replacement_fd, 32) == b"unrelated-open-file-sentinel"
+        assert settings_path.read_bytes() == corrupt_bytes
+        assert list(settings_path.parent.glob(".corrupt-*")) == []
+        assert list(settings_path.parent.glob(".settings.toml.*.tmp")) == []
+    finally:
+        if replacement_fd is not None:
+            try:
+                real_close(replacement_fd)
+            except OSError:
+                pass
+
+
 def test_hard_linked_settings_file_is_unsafe_and_cannot_be_repaired(tmp_path):
     settings_dir = tmp_path / "thumbnail_prompt"
     settings_dir.mkdir(mode=0o700)

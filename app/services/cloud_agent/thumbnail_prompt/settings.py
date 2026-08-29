@@ -802,21 +802,32 @@ class ThumbnailPromptSettingsService:
                     raise _UnsafeSettingsPath("corrupt settings exceeds backup limit")
                 self._write_all(backup_fd, chunk)
             os.fsync(backup_fd)
-            os.close(backup_fd)
+            closing_fd = backup_fd
             backup_fd = None
+            os.close(closing_fd)
             os.fsync(directory_fd)
+            closing_fd = source_fd
+            source_fd = None
+            try:
+                os.close(closing_fd)
+            except Exception as exc:
+                raise _UnsafeSettingsPath("settings backup cleanup failed") from exc
             backup_complete = True
-            return _PreservedBackup(backup_name, backup_identity)
         finally:
             active_exception = sys.exc_info()[0] is not None
             cleanup_error = None
-            try:
-                os.close(source_fd)
-            except Exception as exc:
-                cleanup_error = exc
-            if backup_fd is not None:
+            if source_fd is not None:
+                closing_fd = source_fd
+                source_fd = None
                 try:
-                    os.close(backup_fd)
+                    os.close(closing_fd)
+                except Exception as exc:
+                    cleanup_error = exc
+            if backup_fd is not None:
+                closing_fd = backup_fd
+                backup_fd = None
+                try:
+                    os.close(closing_fd)
                 except Exception as exc:
                     cleanup_error = cleanup_error or exc
             if not backup_complete and backup_identity is not None:
@@ -831,6 +842,7 @@ class ThumbnailPromptSettingsService:
                 raise _UnsafeSettingsPath("settings backup cleanup failed") from (
                     cleanup_error
                 )
+        return _PreservedBackup(backup_name, backup_identity)
 
     def _rollback_corrupt_backup_locked(
         self,
