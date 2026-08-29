@@ -34,6 +34,10 @@ from app.services.cloud_agent.research.runtime import ResearchToolRuntime
 from app.services.cloud_agent.research.service import ResearchScriptService
 from app.services.cloud_agent.research.settings import ResearchSettingsService
 from app.services.cloud_agent.research.store import ResearchDraftStore
+from app.services.cloud_agent.thumbnail_prompt.service import ThumbnailPromptService
+from app.services.cloud_agent.thumbnail_prompt.settings import (
+    ThumbnailPromptSettingsService,
+)
 
 
 def build_workflow(*, store: CloudJobStore | None = None) -> CloudAgentWorkflow:
@@ -117,6 +121,19 @@ def build_pre_flow_retry_service() -> PreFlowRetryService:
 def build_cloud_tts_settings_service() -> CloudTTSSettingsService:
     """Compose safe TTS settings from the existing process configuration."""
     return CloudTTSSettingsService()
+
+
+def build_thumbnail_prompt_settings_service() -> ThumbnailPromptSettingsService:
+    """Compose the isolated Thumbnail Prompt settings boundary."""
+    return ThumbnailPromptSettingsService()
+
+
+def build_thumbnail_prompt_service() -> ThumbnailPromptService:
+    """Compose Thumbnail Prompt generation from its dedicated settings only."""
+    return ThumbnailPromptService(
+        storage=CloudJobStorage(),
+        settings=build_thumbnail_prompt_settings_service(),
+    )
 
 
 def build_draft_voice_service() -> DraftVoiceService:

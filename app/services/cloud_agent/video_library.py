@@ -62,6 +62,11 @@ class CloudVideoLibraryService:
         )
         return VideoLibraryPage.from_items(visible, page=page, page_size=page_size)
 
+    def get_visible_job(self, job_id: str) -> CloudJobRecord | None:
+        """Return one completed, playable library job without exposing hidden jobs."""
+        job = self._store.get_job(job_id)
+        return job if job is not None and self._is_visible(job) else None
+
     def delete_video(self, job_id: str) -> None:
         job = self._store.get_job(job_id)
         if job is None or not self._is_visible(job):

@@ -112,6 +112,19 @@ class ThumbnailPromptSettingsService:
             config.save_config()
         return self.get_provider(normalized)
 
+    def remove_api_key(
+        self, provider_id: str, confirmed: bool
+    ) -> ThumbnailPromptProviderMetadata:
+        normalized = self._require_provider(provider_id)
+        if confirmed is not True:
+            raise ThumbnailPromptError(
+                "THUMBNAIL_PROMPT_REQUEST_INVALID", "key removal not confirmed"
+            )
+        with config.runtime_config_lock():
+            config.app.pop(self.KEY_NAMES[normalized], None)
+            config.save_config()
+        return self.get_provider(normalized)
+
     def get_api_key_for_generation(self, provider_id: str) -> SecretStr:
         normalized = self._require_provider(provider_id)
         value = self._configured_text(self.KEY_NAMES[normalized])

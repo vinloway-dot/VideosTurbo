@@ -35,6 +35,8 @@ from app.services.cloud_agent.factory import (
     build_research_settings_service,
     build_draft_voice_service,
     build_cloud_agent_defaults_service,
+    build_thumbnail_prompt_service,
+    build_thumbnail_prompt_settings_service,
 )
 from app.services.cloud_agent.draft_voice import DraftVoiceError, DraftVoiceService
 from app.services.cloud_agent.defaults import CloudAgentDefaultsError, CloudAgentDefaultsService
@@ -54,6 +56,10 @@ from app.services.cloud_agent.tts_settings import (
     CloudTTSSettingsService,
 )
 from app.services.cloud_agent.storage import CloudJobStorage
+from app.services.cloud_agent.thumbnail_prompt.errors import ThumbnailPromptError
+from app.services.cloud_agent.thumbnail_prompt.models import ThumbnailPromptSettingsPayload
+from app.services.cloud_agent.thumbnail_prompt.service import ThumbnailPromptService
+from app.services.cloud_agent.thumbnail_prompt.settings import ThumbnailPromptSettingsService
 from app.services.cloud_agent.video_library import (
     CloudVideoLibraryService,
     VideoLibraryNotFoundError,
@@ -127,6 +133,21 @@ _RESEARCH_HTTP_STATUS = {
     "PROVIDER_TIMEOUT": 504,
     "URL_FETCH_FAILED": 502,
 }
+_THUMBNAIL_PROMPT_HTTP_STATUS = {
+    "PROVIDER_API_KEY_MISSING": 422,
+    "PROVIDER_AUTHENTICATION_FAILED": 401,
+    "PROVIDER_TIMEOUT": 504,
+    "PROVIDER_REQUEST_FAILED": 502,
+}
+_THUMBNAIL_PROMPT_PUBLIC_MESSAGES = {
+    "PROVIDER_API_KEY_MISSING": "thumbnail prompt provider API key is not configured",
+    "PROVIDER_AUTHENTICATION_FAILED": "thumbnail prompt provider authentication failed",
+    "PROVIDER_TIMEOUT": "thumbnail prompt provider timed out",
+    "PROVIDER_REQUEST_FAILED": "thumbnail prompt provider request failed",
+    "JOB_MASTER_PROMPT_UNAVAILABLE": "completed video prompt is unavailable",
+    "THUMBNAIL_MASTER_PROMPT_MISSING": "thumbnail master prompt is not configured",
+    "THUMBNAIL_PROMPT_RESPONSE_INVALID": "thumbnail prompt provider returned an invalid response",
+}
 
 
 class ResearchSettingsPayload(BaseModel):
@@ -164,6 +185,22 @@ class ConfirmResearchKeyRemoval(BaseModel):
     confirmed: bool
 
 
+class ThumbnailPromptAPIKeyPatch(BaseModel):
+    api_key: str = Field(min_length=1, max_length=4096)
+
+    @field_validator("api_key")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("api key must not be blank")
+        return normalized
+
+
+class ConfirmThumbnailPromptKeyRemoval(BaseModel):
+    confirmed: bool
+
+
 def get_cloud_job_store() -> CloudJobStore:
     return CloudJobStore(str(config.app["cloud_agent_db_path"]))
 
@@ -191,6 +228,14 @@ def get_pre_flow_retry_service() -> PreFlowRetryService:
 
 def get_cloud_tts_settings_service() -> CloudTTSSettingsService:
     return build_cloud_tts_settings_service()
+
+
+def get_thumbnail_prompt_settings_service() -> ThumbnailPromptSettingsService:
+    return build_thumbnail_prompt_settings_service()
+
+
+def get_thumbnail_prompt_service() -> ThumbnailPromptService:
+    return build_thumbnail_prompt_service()
 
 
 def get_draft_voice_service() -> DraftVoiceService:
@@ -244,6 +289,18 @@ def _require_job(store: CloudJobStore, job_id: str):
 
 def _research_http_status(code: str) -> int:
     return _RESEARCH_HTTP_STATUS.get(str(code or "").strip(), 422)
+
+
+def _thumbnail_prompt_http_exception(exc: ThumbnailPromptError) -> HttpException:
+    code = str(exc.code or "").strip()
+    return HttpException(
+        task_id="thumbnail-prompt",
+        status_code=_THUMBNAIL_PROMPT_HTTP_STATUS.get(code, 422),
+        message=_THUMBNAIL_PROMPT_PUBLIC_MESSAGES.get(
+            code, "thumbnail prompt request could not be completed"
+        ),
+        data={"code": code},
+    )
 
 
 def _safe_accounting(value) -> dict:
@@ -612,6 +669,84 @@ def list_research_providers(
     )
 
 
+@router.get("/cloud-agent/thumbnail-prompt/settings")
+def get_thumbnail_prompt_settings(
+    request: Request,
+    service: ThumbnailPromptSettingsService = Depends(
+        get_thumbnail_prompt_settings_service
+    ),
+):
+    del request
+    return utils.get_response(200, service.get_settings().model_dump(mode="json"))
+
+
+@router.put("/cloud-agent/thumbnail-prompt/settings")
+def update_thumbnail_prompt_settings(
+    body: ThumbnailPromptSettingsPayload,
+    request: Request,
+    service: ThumbnailPromptSettingsService = Depends(
+        get_thumbnail_prompt_settings_service
+    ),
+):
+    del request
+    try:
+        data = service.update_settings(body).model_dump(mode="json")
+    except ThumbnailPromptError as exc:
+        raise _thumbnail_prompt_http_exception(exc) from exc
+    return utils.get_response(200, data)
+
+
+@router.get("/cloud-agent/thumbnail-prompt/providers")
+def list_thumbnail_prompt_providers(
+    request: Request,
+    service: ThumbnailPromptSettingsService = Depends(
+        get_thumbnail_prompt_settings_service
+    ),
+):
+    del request
+    try:
+        data = [item.model_dump(mode="json") for item in service.list_providers()]
+    except ThumbnailPromptError as exc:
+        raise _thumbnail_prompt_http_exception(exc) from exc
+    return utils.get_response(200, data)
+
+
+@router.put("/cloud-agent/thumbnail-prompt/providers/{provider_id}/api-key")
+def update_thumbnail_prompt_provider_api_key(
+    provider_id: str,
+    body: ThumbnailPromptAPIKeyPatch,
+    request: Request,
+    service: ThumbnailPromptSettingsService = Depends(
+        get_thumbnail_prompt_settings_service
+    ),
+):
+    del request
+    try:
+        data = service.set_api_key(provider_id, body.api_key).model_dump(mode="json")
+    except ThumbnailPromptError as exc:
+        raise _thumbnail_prompt_http_exception(exc) from exc
+    return utils.get_response(200, data)
+
+
+@router.delete("/cloud-agent/thumbnail-prompt/providers/{provider_id}/api-key")
+def delete_thumbnail_prompt_provider_api_key(
+    provider_id: str,
+    body: ConfirmThumbnailPromptKeyRemoval,
+    request: Request,
+    service: ThumbnailPromptSettingsService = Depends(
+        get_thumbnail_prompt_settings_service
+    ),
+):
+    del request
+    try:
+        data = service.remove_api_key(provider_id, body.confirmed).model_dump(
+            mode="json"
+        )
+    except ThumbnailPromptError as exc:
+        raise _thumbnail_prompt_http_exception(exc) from exc
+    return utils.get_response(200, data)
+
+
 @router.get("/cloud-agent/research/settings")
 def get_research_settings(
     request: Request,
@@ -917,6 +1052,27 @@ def delete_cloud_agent_video(
             message="cloud agent video not found",
         ) from exc
     return utils.get_response(200)
+
+
+@router.post("/cloud-agent/videos/{job_id}/thumbnail-prompt")
+def generate_thumbnail_prompt(
+    job_id: str,
+    request: Request,
+    library: CloudVideoLibraryService = Depends(get_cloud_video_library_service),
+    thumbnails: ThumbnailPromptService = Depends(get_thumbnail_prompt_service),
+):
+    del request
+    job = library.get_visible_job(job_id)
+    if job is None:
+        raise HttpException(
+            task_id="thumbnail-prompt",
+            status_code=404,
+            message="completed video not found",
+        )
+    try:
+        return utils.get_response(200, {"prompt": thumbnails.generate_for_job(job.id)})
+    except ThumbnailPromptError as exc:
+        raise _thumbnail_prompt_http_exception(exc) from exc
 
 
 @router.get("/cloud-agent/jobs/{job_id}/final")

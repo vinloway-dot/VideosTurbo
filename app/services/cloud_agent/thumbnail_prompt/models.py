@@ -16,9 +16,9 @@ class ThumbnailPromptProviderMetadata(BaseModel):
 class ThumbnailPromptSettingsPayload(BaseModel):
     master_prompt: str = Field(min_length=1, max_length=8000)
     default_provider: Literal["aihubmix", "openrouter"]
-    aihubmix_model: str
+    aihubmix_model: str = Field(max_length=256)
     aihubmix_custom_model_id: str = Field(default="", max_length=256)
-    openrouter_model: str
+    openrouter_model: str = Field(max_length=256)
     openrouter_custom_model_id: str = Field(default="", max_length=256)
 
     @field_validator(
