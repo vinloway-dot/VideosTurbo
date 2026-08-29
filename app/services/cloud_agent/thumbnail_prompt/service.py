@@ -55,34 +55,12 @@ _MARKER_TEXT_LABELS = frozenset(
 _MARKER_SUFFIX_LABELS = frozenset(
     label.replace(" ", "") for label in _MARKER_TEXT_LABELS
 )
+_TEXT_MARKER_INITIALS = frozenset(label[0] for label in _MARKER_TEXT_LABELS)
 _TEXT_LABEL_DELIMITERS = frozenset({":", ".", ")", "-", "–", "—"})
+_INLINE_TEXT_LABEL_DELIMITERS = frozenset({":", ")", "–", "—"})
 _LETTER_LABEL_DELIMITERS = frozenset({":", ".", ")", "-", "–", "—"})
-_SIMPLE_SEGMENT_SEPARATORS = frozenset(
-    {
-        ";",
-        "|",
-        ",",
-        ".",
-        ":",
-        "/",
-        "–",
-        "—",
-        "•",
-        "!",
-        "?",
-        "(",
-        "[",
-        "{",
-        "؛",
-        "。",
-        "、",
-        "，",
-        "；",
-        "：",
-    }
-)
-_SPACED_SEGMENT_SEPARATORS = frozenset({"-"})
 _MARKER_PREFIX_WRAPPERS = frozenset({'"', "'", "“", "”", "‘", "’", "(", "[", "{"})
+_MAX_TEXT_MARKER_SPAN = 48
 _MAX_RATIO_COMPONENT = 1_000_000
 _MAX_RATIO_IMBALANCE = 100
 _MAX_NUMERIC_TOKEN_DIGITS = 12
@@ -104,31 +82,37 @@ def _canonical_validation_text(text: str) -> str:
 
 
 def _has_alternative_marker(text: str) -> bool:
-    """Return whether a segment begins with a known text or numbered label."""
+    """Return whether the output contains a known text or numbered label."""
     validation_text = _canonical_validation_text(text)
     starts = tuple(dict.fromkeys(_segment_starts(validation_text)))
-    return any(
-        _segment_has_marker(validation_text, start) for start in starts
-    ) or _has_sequential_colon_markers(validation_text)
+    return (
+        any(_segment_has_marker(validation_text, start) for start in starts)
+        or _has_inline_text_marker(validation_text)
+        or _has_sequential_colon_markers(validation_text)
+    )
 
 
 def _segment_starts(text: str):
     yield 0
     for index, character in enumerate(text):
-        if character == "." and _period_belongs_to_initialism(text, index):
+        if character == "." and (
+            _period_belongs_to_initialism(text, index)
+            or _period_belongs_to_decimal(text, index)
+        ):
             continue
         if character == ":" and _colon_belongs_to_ratio(text, index):
             continue
-        if character in _SIMPLE_SEGMENT_SEPARATORS:
+        if unicodedata.category(character)[0] in {"P", "S"}:
             yield index + 1
-        elif (
-            character in _SPACED_SEGMENT_SEPARATORS
-            and index > 0
-            and index + 1 < len(text)
-            and text[index - 1].isspace()
-            and text[index + 1].isspace()
-        ):
-            yield index + 1
+
+
+def _period_belongs_to_decimal(text: str, period_index: int) -> bool:
+    return (
+        period_index > 0
+        and period_index + 1 < len(text)
+        and text[period_index - 1].isdecimal()
+        and text[period_index + 1].isdecimal()
+    )
 
 
 def _colon_belongs_to_ratio(text: str, colon_index: int) -> bool:
@@ -281,17 +265,28 @@ def _starts_with_letter_marker(text: str, start: int) -> bool:
 
 
 def _starts_with_text_marker(text: str, start: int) -> bool:
+    return _text_marker(text, start) is not None
+
+
+def _text_marker(text: str, start: int) -> tuple[int, str] | None:
     cursor = start
-    while cursor < len(text) and (
+    limit = min(len(text), start + _MAX_TEXT_MARKER_SPAN)
+    while cursor < limit and (
         text[cursor].isalnum() or text[cursor].isspace() or text[cursor] == "#"
     ):
         cursor += 1
-    if cursor == len(text) or text[cursor] not in _TEXT_LABEL_DELIMITERS:
-        return False
+    if cursor == len(text):
+        return None
+    if cursor == limit and (
+        text[cursor].isalnum() or text[cursor].isspace() or text[cursor] == "#"
+    ):
+        return None
+    if text[cursor] not in _TEXT_LABEL_DELIMITERS:
+        return None
 
     label = " ".join(text[start:cursor].casefold().split())
     if label in _MARKER_TEXT_LABELS:
-        return True
+        return cursor, text[cursor]
     compact_label = label.replace(" ", "")
     for base_label in _MARKER_SUFFIX_LABELS:
         if not compact_label.startswith(base_label):
@@ -300,6 +295,29 @@ def _starts_with_text_marker(text: str, start: int) -> bool:
         if suffix.startswith("#"):
             suffix = suffix[1:]
         if suffix.isdecimal() or (len(suffix) == 1 and suffix.isalpha()):
+            return cursor, text[cursor]
+    return None
+
+
+def _has_inline_text_marker(text: str) -> bool:
+    for start, character in enumerate(text):
+        if not (character.isascii() and character.isalpha()):
+            continue
+        if character.casefold() not in _TEXT_MARKER_INITIALS:
+            continue
+        if start > 0 and (text[start - 1].isalnum() or text[start - 1] == "#"):
+            continue
+        marker = _text_marker(text, start)
+        if marker is None:
+            continue
+        delimiter_index, delimiter = marker
+        if delimiter in _INLINE_TEXT_LABEL_DELIMITERS:
+            return True
+        if (
+            delimiter == "-"
+            and delimiter_index + 1 < len(text)
+            and text[delimiter_index + 1].isspace()
+        ):
             return True
     return False
 
