@@ -42,7 +42,8 @@ class ThumbnailPromptSettings(BaseModel):
     """Readable settings state; the global prompt may be unconfigured."""
 
     master_prompt: str = Field(default="", max_length=8000)
-    default_provider: Literal["aihubmix", "openrouter"]
+    default_provider: Literal["aihubmix", "openrouter"] | None
+    configuration_error: str | None = None
     aihubmix_model: str
     aihubmix_custom_model_id: str = Field(default="", max_length=256)
     aihubmix_base_url: str = Field(max_length=2048)

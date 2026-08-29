@@ -1052,7 +1052,10 @@ def _render_thumbnail_prompt_settings(*, ui_state, settings, provider_catalog):
         st.error("Thumbnail provider metadata is unavailable.")
         return
 
+    configuration_error = str(settings.get("configuration_error") or "").strip()
     for key, value in settings.items():
+        if key == "configuration_error":
+            continue
         ui_state.setdefault(f"thumbnail_prompt_{key}", value)
 
     selected_provider = str(
@@ -1060,7 +1063,7 @@ def _render_thumbnail_prompt_settings(*, ui_state, settings, provider_catalog):
     )
     if selected_provider not in provider_ids:
         selected_provider = provider_ids[0]
-        ui_state["thumbnail_prompt_default_provider"] = selected_provider
+    ui_state["thumbnail_prompt_default_provider"] = selected_provider
     selected_metadata = provider_by_id[selected_provider]
     model_key = f"thumbnail_prompt_{selected_provider}_model"
     custom_model_key = f"thumbnail_prompt_{selected_provider}_custom_model_id"
@@ -1070,6 +1073,8 @@ def _render_thumbnail_prompt_settings(*, ui_state, settings, provider_catalog):
 
     with st.container(key="thumbnail_prompt_settings", border=True):
         st.subheader("Thumbnail Master Prompt")
+        if configuration_error:
+            st.error(configuration_error)
         st.text_area(
             "Thumbnail Master Prompt",
             key="thumbnail_prompt_master_prompt",

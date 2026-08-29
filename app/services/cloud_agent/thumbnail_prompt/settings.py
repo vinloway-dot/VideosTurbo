@@ -31,6 +31,10 @@ _PROVIDERS = {
         "custom_model_name": "cloud_agent_thumbnail_prompt_openrouter_custom_model",
     },
 }
+_INVALID_DEFAULT_PROVIDER_MESSAGE = (
+    "Saved default thumbnail provider is invalid. "
+    "Select AIHubMix or OpenRouter and save Thumbnail Prompt Settings."
+)
 
 
 class ThumbnailPromptSettingsService:
@@ -59,11 +63,20 @@ class ThumbnailPromptSettingsService:
         )
 
     def get_settings(self) -> ThumbnailPromptSettings:
+        configured_provider = self._configured_text(
+            "cloud_agent_thumbnail_prompt_default_provider"
+        )
+        readable_provider = (
+            configured_provider if configured_provider in _PROVIDERS else None
+        )
         return ThumbnailPromptSettings(
             master_prompt=self._configured_text(
                 "cloud_agent_thumbnail_prompt_master_prompt"
             ),
-            default_provider=self.get_configured_provider_id(),
+            default_provider=readable_provider,
+            configuration_error=(
+                None if readable_provider else _INVALID_DEFAULT_PROVIDER_MESSAGE
+            ),
             aihubmix_model=self._configured_text(_PROVIDERS["aihubmix"]["model_name"]),
             aihubmix_custom_model_id=self._configured_text(
                 _PROVIDERS["aihubmix"]["custom_model_name"]

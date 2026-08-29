@@ -14,8 +14,9 @@ from app.services.cloud_agent.thumbnail_prompt.settings import (
 
 
 class FakeCompletionClient:
-    def __init__(self, content):
+    def __init__(self, content, *, choice_count=1):
         self.content = content
+        self.choice_count = choice_count
         self.messages = []
         self.chat = SimpleNamespace(
             completions=SimpleNamespace(create=self.create),
@@ -25,7 +26,10 @@ class FakeCompletionClient:
         self.model = model
         self.messages = messages
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=self.content))]
+            choices=[
+                SimpleNamespace(message=SimpleNamespace(content=self.content))
+                for _ in range(self.choice_count)
+            ]
         )
 
 
@@ -130,6 +134,53 @@ def test_generate_rejects_lettered_list_alternatives(tmp_path):
 )
 def test_generate_rejects_markdown_or_multiple_alternatives(tmp_path, completion):
     service = service_with_completion(tmp_path, completion)
+
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.generate_for_job("job-1")
+
+    assert error.value.code == "THUMBNAIL_PROMPT_RESPONSE_INVALID"
+
+
+@pytest.mark.parametrize(
+    "completion",
+    [
+        "> Solar flare over Earth",
+        "`Solar flare over Earth`",
+        "Solar flare over [Earth](https://example.invalid/earth)",
+        "*Solar flare over Earth*",
+        "_Solar flare over Earth_",
+        "Solar *dramatic* flare over Earth",
+        "Solar _dramatic_ flare over Earth",
+        "Solar flare over Earth\nEclipse over Earth",
+        "Solar flare over Earth\n\nEclipse over Earth",
+    ],
+)
+def test_generate_rejects_non_plain_or_unlabelled_multiple_prompts(
+    tmp_path, completion
+):
+    service = service_with_completion(tmp_path, completion)
+
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.generate_for_job("job-1")
+
+    assert error.value.code == "THUMBNAIL_PROMPT_RESPONSE_INVALID"
+
+
+@pytest.mark.parametrize("choice_count", [0, 2])
+def test_generate_requires_exactly_one_provider_choice(tmp_path, choice_count):
+    storage = CloudJobStorage(tmp_path / "jobs")
+    storage.write_inputs(
+        "job-1", script="script", master_prompt="FULL VIDEO MASTER PROMPT"
+    )
+    service = ThumbnailPromptService(
+        storage=storage,
+        settings=ready_settings(),
+        clients={
+            "aihubmix": FakeCompletionClient(
+                "Solar flare over Earth", choice_count=choice_count
+            )
+        },
+    )
 
     with pytest.raises(ThumbnailPromptError) as error:
         service.generate_for_job("job-1")

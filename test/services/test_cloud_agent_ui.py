@@ -1144,6 +1144,104 @@ def test_thumbnail_settings_render_selected_provider_base_url(
     ) in fake.text_inputs
 
 
+def test_thumbnail_settings_invalid_saved_provider_shows_recovery_and_can_be_saved(
+    monkeypatch,
+):
+    class ThumbnailSettingsStreamlit:
+        def __init__(self, state):
+            self.session_state = state
+            self.errors = []
+            self.selectboxes = []
+            self.reruns = 0
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def subheader(self, _label):
+            return None
+
+        def error(self, message):
+            self.errors.append(message)
+
+        def success(self, _message):
+            return None
+
+        def text_area(self, _label, **_kwargs):
+            return None
+
+        def selectbox(self, label, *, options, key, **_kwargs):
+            self.selectboxes.append((label, tuple(options), key))
+            return self.session_state.get(key, options[0])
+
+        def text_input(self, _label, **_kwargs):
+            return ""
+
+        def button(self, _label, **kwargs):
+            return kwargs.get("key") == "thumbnail_prompt_save_settings"
+
+        def caption(self, _label):
+            return None
+
+        def rerun(self):
+            self.reruns += 1
+
+    recovery_message = (
+        "Saved default thumbnail provider is invalid. "
+        "Select AIHubMix or OpenRouter and save Thumbnail Prompt Settings."
+    )
+    state = {}
+    fake = ThumbnailSettingsStreamlit(state)
+    saved_payloads = []
+    monkeypatch.setattr(cloud_agent, "st", fake)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_save_thumbnail_prompt_settings",
+        lambda payload: (
+            saved_payloads.append(payload)
+            or {
+                **cloud_agent._thumbnail_prompt_default_settings(),
+                "default_provider": payload["default_provider"],
+                "configuration_error": None,
+            }
+        ),
+    )
+
+    cloud_agent._render_thumbnail_prompt_settings(
+        ui_state=state,
+        settings={
+            **cloud_agent._thumbnail_prompt_default_settings(),
+            "default_provider": None,
+            "configuration_error": recovery_message,
+        },
+        provider_catalog=[
+            {
+                "id": "aihubmix",
+                "label": "AIHubMix",
+                "models": ["gpt-5.6-sol", "custom"],
+                "default_model": "gpt-5.6-sol",
+                "api_key_configured": False,
+            },
+            {
+                "id": "openrouter",
+                "label": "OpenRouter",
+                "models": ["openai/gpt-5.6-sol", "custom"],
+                "default_model": "openai/gpt-5.6-sol",
+                "api_key_configured": False,
+            },
+        ],
+    )
+
+    assert fake.errors == [recovery_message]
+    assert saved_payloads[0]["default_provider"] == "aihubmix"
+    assert state["thumbnail_prompt_default_provider"] == "aihubmix"
+    assert fake.reruns == 1
+    assert (
+        "Default Thumbnail Provider",
+        ("aihubmix", "openrouter"),
+        "thumbnail_prompt_default_provider",
+    ) in fake.selectboxes
+
+
 def test_research_summary_never_contains_raw_source_body_or_secret_fields():
     summary = cloud_agent_ui.research_summary(
         research_draft_id="draft-1",

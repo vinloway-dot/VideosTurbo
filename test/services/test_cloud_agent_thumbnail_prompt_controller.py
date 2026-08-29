@@ -162,6 +162,30 @@ def test_thumbnail_prompt_settings_and_providers_redact_api_keys(client, service
     assert provider["api_key_configured"] is True
 
 
+def test_invalid_saved_default_provider_returns_recoverable_settings_and_catalog(
+    client,
+):
+    config.app["cloud_agent_thumbnail_prompt_default_provider"] = (
+        "private-invalid-provider-value"
+    )
+
+    settings = client.get("/api/v1/cloud-agent/thumbnail-prompt/settings")
+    providers = client.get("/api/v1/cloud-agent/thumbnail-prompt/providers")
+
+    assert settings.status_code == 200
+    assert settings.json()["data"]["default_provider"] is None
+    assert settings.json()["data"]["configuration_error"] == (
+        "Saved default thumbnail provider is invalid. "
+        "Select AIHubMix or OpenRouter and save Thumbnail Prompt Settings."
+    )
+    assert "private-invalid-provider-value" not in settings.text
+    assert providers.status_code == 200
+    assert [item["id"] for item in providers.json()["data"]] == [
+        "aihubmix",
+        "openrouter",
+    ]
+
+
 def test_thumbnail_prompt_settings_validate_and_persist_dedicated_values(client):
     invalid = client.put(
         "/api/v1/cloud-agent/thumbnail-prompt/settings",

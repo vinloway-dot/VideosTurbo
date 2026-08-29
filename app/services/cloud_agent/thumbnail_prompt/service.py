@@ -16,12 +16,18 @@ from app.services.cloud_agent.thumbnail_prompt.settings import (
 
 
 _DISALLOWED_OUTPUT_MARKER = re.compile(
-    r"(?im)^\s*(?:#{1,6}\s+\S|[-+*]\s+\S|`{3}|~{3}|"
+    r"(?im)^\s*(?:#{1,6}\s+\S|[-+*]\s+\S|>\s*\S|`{3}|~{3}|"
     r"(?:-{3,}|\*{3,}|_{3,})\s*$|(?:option|alternative|choice)\b"
     r"(?:\s*(?:\d+|[a-z]))?\s*[:.)-]|(?:prompt|response|result)\s*:|"
     r"(?:[a-z]|\d+)[.)]\s+\S)"
 )
-_DISALLOWED_INLINE_MARKDOWN = re.compile(r"(?:\*\*|__)")
+_DISALLOWED_INLINE_MARKDOWN = re.compile(
+    r"(?:`|!?\[[^\]\r\n]+\](?:\([^\)\r\n]+\)|\[[^\]\r\n]*\])|"
+    r"<https?://[^>\r\n]+>|\*\*[^*\r\n]+\*\*|__[^_\r\n]+__|"
+    r"~~[^~\r\n]+~~|(?<![\w*])\*[^*\r\n]+\*(?!\*)|"
+    r"(?<![\w_])_[^_\r\n]+_(?!\w))",
+    re.IGNORECASE,
+)
 PROVIDER_TIMEOUT_SECONDS = 45
 
 
@@ -113,7 +119,7 @@ class ThumbnailPromptService:
     @classmethod
     def _normalize_completion(cls, response: Any) -> str:
         choices = cls._value(response, "choices")
-        if not isinstance(choices, (list, tuple)) or not choices:
+        if not isinstance(choices, (list, tuple)) or len(choices) != 1:
             raise cls._invalid_response()
         message = cls._value(choices[0], "message")
         content = cls._value(message, "content")
@@ -122,6 +128,8 @@ class ThumbnailPromptService:
         normalized = content.strip()
         if (
             not normalized
+            or "\n" in normalized
+            or "\r" in normalized
             or _DISALLOWED_OUTPUT_MARKER.search(normalized)
             or _DISALLOWED_INLINE_MARKDOWN.search(normalized)
         ):
