@@ -117,6 +117,8 @@ def _segment_starts(text: str):
     for index, character in enumerate(text):
         if character == "." and _period_belongs_to_initialism(text, index):
             continue
+        if character == ":" and _colon_belongs_to_ratio(text, index):
+            continue
         if character in _SIMPLE_SEGMENT_SEPARATORS:
             yield index + 1
         elif (
@@ -127,6 +129,25 @@ def _segment_starts(text: str):
             and text[index + 1].isspace()
         ):
             yield index + 1
+
+
+def _colon_belongs_to_ratio(text: str, colon_index: int) -> bool:
+    lhs_cursor = colon_index - 1
+    while lhs_cursor >= 0 and text[lhs_cursor].isspace():
+        lhs_cursor -= 1
+    lhs_end = lhs_cursor + 1
+    while lhs_cursor >= 0 and text[lhs_cursor].isdecimal():
+        lhs_cursor -= 1
+    lhs_start = lhs_cursor + 1
+    if lhs_start == lhs_end:
+        return False
+    lhs_token_end, lhs = _read_decimal_token(text, lhs_start)
+    if lhs_token_end != lhs_end:
+        return False
+    rhs_start = colon_index + 1
+    while rhs_start < len(text) and text[rhs_start].isspace():
+        rhs_start += 1
+    return _is_complete_ratio(text, rhs_start, lhs)
 
 
 def _period_belongs_to_initialism(text: str, period_index: int) -> bool:
