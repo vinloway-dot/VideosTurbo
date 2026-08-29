@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from app.services.cloud_agent import storage as storage_module
@@ -120,6 +122,106 @@ def test_read_master_prompt_rejects_job_symlink_to_another_job_in_the_root(tmp_p
     assert target.master_prompt_file.read_text(encoding="utf-8") == (
         "job-b private prompt"
     )
+
+
+def test_read_master_prompt_rejects_hardlinked_prompt(tmp_path):
+    storage = CloudJobStorage(tmp_path / "jobs")
+    paths = storage.write_inputs(
+        "job-123", script="script", master_prompt="private master prompt"
+    )
+    outside_link = tmp_path / "outside-hardlink"
+    os.link(paths.master_prompt_file, outside_link)
+
+    with pytest.raises(ValueError, match="unavailable"):
+        storage.read_master_prompt("job-123")
+
+    assert outside_link.read_text(encoding="utf-8") == "private master prompt"
+
+
+def test_read_master_prompt_rejects_oversized_sparse_prompt_without_truncating(
+    tmp_path,
+):
+    storage = CloudJobStorage(tmp_path / "jobs")
+    paths = storage.prepare("job-123")
+    with paths.master_prompt_file.open("wb") as prompt_file:
+        prompt_file.write(b"valid-looking-prefix")
+        prompt_file.truncate(CloudJobStorage.MASTER_PROMPT_MAX_BYTES + 1)
+
+    with pytest.raises(ValueError, match="unavailable"):
+        storage.read_master_prompt("job-123")
+
+    assert paths.master_prompt_file.stat().st_size == (
+        CloudJobStorage.MASTER_PROMPT_MAX_BYTES + 1
+    )
+
+
+def test_read_master_prompt_rejects_foreign_owned_prompt(tmp_path, monkeypatch):
+    storage = CloudJobStorage(tmp_path / "jobs")
+    paths = storage.write_inputs(
+        "job-123", script="script", master_prompt="owner-private-prompt"
+    )
+    real_fstat = os.fstat
+
+    def report_foreign_prompt_owner(file_descriptor):
+        file_stat = real_fstat(file_descriptor)
+        target = os.readlink(f"/proc/self/fd/{file_descriptor}")
+        if target.endswith("/master_prompt.txt"):
+            values = list(file_stat)
+            values[4] = file_stat.st_uid + 1
+            return os.stat_result(values)
+        return file_stat
+
+    monkeypatch.setattr(storage_module.os, "fstat", report_foreign_prompt_owner)
+
+    with pytest.raises(ValueError, match="unavailable"):
+        storage.read_master_prompt("job-123")
+
+    assert paths.master_prompt_file.read_text(encoding="utf-8") == (
+        "owner-private-prompt"
+    )
+
+
+@pytest.mark.parametrize("replaced_component", ["root", "job", "input", "prompt"])
+def test_read_master_prompt_revalidates_every_named_component_after_read(
+    tmp_path, replaced_component
+):
+    class RacingStorage(CloudJobStorage):
+        def _read_master_prompt_bytes(self, prompt_fd):
+            content = super()._read_master_prompt_bytes(prompt_fd)
+            replacement_root = tmp_path / f"replacement-{replaced_component}"
+            if replaced_component == "root":
+                self.root.rename(replacement_root)
+                replacement = self.root / "job-123" / "input"
+                replacement.mkdir(parents=True)
+                (replacement / "master_prompt.txt").write_text(
+                    "replacement-root-prompt", encoding="utf-8"
+                )
+            elif replaced_component == "job":
+                paths.job_dir.rename(replacement_root)
+                replacement = paths.job_dir / "input"
+                replacement.mkdir(parents=True)
+                (replacement / "master_prompt.txt").write_text(
+                    "replacement-job-prompt", encoding="utf-8"
+                )
+            elif replaced_component == "input":
+                paths.input_dir.rename(replacement_root)
+                paths.input_dir.mkdir()
+                paths.master_prompt_file.write_text(
+                    "replacement-input-prompt", encoding="utf-8"
+                )
+            else:
+                replacement = paths.input_dir / ".replacement-prompt"
+                replacement.write_text("replacement-file-prompt", encoding="utf-8")
+                os.replace(replacement, paths.master_prompt_file)
+            return content
+
+    storage = RacingStorage(tmp_path / "jobs")
+    paths = storage.write_inputs(
+        "job-123", script="script", master_prompt="original-master-prompt"
+    )
+
+    with pytest.raises(ValueError, match="unavailable"):
+        storage.read_master_prompt("job-123")
 
 
 def test_default_root_reuses_repository_storage_helper(monkeypatch, tmp_path):

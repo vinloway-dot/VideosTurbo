@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Callable, Mapping
+import unicodedata
 
 import httpx
 import openai
@@ -13,6 +14,7 @@ from app.services.cloud_agent.storage import CloudJobStorage
 from app.services.cloud_agent.thumbnail_prompt.errors import ThumbnailPromptError
 from app.services.cloud_agent.thumbnail_prompt.settings import (
     ThumbnailPromptSettingsService,
+    ensure_thumbnail_prompt_platform_supported,
 )
 
 
@@ -39,6 +41,13 @@ _DISALLOWED_INLINE_MARKDOWN = re.compile(
     r"(?<![\w_])_[^_\r\n]+_(?!\w))",
     re.IGNORECASE,
 )
+_DISALLOWED_INLINE_ALTERNATIVE = re.compile(
+    r"(?:;|\||\s+[—–]\s+|\s+/\s+)\s*"
+    r"(?:(?:option|alternative|choice)(?:\s*(?:\d+|[a-z]))?|\d+)"
+    r"\s*[:.)-]\s*\S",
+    re.IGNORECASE,
+)
+_MAX_OUTPUT_CHARACTERS = 8000
 PROVIDER_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
 
 
@@ -71,6 +80,7 @@ class ThumbnailPromptService:
         self._client_factory = client_factory
 
     def generate_for_job(self, job_id: str) -> str:
+        ensure_thumbnail_prompt_platform_supported()
         try:
             video_master_prompt = self._storage.read_master_prompt(job_id)
         except ValueError as exc:
@@ -130,10 +140,13 @@ class ThumbnailPromptService:
         normalized = content.strip()
         if (
             not normalized
+            or len(normalized) > _MAX_OUTPUT_CHARACTERS
             or "\n" in normalized
             or "\r" in normalized
+            or any(unicodedata.category(character) == "Cc" for character in content)
             or _DISALLOWED_OUTPUT_MARKER.search(normalized)
             or _DISALLOWED_INLINE_MARKDOWN.search(normalized)
+            or _DISALLOWED_INLINE_ALTERNATIVE.search(normalized)
         ):
             raise cls._invalid_response()
         return normalized

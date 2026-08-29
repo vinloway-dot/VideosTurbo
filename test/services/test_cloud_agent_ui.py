@@ -1242,6 +1242,106 @@ def test_thumbnail_settings_invalid_saved_provider_shows_recovery_and_can_be_sav
     ) in fake.selectboxes
 
 
+def test_thumbnail_settings_unsafe_storage_shows_remediation_and_disables_writes(
+    monkeypatch,
+):
+    class UnsafeThumbnailSettingsStreamlit:
+        def __init__(self):
+            self.session_state = {}
+            self.errors = []
+            self.buttons = []
+            self.inputs = []
+            self.checkboxes = []
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def subheader(self, _label):
+            return None
+
+        def error(self, message):
+            self.errors.append(message)
+
+        def success(self, _message):
+            return None
+
+        def text_area(self, label, **kwargs):
+            self.inputs.append((label, kwargs))
+            return ""
+
+        def selectbox(self, _label, *, options, key, **_kwargs):
+            return self.session_state.get(key, options[0])
+
+        def text_input(self, label, **kwargs):
+            self.inputs.append((label, kwargs))
+            return ""
+
+        def button(self, label, **kwargs):
+            self.buttons.append((label, kwargs))
+            return not kwargs.get("disabled", False)
+
+        def checkbox(self, label, **kwargs):
+            self.checkboxes.append((label, kwargs))
+            return False
+
+        def caption(self, _label):
+            return None
+
+    remediation = (
+        "Thumbnail Prompt settings storage is unsafe. Ensure the dedicated storage "
+        "path and directories are owned by the server user and are not group/world-"
+        "writable, and set settings and lock files to mode 0600."
+    )
+    fake = UnsafeThumbnailSettingsStreamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_save_thumbnail_prompt_settings",
+        lambda _payload: pytest.fail("unsafe settings must not be submitted"),
+    )
+
+    cloud_agent._render_thumbnail_prompt_settings(
+        ui_state=fake.session_state,
+        settings={
+            **cloud_agent._thumbnail_prompt_default_settings(),
+            "default_provider": None,
+            "configuration_error": remediation,
+            "storage_state": "unsafe",
+        },
+        provider_catalog=[
+            {
+                "id": "aihubmix",
+                "label": "AIHubMix",
+                "models": ["gpt-5.6-sol", "custom"],
+                "default_model": "gpt-5.6-sol",
+                "api_key_configured": False,
+            },
+            {
+                "id": "openrouter",
+                "label": "OpenRouter",
+                "models": ["openai/gpt-5.6-sol", "custom"],
+                "default_model": "openai/gpt-5.6-sol",
+                "api_key_configured": False,
+            },
+        ],
+    )
+
+    assert fake.errors == [remediation]
+    write_buttons = {
+        kwargs["key"]: kwargs
+        for _label, kwargs in fake.buttons
+        if kwargs.get("key")
+        in {"thumbnail_prompt_save_settings", "thumbnail_prompt_save_api_key"}
+    }
+    assert set(write_buttons) == {
+        "thumbnail_prompt_save_settings",
+        "thumbnail_prompt_save_api_key",
+    }
+    assert all(kwargs["disabled"] is True for kwargs in write_buttons.values())
+    assert all(kwargs["disabled"] is True for _label, kwargs in fake.inputs)
+    assert fake.checkboxes[0][1]["disabled"] is True
+
+
 def test_research_summary_never_contains_raw_source_body_or_secret_fields():
     summary = cloud_agent_ui.research_summary(
         research_draft_id="draft-1",

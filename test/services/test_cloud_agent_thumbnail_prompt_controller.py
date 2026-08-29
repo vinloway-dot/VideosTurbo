@@ -158,7 +158,8 @@ def test_thumbnail_prompt_endpoint_maps_typed_provider_errors(
         ),
         (
             "THUMBNAIL_PROMPT_SETTINGS_UNSAFE",
-            "thumbnail prompt settings storage is unsafe",
+            "thumbnail prompt settings storage is unsafe; correct its dedicated path "
+            "ownership and permissions",
         ),
     ],
 )
@@ -188,6 +189,35 @@ def test_thumbnail_prompt_settings_and_providers_redact_api_keys(client, service
         item for item in providers.json()["data"] if item["id"] == "aihubmix"
     )
     assert provider["api_key_configured"] is True
+
+
+def test_thumbnail_prompt_unsafe_storage_state_is_actionable_and_write_refused(
+    client, services
+):
+    settings_dir = services.settings.settings_path.parent
+    settings_dir.mkdir(mode=0o700)
+    settings_dir.chmod(0o777)
+    try:
+        settings = client.get("/api/v1/cloud-agent/thumbnail-prompt/settings")
+        update = client.put(
+            "/api/v1/cloud-agent/thumbnail-prompt/settings",
+            json=_settings_payload(),
+        )
+    finally:
+        settings_dir.chmod(0o700)
+
+    expected_message = (
+        "Thumbnail Prompt settings storage is unsafe. Ensure the dedicated storage "
+        "path and directories are owned by the server user and are not group/world-"
+        "writable, and set settings and lock files to mode 0600."
+    )
+    assert settings.status_code == 200
+    assert settings.json()["data"]["storage_state"] == "unsafe"
+    assert settings.json()["data"]["configuration_error"] == expected_message
+    assert "save" not in settings.json()["data"]["configuration_error"].lower()
+    assert str(settings_dir) not in settings.text
+    assert update.status_code == 422
+    assert update.json()["data"]["code"] == "THUMBNAIL_PROMPT_SETTINGS_UNSAFE"
 
 
 def test_invalid_saved_default_provider_returns_recoverable_settings_and_catalog(

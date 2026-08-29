@@ -172,6 +172,7 @@ def _thumbnail_prompt_default_settings():
         "openrouter_model": "openai/gpt-5.6-sol",
         "openrouter_custom_model_id": "",
         "openrouter_base_url": "https://openrouter.ai/api/v1",
+        "storage_state": "ready",
     }
 
 
@@ -1053,8 +1054,10 @@ def _render_thumbnail_prompt_settings(*, ui_state, settings, provider_catalog):
         return
 
     configuration_error = str(settings.get("configuration_error") or "").strip()
+    unsafe_storage = settings.get("storage_state") == "unsafe"
+    disabled_when_unsafe = {"disabled": True} if unsafe_storage else {}
     for key, value in settings.items():
-        if key == "configuration_error":
+        if key in {"configuration_error", "storage_state"}:
             continue
         ui_state.setdefault(f"thumbnail_prompt_{key}", value)
 
@@ -1079,6 +1082,7 @@ def _render_thumbnail_prompt_settings(*, ui_state, settings, provider_catalog):
             "Thumbnail Master Prompt",
             key="thumbnail_prompt_master_prompt",
             max_chars=8000,
+            **disabled_when_unsafe,
         )
         selected_provider = st.selectbox(
             "Default Thumbnail Provider",
@@ -1087,6 +1091,7 @@ def _render_thumbnail_prompt_settings(*, ui_state, settings, provider_catalog):
                 "label", provider
             ),
             key="thumbnail_prompt_default_provider",
+            **disabled_when_unsafe,
         )
         selected_metadata = provider_by_id[selected_provider]
         model_key = f"thumbnail_prompt_{selected_provider}_model"
@@ -1095,19 +1100,23 @@ def _render_thumbnail_prompt_settings(*, ui_state, settings, provider_catalog):
             f"{selected_metadata.get('label', selected_provider)} Model",
             options=tuple(selected_metadata.get("models") or ()),
             key=model_key,
+            **disabled_when_unsafe,
         )
         if model == "custom":
             st.text_input(
                 f"{selected_metadata.get('label', selected_provider)} Custom Model ID",
                 key=custom_model_key,
+                **disabled_when_unsafe,
             )
         st.text_input(
             f"{selected_metadata.get('label', selected_provider)} Base URL",
             key=f"thumbnail_prompt_{selected_provider}_base_url",
+            **disabled_when_unsafe,
         )
         if st.button(
             "Save Thumbnail Prompt Settings",
             key="thumbnail_prompt_save_settings",
+            **disabled_when_unsafe,
         ):
             try:
                 saved_settings = _save_thumbnail_prompt_settings(
@@ -1133,12 +1142,14 @@ def _render_thumbnail_prompt_settings(*, ui_state, settings, provider_catalog):
             "Thumbnail Provider API Key",
             type="password",
             key=api_key_state_key,
+            **disabled_when_unsafe,
         )
         remove_key = bool(
             hasattr(st, "checkbox")
             and st.checkbox(
                 "Remove stored thumbnail provider API key",
                 key=f"thumbnail_prompt_remove_key_{selected_provider}",
+                **disabled_when_unsafe,
             )
         )
         st.button(
@@ -1147,6 +1158,7 @@ def _render_thumbnail_prompt_settings(*, ui_state, settings, provider_catalog):
             on_click=_submit_thumbnail_prompt_api_key,
             args=(selected_provider,),
             kwargs={"remove": remove_key},
+            **disabled_when_unsafe,
         )
         if feedback := ui_state.get("thumbnail_prompt_key_feedback"):
             feedback_kind, feedback_message = feedback

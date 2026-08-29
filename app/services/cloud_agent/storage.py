@@ -32,7 +32,19 @@ class JobPaths:
     final_file: Path
 
 
+@dataclass(frozen=True)
+class _RetainedPromptEntry:
+    parent_fd: int
+    file_descriptor: int
+    name: str
+    identity: tuple[int, int]
+    is_directory: bool
+
+
 class CloudJobStorage:
+    #: Maximum UTF-8 bytes accepted from one saved video master prompt.
+    MASTER_PROMPT_MAX_BYTES = 1_048_576
+
     def __init__(self, root: Path | None = None):
         if root is None:
             root = Path(utils.storage_dir("jobs", create=True))
@@ -167,34 +179,136 @@ class CloudJobStorage:
         return paths
 
     def read_master_prompt(self, job_id: str) -> str:
+        """Read at most ``MASTER_PROMPT_MAX_BYTES`` from a verified job prompt."""
         safe_job_id = self._validate_job_id(job_id)
-        root_fd = None
-        job_fd = None
-        input_fd = None
-        prompt_fd = None
+        anchor_fd = None
+        retained_entries = []
         try:
-            root_fd = os.open(self.root, self._directory_open_flags())
-            job_fd = os.open(safe_job_id, self._directory_open_flags(), dir_fd=root_fd)
-            input_fd = os.open("input", self._directory_open_flags(), dir_fd=job_fd)
+            root_path = self.root.absolute()
+            anchor_fd = os.open("/", self._directory_open_flags())
+            anchor_stat = os.fstat(anchor_fd)
+            if not stat.S_ISDIR(anchor_stat.st_mode):
+                raise ValueError("job master prompt is unavailable")
+            anchor_identity = (anchor_stat.st_dev, anchor_stat.st_ino)
+            current_fd = anchor_fd
+            directory_names = (*root_path.parts[1:], safe_job_id, "input")
+            for name in directory_names:
+                directory_fd = os.open(
+                    name, self._directory_open_flags(), dir_fd=current_fd
+                )
+                try:
+                    directory_stat = os.fstat(directory_fd)
+                except OSError:
+                    os.close(directory_fd)
+                    raise
+                if not stat.S_ISDIR(directory_stat.st_mode):
+                    os.close(directory_fd)
+                    raise ValueError("job master prompt is unavailable")
+                retained_entries.append(
+                    _RetainedPromptEntry(
+                        parent_fd=current_fd,
+                        file_descriptor=directory_fd,
+                        name=name,
+                        identity=(directory_stat.st_dev, directory_stat.st_ino),
+                        is_directory=True,
+                    )
+                )
+                current_fd = directory_fd
+
             prompt_fd = os.open(
                 "master_prompt.txt",
                 os.O_RDONLY | os.O_NOFOLLOW,
-                dir_fd=input_fd,
+                dir_fd=current_fd,
             )
-            if not stat.S_ISREG(os.fstat(prompt_fd).st_mode):
-                raise ValueError("job master prompt is unavailable")
-            with os.fdopen(prompt_fd, "r", encoding="utf-8") as prompt_file:
-                prompt_fd = None
-                value = prompt_file.read().strip()
-        except OSError as exc:
+            try:
+                prompt_stat = os.fstat(prompt_fd)
+                self._require_safe_master_prompt(prompt_stat)
+            except (OSError, ValueError):
+                os.close(prompt_fd)
+                raise
+            retained_entries.append(
+                _RetainedPromptEntry(
+                    parent_fd=current_fd,
+                    file_descriptor=prompt_fd,
+                    name="master_prompt.txt",
+                    identity=(prompt_stat.st_dev, prompt_stat.st_ino),
+                    is_directory=False,
+                )
+            )
+            content = self._read_master_prompt_bytes(prompt_fd)
+            value = content.decode("utf-8").strip()
+            self._verify_retained_prompt_entries(
+                anchor_fd, anchor_identity, retained_entries
+            )
+        except (OSError, UnicodeDecodeError) as exc:
             raise ValueError("job master prompt is unavailable") from exc
         finally:
-            for descriptor in (prompt_fd, input_fd, job_fd, root_fd):
-                if descriptor is not None:
+            descriptors = [
+                entry.file_descriptor for entry in reversed(retained_entries)
+            ]
+            if anchor_fd is not None:
+                descriptors.append(anchor_fd)
+            for descriptor in descriptors:
+                try:
                     os.close(descriptor)
+                except OSError:
+                    pass
         if not value:
             raise ValueError("job master prompt is empty")
         return value
+
+    @classmethod
+    def _require_safe_master_prompt(cls, prompt_stat: os.stat_result) -> None:
+        if (
+            not stat.S_ISREG(prompt_stat.st_mode)
+            or prompt_stat.st_uid != os.geteuid()
+            or prompt_stat.st_nlink != 1
+            or prompt_stat.st_size > cls.MASTER_PROMPT_MAX_BYTES
+        ):
+            raise ValueError("job master prompt is unavailable")
+
+    @classmethod
+    def _read_master_prompt_bytes(cls, prompt_fd: int) -> bytes:
+        chunks = []
+        remaining = cls.MASTER_PROMPT_MAX_BYTES + 1
+        while remaining:
+            chunk = os.read(prompt_fd, min(remaining, 8192))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        content = b"".join(chunks)
+        if len(content) > cls.MASTER_PROMPT_MAX_BYTES:
+            raise ValueError("job master prompt is unavailable")
+        return content
+
+    @classmethod
+    def _verify_retained_prompt_entries(
+        cls,
+        anchor_fd: int,
+        anchor_identity: tuple[int, int],
+        retained_entries: list[_RetainedPromptEntry],
+    ) -> None:
+        anchor_stat = os.fstat(anchor_fd)
+        if (
+            not stat.S_ISDIR(anchor_stat.st_mode)
+            or (anchor_stat.st_dev, anchor_stat.st_ino) != anchor_identity
+        ):
+            raise ValueError("job master prompt is unavailable")
+        for entry in retained_entries:
+            held = os.fstat(entry.file_descriptor)
+            named = os.stat(entry.name, dir_fd=entry.parent_fd, follow_symlinks=False)
+            if entry.is_directory:
+                if not stat.S_ISDIR(held.st_mode) or not stat.S_ISDIR(named.st_mode):
+                    raise ValueError("job master prompt is unavailable")
+            else:
+                cls._require_safe_master_prompt(held)
+                cls._require_safe_master_prompt(named)
+            if (held.st_dev, held.st_ino) != entry.identity or (
+                named.st_dev,
+                named.st_ino,
+            ) != entry.identity:
+                raise ValueError("job master prompt is unavailable")
 
     def cleanup_flow_sources(self, job_id: str) -> None:
         paths = self.prepare(job_id)

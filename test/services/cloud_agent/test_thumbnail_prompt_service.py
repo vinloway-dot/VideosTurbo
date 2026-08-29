@@ -238,6 +238,67 @@ def test_generate_rejects_non_plain_or_unlabelled_multiple_prompts(
     assert error.value.code == "THUMBNAIL_PROMPT_RESPONSE_INVALID"
 
 
+@pytest.mark.parametrize(
+    "completion",
+    [
+        "Solar flare over Earth; Alternative: eclipse over Earth",
+        "1: solar flare over Earth; 2: eclipse over Earth",
+    ],
+)
+def test_generate_rejects_inline_labelled_alternatives_after_separator(
+    tmp_path, completion
+):
+    service = service_with_completion(tmp_path, completion)
+
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.generate_for_job("job-1")
+
+    assert error.value.code == "THUMBNAIL_PROMPT_RESPONSE_INVALID"
+
+
+@pytest.mark.parametrize("control", ["\x00", "\t", "\x7f", "\u0085"])
+def test_generate_rejects_unicode_control_characters(tmp_path, control):
+    service = service_with_completion(
+        tmp_path, f"Solar flare{control} over Earth, cinematic light"
+    )
+
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.generate_for_job("job-1")
+
+    assert error.value.code == "THUMBNAIL_PROMPT_RESPONSE_INVALID"
+
+
+@pytest.mark.parametrize(
+    "completion",
+    ["\tSolar flare over Earth, cinematic light", "Solar flare over Earth\t"],
+)
+def test_generate_rejects_unicode_controls_even_when_strip_would_remove_them(
+    tmp_path, completion
+):
+    service = service_with_completion(tmp_path, completion)
+
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.generate_for_job("job-1")
+
+    assert error.value.code == "THUMBNAIL_PROMPT_RESPONSE_INVALID"
+
+
+def test_generate_rejects_output_above_character_limit(tmp_path):
+    service = service_with_completion(tmp_path, "x" * 8001)
+
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.generate_for_job("job-1")
+
+    assert error.value.code == "THUMBNAIL_PROMPT_RESPONSE_INVALID"
+
+
+def test_generate_accepts_plain_output_at_character_limit(tmp_path):
+    prompt = "x" * 8000
+    service = service_with_completion(tmp_path, prompt)
+
+    assert service.generate_for_job("job-1") == prompt
+
+
 @pytest.mark.parametrize("choice_count", [0, 2])
 def test_generate_requires_exactly_one_provider_choice(tmp_path, choice_count):
     storage = CloudJobStorage(tmp_path / "jobs")

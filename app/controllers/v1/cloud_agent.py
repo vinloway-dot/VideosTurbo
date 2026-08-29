@@ -66,6 +66,7 @@ from app.services.cloud_agent.thumbnail_prompt.models import (
 from app.services.cloud_agent.thumbnail_prompt.service import ThumbnailPromptService
 from app.services.cloud_agent.thumbnail_prompt.settings import (
     ThumbnailPromptSettingsService,
+    ensure_thumbnail_prompt_platform_supported,
 )
 from app.services.cloud_agent.video_library import (
     CloudVideoLibraryService,
@@ -150,6 +151,7 @@ _THUMBNAIL_PROMPT_HTTP_STATUS = {
     "THUMBNAIL_PROMPT_RESPONSE_INVALID": 502,
     "THUMBNAIL_PROMPT_SETTINGS_CORRUPT": 422,
     "THUMBNAIL_PROMPT_SETTINGS_UNSAFE": 422,
+    "THUMBNAIL_PROMPT_PLATFORM_UNSUPPORTED": 501,
 }
 _THUMBNAIL_PROMPT_PUBLIC_MESSAGES = {
     "PROVIDER_UNSUPPORTED": "thumbnail prompt default provider is invalid; update settings",
@@ -166,7 +168,13 @@ _THUMBNAIL_PROMPT_PUBLIC_MESSAGES = {
     "THUMBNAIL_PROMPT_SETTINGS_CORRUPT": (
         "thumbnail prompt settings are corrupt; save settings to repair them"
     ),
-    "THUMBNAIL_PROMPT_SETTINGS_UNSAFE": "thumbnail prompt settings storage is unsafe",
+    "THUMBNAIL_PROMPT_SETTINGS_UNSAFE": (
+        "thumbnail prompt settings storage is unsafe; correct its dedicated path "
+        "ownership and permissions"
+    ),
+    "THUMBNAIL_PROMPT_PLATFORM_UNSUPPORTED": (
+        "thumbnail prompt is unavailable on this platform"
+    ),
 }
 
 
@@ -718,7 +726,12 @@ def get_thumbnail_prompt_settings(
     ),
 ):
     del request
-    return utils.get_response(200, service.get_settings().model_dump(mode="json"))
+    try:
+        ensure_thumbnail_prompt_platform_supported()
+        data = service.get_settings().model_dump(mode="json")
+    except ThumbnailPromptError as exc:
+        raise _thumbnail_prompt_http_exception(exc) from exc
+    return utils.get_response(200, data)
 
 
 @router.put("/cloud-agent/thumbnail-prompt/settings")
@@ -731,6 +744,7 @@ def update_thumbnail_prompt_settings(
 ):
     del request
     try:
+        ensure_thumbnail_prompt_platform_supported()
         data = service.update_settings(body).model_dump(mode="json")
     except ThumbnailPromptError as exc:
         raise _thumbnail_prompt_http_exception(exc) from exc
@@ -746,6 +760,7 @@ def list_thumbnail_prompt_providers(
 ):
     del request
     try:
+        ensure_thumbnail_prompt_platform_supported()
         data = [item.model_dump(mode="json") for item in service.list_providers()]
     except ThumbnailPromptError as exc:
         raise _thumbnail_prompt_http_exception(exc) from exc
@@ -761,6 +776,7 @@ async def update_thumbnail_prompt_provider_api_key(
     ),
 ):
     try:
+        ensure_thumbnail_prompt_platform_supported()
         data = service.set_api_key(
             provider_id, await _parse_thumbnail_prompt_api_key_request(request)
         ).model_dump(mode="json")
@@ -780,6 +796,7 @@ def delete_thumbnail_prompt_provider_api_key(
 ):
     del request
     try:
+        ensure_thumbnail_prompt_platform_supported()
         data = service.remove_api_key(provider_id, body.confirmed).model_dump(
             mode="json"
         )
@@ -1109,6 +1126,10 @@ def generate_thumbnail_prompt(
     thumbnails: ThumbnailPromptService = Depends(get_thumbnail_prompt_service),
 ):
     del request
+    try:
+        ensure_thumbnail_prompt_platform_supported()
+    except ThumbnailPromptError as exc:
+        raise _thumbnail_prompt_http_exception(exc) from exc
     job = library.get_visible_job(job_id)
     if job is None:
         raise HttpException(
