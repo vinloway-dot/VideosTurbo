@@ -195,6 +195,26 @@ def test_generate_keeps_normal_image_prompt_prose(tmp_path):
     assert service.generate_for_job("job-1") == prompt
 
 
+@pytest.mark.parametrize(
+    "completion",
+    [
+        "[](https://example.invalid)",
+        "![](https://example.invalid/image.png)",
+        "[Earth]: https://example.invalid",
+        "<mailto:user@example.invalid>",
+    ],
+)
+def test_generate_rejects_markdown_links_autolinks_and_reference_definitions(
+    tmp_path, completion
+):
+    service = service_with_completion(tmp_path, completion)
+
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.generate_for_job("job-1")
+
+    assert error.value.code == "THUMBNAIL_PROMPT_RESPONSE_INVALID"
+
+
 def test_generate_rejects_an_empty_provider_response(tmp_path):
     service = service_with_completion(tmp_path, "  ")
 
