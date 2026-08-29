@@ -164,6 +164,16 @@ class CloudJobStorage:
         paths.master_prompt_file.write_text(master_prompt, encoding="utf-8")
         return paths
 
+    def read_master_prompt(self, job_id: str) -> str:
+        path = self._paths(job_id).master_prompt_file
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError as exc:
+            raise ValueError("job master prompt is unavailable") from exc
+        if not value:
+            raise ValueError("job master prompt is empty")
+        return value
+
     def cleanup_flow_sources(self, job_id: str) -> None:
         paths = self.prepare(job_id)
         flow_root = paths.flow_dir.resolve()

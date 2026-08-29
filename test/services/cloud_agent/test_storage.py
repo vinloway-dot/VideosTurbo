@@ -61,6 +61,28 @@ def test_write_inputs_writes_utf8_script_and_master_prompt(tmp_path):
     assert paths.master_prompt_file.read_text(encoding="utf-8") == "Master Prompt ✓"
 
 
+def test_read_master_prompt_returns_stripped_saved_job_prompt(tmp_path):
+    storage = CloudJobStorage(tmp_path)
+    storage.write_inputs("job-123", script="script", master_prompt="  Full Master Prompt ✓\n")
+
+    assert storage.read_master_prompt("job-123") == "Full Master Prompt ✓"
+
+
+@pytest.mark.parametrize(
+    ("prepared", "expected_message"),
+    [(False, "unavailable"), (True, "empty")],
+)
+def test_read_master_prompt_rejects_unavailable_or_empty_job_prompt(
+    tmp_path, prepared, expected_message
+):
+    storage = CloudJobStorage(tmp_path)
+    if prepared:
+        storage.prepare("job-123").master_prompt_file.write_text("  \n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=expected_message):
+        storage.read_master_prompt("job-123")
+
+
 def test_default_root_reuses_repository_storage_helper(monkeypatch, tmp_path):
     expected_root = tmp_path / "repo-storage" / "jobs"
     calls = []
