@@ -160,6 +160,91 @@ def _load_research_settings():
     return _api("GET", "research/settings")
 
 
+def _thumbnail_prompt_default_settings():
+    return {
+        "master_prompt": "",
+        "default_provider": "aihubmix",
+        "aihubmix_model": "gpt-5.6-sol",
+        "aihubmix_custom_model_id": "",
+        "openrouter_model": "openai/gpt-5.6-sol",
+        "openrouter_custom_model_id": "",
+    }
+
+
+def _load_thumbnail_prompt_settings():
+    return _api("GET", "thumbnail-prompt/settings")
+
+
+def _load_thumbnail_prompt_provider_catalog():
+    return _api("GET", "thumbnail-prompt/providers")
+
+
+def _thumbnail_prompt_settings_payload(ui_state):
+    return {
+        "master_prompt": str(ui_state.get("thumbnail_prompt_master_prompt", "") or ""),
+        "default_provider": str(
+            ui_state.get("thumbnail_prompt_default_provider", "aihubmix")
+            or "aihubmix"
+        ),
+        "aihubmix_model": str(
+            ui_state.get("thumbnail_prompt_aihubmix_model", "gpt-5.6-sol")
+            or "gpt-5.6-sol"
+        ),
+        "aihubmix_custom_model_id": str(
+            ui_state.get("thumbnail_prompt_aihubmix_custom_model_id", "") or ""
+        ),
+        "openrouter_model": str(
+            ui_state.get(
+                "thumbnail_prompt_openrouter_model", "openai/gpt-5.6-sol"
+            )
+            or "openai/gpt-5.6-sol"
+        ),
+        "openrouter_custom_model_id": str(
+            ui_state.get("thumbnail_prompt_openrouter_custom_model_id", "") or ""
+        ),
+    }
+
+
+def _save_thumbnail_prompt_settings(payload):
+    return _api("PUT", "thumbnail-prompt/settings", json=payload)
+
+
+def _save_thumbnail_prompt_api_key(provider, value):
+    return _api(
+        "PUT",
+        f"thumbnail-prompt/providers/{provider}/api-key",
+        json={"api_key": str(value or "").strip()},
+    )
+
+
+def _remove_thumbnail_prompt_api_key(provider):
+    return _api(
+        "DELETE",
+        f"thumbnail-prompt/providers/{provider}/api-key",
+        json={"confirmed": True},
+    )
+
+
+def _submit_thumbnail_prompt_api_key(provider, *, remove):
+    state_key = f"thumbnail_prompt_api_key_{provider}"
+    value = str(st.session_state.pop(state_key, "") or "")
+    try:
+        if remove:
+            _remove_thumbnail_prompt_api_key(provider)
+            feedback = ("success", "Thumbnail provider API key removed.")
+        elif not value.strip():
+            feedback = (
+                "error",
+                "Enter a thumbnail provider API key, or explicitly remove the stored key.",
+            )
+        else:
+            _save_thumbnail_prompt_api_key(provider, value)
+            feedback = ("success", "Thumbnail provider API key saved.")
+    except requests.RequestException as exc:
+        feedback = ("error", _api_error_message(exc))
+    st.session_state["thumbnail_prompt_key_feedback"] = feedback
+
+
 def _save_and_verify_research_settings(payload):
     saved = _api("PUT", "research/settings", json=payload)
     readback = _load_research_settings()
@@ -868,6 +953,106 @@ def _render_settings_tts_provider_selector(*, ui_state, defaults, provider_catal
         format_func=lambda value: provider_labels[value],
         key=state_key,
     )
+
+
+def _render_thumbnail_prompt_settings(*, ui_state, settings, provider_catalog):
+    """Render settings owned solely by the thumbnail-prompt subsystem."""
+    provider_by_id = {item["id"]: item for item in provider_catalog}
+    provider_ids = tuple(
+        provider_id
+        for provider_id in ("aihubmix", "openrouter")
+        if provider_id in provider_by_id
+    )
+    if not provider_ids:
+        st.error("Thumbnail provider metadata is unavailable.")
+        return
+
+    for key, value in settings.items():
+        ui_state.setdefault(f"thumbnail_prompt_{key}", value)
+
+    selected_provider = str(
+        ui_state.get("thumbnail_prompt_default_provider") or provider_ids[0]
+    )
+    if selected_provider not in provider_ids:
+        selected_provider = provider_ids[0]
+        ui_state["thumbnail_prompt_default_provider"] = selected_provider
+    selected_metadata = provider_by_id[selected_provider]
+    model_key = f"thumbnail_prompt_{selected_provider}_model"
+    custom_model_key = f"thumbnail_prompt_{selected_provider}_custom_model_id"
+    models = tuple(selected_metadata.get("models") or ())
+    if ui_state.get(model_key) not in models:
+        ui_state[model_key] = selected_metadata.get("default_model", "")
+
+    with st.container(key="thumbnail_prompt_settings", border=True):
+        st.subheader("Thumbnail Master Prompt")
+        st.text_area(
+            "Thumbnail Master Prompt",
+            key="thumbnail_prompt_master_prompt",
+            max_chars=8000,
+        )
+        selected_provider = st.selectbox(
+            "Default Thumbnail Provider",
+            options=provider_ids,
+            format_func=lambda provider: provider_by_id[provider].get("label", provider),
+            key="thumbnail_prompt_default_provider",
+        )
+        selected_metadata = provider_by_id[selected_provider]
+        model_key = f"thumbnail_prompt_{selected_provider}_model"
+        custom_model_key = f"thumbnail_prompt_{selected_provider}_custom_model_id"
+        model = st.selectbox(
+            f"{selected_metadata.get('label', selected_provider)} Model",
+            options=tuple(selected_metadata.get("models") or ()),
+            key=model_key,
+        )
+        if model == "custom":
+            st.text_input(
+                f"{selected_metadata.get('label', selected_provider)} Custom Model ID",
+                key=custom_model_key,
+            )
+        if st.button(
+            "Save Thumbnail Prompt Settings",
+            key="thumbnail_prompt_save_settings",
+        ):
+            try:
+                saved_settings = _save_thumbnail_prompt_settings(
+                    _thumbnail_prompt_settings_payload(ui_state)
+                )
+                for key, value in saved_settings.items():
+                    ui_state[f"thumbnail_prompt_{key}"] = value
+                ui_state["thumbnail_prompt_settings_feedback"] = "Thumbnail settings saved."
+                st.rerun()
+            except requests.RequestException as exc:
+                st.error(_api_error_message(exc))
+        if feedback := ui_state.get("thumbnail_prompt_settings_feedback"):
+            st.success(feedback)
+
+        st.caption(
+            f"{selected_metadata.get('label', selected_provider)} API key: "
+            f"{'configured' if selected_metadata.get('api_key_configured') else 'not configured'}"
+        )
+        api_key_state_key = f"thumbnail_prompt_api_key_{selected_provider}"
+        st.text_input(
+            "Thumbnail Provider API Key",
+            type="password",
+            key=api_key_state_key,
+        )
+        remove_key = bool(
+            hasattr(st, "checkbox")
+            and st.checkbox(
+                "Remove stored thumbnail provider API key",
+                key=f"thumbnail_prompt_remove_key_{selected_provider}",
+            )
+        )
+        st.button(
+            "Save Thumbnail Provider API Key",
+            key="thumbnail_prompt_save_api_key",
+            on_click=_submit_thumbnail_prompt_api_key,
+            args=(selected_provider,),
+            kwargs={"remove": remove_key},
+        )
+        if feedback := ui_state.get("thumbnail_prompt_key_feedback"):
+            feedback_kind, feedback_message = feedback
+            (st.success if feedback_kind == "success" else st.error)(feedback_message)
 
 
 def _render_advanced_settings(

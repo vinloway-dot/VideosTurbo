@@ -1,6 +1,7 @@
 from contextlib import nullcontext
 from html import unescape
 from pathlib import Path
+import runpy
 from types import SimpleNamespace
 
 from playwright.sync_api import sync_playwright
@@ -11,7 +12,7 @@ from streamlit.runtime.media_file_storage import MediaFileStorageError
 from streamlit.runtime.media_file_manager import MediaFileManager
 from streamlit.runtime.memory_media_file_storage import MemoryMediaFileStorage
 
-from webui import cloud_agent_ui
+from webui import cloud_agent, cloud_agent_ui
 from webui.cloud_agent_ui import build_production_stages, derive_workflow_step
 
 
@@ -948,6 +949,37 @@ def test_settings_page_is_present_and_reuses_cloud_agent_settings_renderer():
     assert "TTS Provider Settings" in renderer
     assert "Research API Key" in renderer
     assert "include_research=True" in source
+
+
+def test_settings_page_renders_thumbnail_prompt_settings(monkeypatch):
+    """The settings page exposes the independent thumbnail-prompt card."""
+    calls = []
+    monkeypatch.setattr(
+        cloud_agent,
+        "_render_thumbnail_prompt_settings",
+        lambda **kwargs: calls.append(kwargs),
+        raising=False,
+    )
+
+    runpy.run_path("webui/pages/3_Settings.py", run_name="settings_test")
+
+    assert calls
+    assert calls[0]["settings"]["default_provider"] == "aihubmix"
+
+
+def test_thumbnail_settings_payload_uses_dedicated_default_only():
+    """Thumbnail saves cannot inherit the generation LLM provider setting."""
+    payload = cloud_agent._thumbnail_prompt_settings_payload(
+        {
+            "thumbnail_prompt_default_provider": "openrouter",
+            "thumbnail_prompt_master_prompt": "Style guide",
+            "thumbnail_prompt_aihubmix_model": "gpt-5.6-sol",
+            "thumbnail_prompt_openrouter_model": "openai/gpt-5.6-sol",
+        }
+    )
+
+    assert payload["default_provider"] == "openrouter"
+    assert "llm_provider" not in payload
 
 
 def test_research_summary_never_contains_raw_source_body_or_secret_fields():

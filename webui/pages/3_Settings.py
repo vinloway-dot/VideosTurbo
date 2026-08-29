@@ -1,4 +1,4 @@
-"""Settings page for Research, TTS providers, API keys, and defaults."""
+"""Settings page for independent Cloud Agent provider settings and API keys."""
 
 import requests
 import streamlit as st
@@ -38,12 +38,18 @@ def _render_settings_page():
     }
     research_provider_catalog = cloud_agent._fallback_research_provider_catalog()
     provider_catalog = cloud_agent._fallback_tts_catalog()
+    thumbnail_prompt_settings = cloud_agent._thumbnail_prompt_default_settings()
+    thumbnail_prompt_provider_catalog = []
     if hasattr(st, "runtime"):
         try:
             defaults.update(cloud_agent._load_cloud_agent_defaults())
             research_settings.update(cloud_agent._load_research_settings())
             research_provider_catalog = cloud_agent._load_research_provider_catalog()
             provider_catalog = cloud_agent._load_tts_provider_catalog()
+            thumbnail_prompt_settings.update(cloud_agent._load_thumbnail_prompt_settings())
+            thumbnail_prompt_provider_catalog = (
+                cloud_agent._load_thumbnail_prompt_provider_catalog()
+            )
         except requests.RequestException as exc:
             st.error(cloud_agent._api_error_message(exc))
 
@@ -74,6 +80,12 @@ def _render_settings_page():
         ),
     ):
         ui_state.setdefault(key, value)
+
+    cloud_agent._render_thumbnail_prompt_settings(
+        ui_state=ui_state,
+        settings=thumbnail_prompt_settings,
+        provider_catalog=thumbnail_prompt_provider_catalog,
+    )
 
     with st.container(key="cloud_agent_settings_research", border=True):
         st.subheader("Research provider")
