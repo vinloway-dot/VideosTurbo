@@ -164,13 +164,31 @@ def test_thumbnail_prompt_provider_key_can_be_updated_and_removed(client):
 
 
 def test_thumbnail_prompt_provider_key_rejects_oversized_input(client):
+    secret = "test-thumbnail-key-" + "x" * 4097
     response = client.put(
         "/api/v1/cloud-agent/thumbnail-prompt/providers/aihubmix/api-key",
-        json={"api_key": "x" * 4097},
+        json={"api_key": secret},
     )
 
     assert response.status_code == 422
-    assert response.json()["detail"][0]["type"] == "string_too_long"
+    assert secret not in response.text
+
+
+def test_thumbnail_prompt_provider_key_validation_hides_oversized_secret(
+    monkeypatch,
+):
+    monkeypatch.setattr(config, "app", dict(THUMBNAIL_PROMPT_DEFAULTS))
+    secret = "thumbnail-api-key-secret-must-not-leak-" + "x" * 4097
+    app = importlib.import_module("app.asgi").get_application()
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.put(
+        "/api/v1/cloud-agent/thumbnail-prompt/providers/aihubmix/api-key",
+        json={"api_key": secret},
+    )
+
+    assert response.status_code == 422
+    assert secret not in response.text
 
 
 def test_thumbnail_prompt_settings_reject_oversized_model_input(client):

@@ -185,18 +185,6 @@ class ConfirmResearchKeyRemoval(BaseModel):
     confirmed: bool
 
 
-class ThumbnailPromptAPIKeyPatch(BaseModel):
-    api_key: str = Field(min_length=1, max_length=4096)
-
-    @field_validator("api_key")
-    @classmethod
-    def _strip_text(cls, value: str) -> str:
-        normalized = str(value or "").strip()
-        if not normalized:
-            raise ValueError("api key must not be blank")
-        return normalized
-
-
 class ConfirmThumbnailPromptKeyRemoval(BaseModel):
     confirmed: bool
 
@@ -301,6 +289,35 @@ def _thumbnail_prompt_http_exception(exc: ThumbnailPromptError) -> HttpException
         ),
         data={"code": code},
     )
+
+
+def _parse_thumbnail_prompt_api_key(body: object) -> str:
+    if not isinstance(body, dict):
+        raise ThumbnailPromptError(
+            "THUMBNAIL_PROMPT_REQUEST_INVALID", "invalid api key payload"
+        )
+    value = body.get("api_key", "")
+    if not isinstance(value, str):
+        raise ThumbnailPromptError(
+            "THUMBNAIL_PROMPT_REQUEST_INVALID", "api key must be a string"
+        )
+    normalized = value.strip()
+    if not normalized or len(normalized) > 4096:
+        raise ThumbnailPromptError(
+            "THUMBNAIL_PROMPT_REQUEST_INVALID", "invalid api key"
+        )
+    return normalized
+
+
+async def _parse_thumbnail_prompt_api_key_request(request: Request) -> str:
+    try:
+        raw_body = await request.body()
+        parsed = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ThumbnailPromptError(
+            "THUMBNAIL_PROMPT_REQUEST_INVALID", "invalid api key payload"
+        ) from exc
+    return _parse_thumbnail_prompt_api_key(parsed)
 
 
 def _safe_accounting(value) -> dict:
@@ -712,17 +729,17 @@ def list_thumbnail_prompt_providers(
 
 
 @router.put("/cloud-agent/thumbnail-prompt/providers/{provider_id}/api-key")
-def update_thumbnail_prompt_provider_api_key(
+async def update_thumbnail_prompt_provider_api_key(
     provider_id: str,
-    body: ThumbnailPromptAPIKeyPatch,
     request: Request,
     service: ThumbnailPromptSettingsService = Depends(
         get_thumbnail_prompt_settings_service
     ),
 ):
-    del request
     try:
-        data = service.set_api_key(provider_id, body.api_key).model_dump(mode="json")
+        data = service.set_api_key(
+            provider_id, await _parse_thumbnail_prompt_api_key_request(request)
+        ).model_dump(mode="json")
     except ThumbnailPromptError as exc:
         raise _thumbnail_prompt_http_exception(exc) from exc
     return utils.get_response(200, data)
