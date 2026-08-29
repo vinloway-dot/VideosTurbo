@@ -245,6 +245,32 @@ def test_oversized_saved_base_url_returns_redacted_recoverable_state(client):
     assert oversized_marker not in providers.text
 
 
+@pytest.mark.parametrize(
+    "persisted_base_url",
+    [
+        "https://example.invalid\\persisted-secret-marker/v1",
+        "https://example.invalid/\x00persisted-secret-marker/v1",
+    ],
+)
+def test_saved_base_urls_with_backslashes_or_controls_are_redacted(
+    client, persisted_base_url
+):
+    config.app["cloud_agent_thumbnail_prompt_aihubmix_base_url"] = persisted_base_url
+
+    settings = client.get("/api/v1/cloud-agent/thumbnail-prompt/settings")
+    providers = client.get("/api/v1/cloud-agent/thumbnail-prompt/providers")
+
+    assert settings.status_code == 200
+    assert settings.json()["data"]["aihubmix_base_url"] == ""
+    assert providers.status_code == 200
+    provider = next(
+        item for item in providers.json()["data"] if item["id"] == "aihubmix"
+    )
+    assert provider["base_url"] == ""
+    assert "persisted-secret-marker" not in settings.text
+    assert "persisted-secret-marker" not in providers.text
+
+
 def test_thumbnail_prompt_settings_validate_and_persist_dedicated_values(client):
     invalid = client.put(
         "/api/v1/cloud-agent/thumbnail-prompt/settings",

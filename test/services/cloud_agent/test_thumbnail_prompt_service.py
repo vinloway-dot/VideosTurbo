@@ -222,6 +222,7 @@ def test_generate_rejects_markdown_links_autolinks_and_reference_definitions(
         "Cinematic <strong>Earth</strong> with dramatic rim light",
         "<div>Earth viewed from orbit</div>",
         "<!-- hidden alternative -->Solar flare over Earth",
+        "<![CDATA[Earth]]>",
         "<?thumbnail style='cinematic'?>Solar flare over Earth",
     ],
 )
@@ -279,6 +280,14 @@ def test_generate_sanitizes_client_factory_failures(tmp_path):
         (
             "cloud_agent_thumbnail_prompt_aihubmix_base_url",
             "https://example.invalid/" + "x" * 2048,
+        ),
+        (
+            "cloud_agent_thumbnail_prompt_aihubmix_base_url",
+            "https://example.invalid\\persisted-secret-marker/v1",
+        ),
+        (
+            "cloud_agent_thumbnail_prompt_aihubmix_base_url",
+            "https://example.invalid/\x00persisted-secret-marker/v1",
         ),
     ],
 )

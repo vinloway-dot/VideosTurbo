@@ -1,5 +1,6 @@
 """Configuration and credential ownership for Thumbnail Prompt."""
 
+import unicodedata
 from urllib.parse import urlsplit
 
 from pydantic import SecretStr
@@ -237,6 +238,10 @@ class ThumbnailPromptSettingsService:
         if (
             not normalized
             or len(normalized) > 2048
+            or any(
+                character == "\\" or unicodedata.category(character) == "Cc"
+                for character in normalized
+            )
             or any(character.isspace() for character in normalized)
             or parsed.scheme not in {"http", "https"}
             or not parsed.netloc
