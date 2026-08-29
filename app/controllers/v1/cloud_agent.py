@@ -148,6 +148,8 @@ _THUMBNAIL_PROMPT_HTTP_STATUS = {
     "PROVIDER_TIMEOUT": 504,
     "PROVIDER_REQUEST_FAILED": 502,
     "THUMBNAIL_PROMPT_RESPONSE_INVALID": 502,
+    "THUMBNAIL_PROMPT_SETTINGS_CORRUPT": 422,
+    "THUMBNAIL_PROMPT_SETTINGS_UNSAFE": 422,
 }
 _THUMBNAIL_PROMPT_PUBLIC_MESSAGES = {
     "PROVIDER_UNSUPPORTED": "thumbnail prompt default provider is invalid; update settings",
@@ -161,6 +163,10 @@ _THUMBNAIL_PROMPT_PUBLIC_MESSAGES = {
     "JOB_MASTER_PROMPT_UNAVAILABLE": "completed video prompt is unavailable",
     "THUMBNAIL_MASTER_PROMPT_MISSING": "thumbnail master prompt is not configured",
     "THUMBNAIL_PROMPT_RESPONSE_INVALID": "thumbnail prompt provider returned an invalid response",
+    "THUMBNAIL_PROMPT_SETTINGS_CORRUPT": (
+        "thumbnail prompt settings are corrupt; save settings to repair them"
+    ),
+    "THUMBNAIL_PROMPT_SETTINGS_UNSAFE": "thumbnail prompt settings storage is unsafe",
 }
 
 

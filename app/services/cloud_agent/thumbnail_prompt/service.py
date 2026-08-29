@@ -20,8 +20,10 @@ _DISALLOWED_OUTPUT_MARKER = re.compile(
     r"(?im)^\s*(?:#{1,6}\s+\S|[-+*]\s+\S|>\s*\S|`{3}|~{3}|"
     r"(?:-{3,}|\*{3,}|_{3,})\s*$|(?:option|alternative|choice)\b"
     r"(?:\s*(?:\d+|[a-z]))?\s*[:.)-]|"
-    r"here(?:\s+is|'s|’s)\s+your\s+prompt\s*:|"
-    r"thumbnail\s+prompt(?:\s*:|\s+[—–-]\s*)|พรอมต์หน้าปก\s*:|"
+    r"(?:your\s+prompt|here(?:\s+is|'s|’s)\s+(?:your\s+prompt|"
+    r"the\s+thumbnail\s+prompt|an?\s+image\s+prompt))\s*:|"
+    r"thumbnail\s+prompt(?:\s*:|\s+[—–-]\s*)|"
+    r"(?:พรอมต์หน้าปก|นี่คือพรอมต์หน้าปก|นี่คือ\s+prompt\s+หน้าปก)\s*:|"
     r"(?:prompt|response|result)\s*:|"
     r"(?:[a-z]|\d+)[.)]\s+\S)"
 )
@@ -78,7 +80,9 @@ class ThumbnailPromptService:
 
         generation_settings = self._settings.get_generation_snapshot()
 
-        instruction = _instruction(video_master_prompt, generation_settings.master_prompt)
+        instruction = _instruction(
+            video_master_prompt, generation_settings.master_prompt
+        )
         client = self._clients.get(generation_settings.provider_id)
         try:
             if client is None:

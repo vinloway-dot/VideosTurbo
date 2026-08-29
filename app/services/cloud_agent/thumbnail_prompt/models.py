@@ -21,6 +21,7 @@ class ThumbnailPromptProviderMetadata(BaseModel):
     custom_model_id: str
     base_url: str
     api_key_configured: bool
+    configuration_error: str | None = None
 
 
 class ThumbnailPromptSettingsPayload(BaseModel):

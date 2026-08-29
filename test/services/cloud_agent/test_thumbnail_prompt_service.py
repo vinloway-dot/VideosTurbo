@@ -161,6 +161,25 @@ def test_generate_rejects_english_and_thai_prompt_preambles(tmp_path, completion
     assert error.value.code == "THUMBNAIL_PROMPT_RESPONSE_INVALID"
 
 
+@pytest.mark.parametrize(
+    "completion",
+    [
+        "Your prompt: Solar flare over Earth",
+        "Here is the thumbnail prompt: Solar flare over Earth",
+        "Here is an image prompt: Solar flare over Earth",
+        "นี่คือพรอมต์หน้าปก: เปลวสุริยะเหนือโลก",
+        "นี่คือ Prompt หน้าปก: เปลวสุริยะเหนือโลก",
+    ],
+)
+def test_generate_rejects_additional_anchored_prompt_preambles(tmp_path, completion):
+    service = service_with_completion(tmp_path, completion)
+
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.generate_for_job("job-1")
+
+    assert error.value.code == "THUMBNAIL_PROMPT_RESPONSE_INVALID"
+
+
 def test_generate_accepts_normal_prose_that_mentions_thumbnail_prompt(tmp_path):
     prompt = "Cinematic thumbnail prompt lighting with Earth at sunrise, 16:9"
     service = service_with_completion(tmp_path, prompt)

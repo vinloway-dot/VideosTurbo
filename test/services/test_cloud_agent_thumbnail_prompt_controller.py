@@ -80,7 +80,9 @@ def _settings_payload(**overrides):
 
 def _persist_settings(service, **updates):
     service.settings_path.parent.mkdir(parents=True, exist_ok=True)
-    persisted = toml.load(service.settings_path) if service.settings_path.exists() else {}
+    persisted = (
+        toml.load(service.settings_path) if service.settings_path.exists() else {}
+    )
     persisted.update(updates)
     serialized = toml.dumps(persisted)
     if any("\x00" in str(value) for value in updates.values()):
@@ -147,6 +149,14 @@ def test_thumbnail_prompt_endpoint_maps_typed_provider_errors(
         (
             "PROVIDER_BASE_URL_INVALID",
             "thumbnail prompt provider base URL is invalid; update settings",
+        ),
+        (
+            "THUMBNAIL_PROMPT_SETTINGS_CORRUPT",
+            "thumbnail prompt settings are corrupt; save settings to repair them",
+        ),
+        (
+            "THUMBNAIL_PROMPT_SETTINGS_UNSAFE",
+            "thumbnail prompt settings storage is unsafe",
         ),
     ],
 )
@@ -233,9 +243,7 @@ def test_invalid_saved_base_urls_return_redacted_recoverable_settings_and_catalo
         assert "query-secret-marker" not in response.text
 
 
-def test_oversized_saved_base_url_returns_redacted_recoverable_state(
-    client, services
-):
+def test_oversized_saved_base_url_returns_redacted_recoverable_state(client, services):
     oversized_marker = "oversized-secret-marker-" + "x" * 2048
     _persist_settings(
         services.settings,

@@ -1,5 +1,7 @@
 """Production composition root for the checkpointed Cloud Agent."""
 
+from pathlib import Path
+
 from app.config import config
 from app.services.cloud_agent.browser import PersistentBrowserManager
 from app.services.cloud_agent.job_store import CloudJobStore
@@ -38,6 +40,7 @@ from app.services.cloud_agent.thumbnail_prompt.service import ThumbnailPromptSer
 from app.services.cloud_agent.thumbnail_prompt.settings import (
     ThumbnailPromptSettingsService,
 )
+from app.utils import utils
 
 
 def build_workflow(*, store: CloudJobStore | None = None) -> CloudAgentWorkflow:
@@ -53,7 +56,6 @@ def build_workflow(*, store: CloudJobStore | None = None) -> CloudAgentWorkflow:
         sessions,
         min_free_disk_gb=float(app_config["cloud_agent_min_free_disk_gb"]),
     )
-
 
     return CloudAgentWorkflow(
         store,
@@ -76,7 +78,9 @@ def build_workflow(*, store: CloudJobStore | None = None) -> CloudAgentWorkflow:
             ),
         ),
         tts_min_duration=float(app_config["cloud_agent_tts_min_duration_seconds"]),
-        canva_min_playback_speed=float(app_config["cloud_agent_canva_min_playback_speed"]),
+        canva_min_playback_speed=float(
+            app_config["cloud_agent_canva_min_playback_speed"]
+        ),
         final_duration_tolerance_seconds=float(
             app_config["cloud_agent_final_duration_tolerance_seconds"]
         ),
@@ -114,7 +118,9 @@ def build_pre_flow_retry_service() -> PreFlowRetryService:
         CloudJobStore(str(app_config["cloud_agent_db_path"])),
         CloudJobStorage(),
         tts_min_duration=float(app_config["cloud_agent_tts_min_duration_seconds"]),
-        canva_min_playback_speed=float(app_config["cloud_agent_canva_min_playback_speed"]),
+        canva_min_playback_speed=float(
+            app_config["cloud_agent_canva_min_playback_speed"]
+        ),
     )
 
 
@@ -125,7 +131,7 @@ def build_cloud_tts_settings_service() -> CloudTTSSettingsService:
 
 def build_thumbnail_prompt_settings_service() -> ThumbnailPromptSettingsService:
     """Compose the isolated Thumbnail Prompt settings boundary."""
-    storage_root = CloudJobStorage().root.parent
+    storage_root = Path(utils.storage_dir())
     return ThumbnailPromptSettingsService(
         settings_path=storage_root / "thumbnail_prompt" / "settings.toml"
     )
