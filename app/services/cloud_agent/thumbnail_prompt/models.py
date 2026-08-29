@@ -1,6 +1,16 @@
+from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator
+
+
+@dataclass(frozen=True)
+class ThumbnailPromptGenerationSettings:
+    provider_id: str
+    api_key: SecretStr
+    model_id: str
+    base_url: str
+    master_prompt: str
 
 
 class ThumbnailPromptProviderMetadata(BaseModel):

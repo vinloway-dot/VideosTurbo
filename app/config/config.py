@@ -68,20 +68,6 @@ RESEARCH_DEFAULTS = {
     "cloud_agent_research_aihubmix_api_key": "",
 }
 
-THUMBNAIL_PROMPT_DEFAULTS = {
-    "cloud_agent_thumbnail_prompt_master_prompt": "",
-    "cloud_agent_thumbnail_prompt_default_provider": "aihubmix",
-    "cloud_agent_thumbnail_prompt_aihubmix_model": "gpt-5.6-sol",
-    "cloud_agent_thumbnail_prompt_aihubmix_custom_model": "",
-    "cloud_agent_thumbnail_prompt_openrouter_model": "openai/gpt-5.6-sol",
-    "cloud_agent_thumbnail_prompt_openrouter_custom_model": "",
-    "cloud_agent_thumbnail_prompt_aihubmix_api_key": "",
-    "cloud_agent_thumbnail_prompt_openrouter_api_key": "",
-    "cloud_agent_thumbnail_prompt_aihubmix_base_url": "https://aihubmix.com/v1",
-    "cloud_agent_thumbnail_prompt_openrouter_base_url": "https://openrouter.ai/api/v1",
-}
-
-
 class _SynchronizedConfig(dict):
     """保持 dict 使用方式不变，同时让运行期配置写操作服从同一把锁。"""
 
@@ -144,8 +130,6 @@ def _apply_cloud_agent_defaults(app_config):
     for key, value in CLOUD_AGENT_DEFAULTS.items():
         app_config.setdefault(key, copy.deepcopy(value))
     for key, value in RESEARCH_DEFAULTS.items():
-        app_config.setdefault(key, copy.deepcopy(value))
-    for key, value in THUMBNAIL_PROMPT_DEFAULTS.items():
         app_config.setdefault(key, copy.deepcopy(value))
     return app_config
 

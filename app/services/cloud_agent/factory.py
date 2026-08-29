@@ -125,7 +125,10 @@ def build_cloud_tts_settings_service() -> CloudTTSSettingsService:
 
 def build_thumbnail_prompt_settings_service() -> ThumbnailPromptSettingsService:
     """Compose the isolated Thumbnail Prompt settings boundary."""
-    return ThumbnailPromptSettingsService()
+    storage_root = CloudJobStorage().root.parent
+    return ThumbnailPromptSettingsService(
+        settings_path=storage_root / "thumbnail_prompt" / "settings.toml"
+    )
 
 
 def build_thumbnail_prompt_service() -> ThumbnailPromptService:

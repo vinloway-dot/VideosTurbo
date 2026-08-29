@@ -1,13 +1,18 @@
-"""Configuration and credential ownership for Thumbnail Prompt."""
+"""Package-owned configuration and credential storage for Thumbnail Prompt."""
 
+import os
+from pathlib import Path
+import tempfile
+import threading
 import unicodedata
 from urllib.parse import urlsplit
 
 from pydantic import SecretStr
+import toml
 
-from app.config import config
 from app.services.cloud_agent.thumbnail_prompt.errors import ThumbnailPromptError
 from app.services.cloud_agent.thumbnail_prompt.models import (
+    ThumbnailPromptGenerationSettings,
     ThumbnailPromptProviderMetadata,
     ThumbnailPromptSettings,
     ThumbnailPromptSettingsPayload,
@@ -18,20 +23,33 @@ _PROVIDERS = {
     "aihubmix": {
         "label": "AIHubMix",
         "default_model": "gpt-5.6-sol",
-        "api_key_name": "cloud_agent_thumbnail_prompt_aihubmix_api_key",
-        "base_url_name": "cloud_agent_thumbnail_prompt_aihubmix_base_url",
-        "model_name": "cloud_agent_thumbnail_prompt_aihubmix_model",
-        "custom_model_name": "cloud_agent_thumbnail_prompt_aihubmix_custom_model",
+        "api_key_name": "aihubmix_api_key",
+        "base_url_name": "aihubmix_base_url",
+        "model_name": "aihubmix_model",
+        "custom_model_name": "aihubmix_custom_model",
     },
     "openrouter": {
         "label": "OpenRouter",
         "default_model": "openai/gpt-5.6-sol",
-        "api_key_name": "cloud_agent_thumbnail_prompt_openrouter_api_key",
-        "base_url_name": "cloud_agent_thumbnail_prompt_openrouter_base_url",
-        "model_name": "cloud_agent_thumbnail_prompt_openrouter_model",
-        "custom_model_name": "cloud_agent_thumbnail_prompt_openrouter_custom_model",
+        "api_key_name": "openrouter_api_key",
+        "base_url_name": "openrouter_base_url",
+        "model_name": "openrouter_model",
+        "custom_model_name": "openrouter_custom_model",
     },
 }
+_DEFAULTS = {
+    "master_prompt": "",
+    "default_provider": "aihubmix",
+    "aihubmix_model": "gpt-5.6-sol",
+    "aihubmix_custom_model": "",
+    "aihubmix_api_key": "",
+    "aihubmix_base_url": "https://aihubmix.com/v1",
+    "openrouter_model": "openai/gpt-5.6-sol",
+    "openrouter_custom_model": "",
+    "openrouter_api_key": "",
+    "openrouter_base_url": "https://openrouter.ai/api/v1",
+}
+_SETTINGS_LOCK = threading.RLock()
 _INVALID_DEFAULT_PROVIDER_MESSAGE = (
     "Saved default thumbnail provider is invalid. "
     "Select AIHubMix or OpenRouter and save Thumbnail Prompt Settings."
@@ -43,7 +61,7 @@ _INVALID_BASE_URL_MESSAGE = (
 
 
 class ThumbnailPromptSettingsService:
-    """Stores Thumbnail Prompt settings without sharing LLM credentials."""
+    """Own Thumbnail Prompt settings without sharing application configuration."""
 
     DEFAULT_PROVIDER_ID = "aihubmix"
     KEY_NAMES = {
@@ -51,64 +69,36 @@ class ThumbnailPromptSettingsService:
         for provider_id, metadata in _PROVIDERS.items()
     }
 
+    def __init__(self, *, settings_path: Path) -> None:
+        self._settings_path = Path(settings_path)
+
+    @property
+    def settings_path(self) -> Path:
+        return self._settings_path
+
     def list_providers(self) -> list[ThumbnailPromptProviderMetadata]:
-        return [self.get_provider(provider_id) for provider_id in _PROVIDERS]
+        with _SETTINGS_LOCK:
+            configured = self._load_locked()
+            return [
+                self._provider_from_config(provider_id, configured)
+                for provider_id in _PROVIDERS
+            ]
 
     def get_provider(self, provider_id: str) -> ThumbnailPromptProviderMetadata:
         normalized = self._require_provider(provider_id)
-        metadata = _PROVIDERS[normalized]
-        readable_base_url, _ = self._readable_base_url(normalized)
-        return ThumbnailPromptProviderMetadata(
-            id=normalized,
-            label=str(metadata["label"]),
-            models=[str(metadata["default_model"]), "custom"],
-            default_model=str(metadata["default_model"]),
-            custom_model_id=self._configured_text(metadata["custom_model_name"]),
-            base_url=readable_base_url,
-            api_key_configured=bool(self._configured_text(metadata["api_key_name"])),
-        )
+        with _SETTINGS_LOCK:
+            return self._provider_from_config(normalized, self._load_locked())
 
     def get_settings(self) -> ThumbnailPromptSettings:
-        configured_provider = self._configured_text(
-            "cloud_agent_thumbnail_prompt_default_provider"
-        )
-        readable_provider = (
-            configured_provider if configured_provider in _PROVIDERS else None
-        )
-        aihubmix_base_url, aihubmix_base_url_valid = self._readable_base_url("aihubmix")
-        openrouter_base_url, openrouter_base_url_valid = self._readable_base_url(
-            "openrouter"
-        )
-        configuration_errors = []
-        if not readable_provider:
-            configuration_errors.append(_INVALID_DEFAULT_PROVIDER_MESSAGE)
-        if not (aihubmix_base_url_valid and openrouter_base_url_valid):
-            configuration_errors.append(_INVALID_BASE_URL_MESSAGE)
-        return ThumbnailPromptSettings(
-            master_prompt=self._configured_text(
-                "cloud_agent_thumbnail_prompt_master_prompt"
-            ),
-            default_provider=readable_provider,
-            configuration_error=" ".join(configuration_errors) or None,
-            aihubmix_model=self._configured_text(_PROVIDERS["aihubmix"]["model_name"]),
-            aihubmix_custom_model_id=self._configured_text(
-                _PROVIDERS["aihubmix"]["custom_model_name"]
-            ),
-            aihubmix_base_url=aihubmix_base_url,
-            openrouter_model=self._configured_text(
-                _PROVIDERS["openrouter"]["model_name"]
-            ),
-            openrouter_custom_model_id=self._configured_text(
-                _PROVIDERS["openrouter"]["custom_model_name"]
-            ),
-            openrouter_base_url=openrouter_base_url,
-        )
+        with _SETTINGS_LOCK:
+            return self._settings_from_config(self._load_locked())
 
     def get_configured_provider_id(self) -> str:
-        configured = self._configured_text(
-            "cloud_agent_thumbnail_prompt_default_provider"
-        )
-        return self._require_provider(configured)
+        with _SETTINGS_LOCK:
+            configured = self._configured_text(
+                self._load_locked(), "default_provider"
+            )
+            return self._require_provider(configured)
 
     def update_settings(
         self, payload: ThumbnailPromptSettingsPayload
@@ -127,11 +117,12 @@ class ThumbnailPromptSettingsService:
             "openrouter", payload.openrouter_base_url
         )
 
-        with config.runtime_config_lock():
-            config.app.update(
+        with _SETTINGS_LOCK:
+            configured = self._load_locked()
+            configured.update(
                 {
-                    "cloud_agent_thumbnail_prompt_master_prompt": payload.master_prompt,
-                    "cloud_agent_thumbnail_prompt_default_provider": payload.default_provider,
+                    "master_prompt": payload.master_prompt,
+                    "default_provider": payload.default_provider,
                     _PROVIDERS["aihubmix"]["model_name"]: payload.aihubmix_model,
                     _PROVIDERS["aihubmix"][
                         "custom_model_name"
@@ -144,8 +135,8 @@ class ThumbnailPromptSettingsService:
                     _PROVIDERS["openrouter"]["base_url_name"]: openrouter_base_url,
                 }
             )
-            config.save_config()
-        return self.get_settings()
+            self._save_locked(configured)
+            return self._settings_from_config(configured)
 
     def set_api_key(
         self, provider_id: str, value: str
@@ -155,10 +146,11 @@ class ThumbnailPromptSettingsService:
         if not cleaned_value:
             return self.get_provider(normalized)
 
-        with config.runtime_config_lock():
-            config.app[self.KEY_NAMES[normalized]] = cleaned_value
-            config.save_config()
-        return self.get_provider(normalized)
+        with _SETTINGS_LOCK:
+            configured = self._load_locked()
+            configured[self.KEY_NAMES[normalized]] = cleaned_value
+            self._save_locked(configured)
+            return self._provider_from_config(normalized, configured)
 
     def remove_api_key(
         self, provider_id: str, confirmed: bool
@@ -168,14 +160,18 @@ class ThumbnailPromptSettingsService:
             raise ThumbnailPromptError(
                 "THUMBNAIL_PROMPT_REQUEST_INVALID", "key removal not confirmed"
             )
-        with config.runtime_config_lock():
-            config.app.pop(self.KEY_NAMES[normalized], None)
-            config.save_config()
-        return self.get_provider(normalized)
+        with _SETTINGS_LOCK:
+            configured = self._load_locked()
+            configured[self.KEY_NAMES[normalized]] = ""
+            self._save_locked(configured)
+            return self._provider_from_config(normalized, configured)
 
     def get_api_key_for_generation(self, provider_id: str) -> SecretStr:
         normalized = self._require_provider(provider_id)
-        value = self._configured_text(self.KEY_NAMES[normalized])
+        with _SETTINGS_LOCK:
+            value = self._configured_text(
+                self._load_locked(), self.KEY_NAMES[normalized]
+            )
         if not value:
             raise ThumbnailPromptError(
                 "PROVIDER_API_KEY_MISSING",
@@ -186,16 +182,117 @@ class ThumbnailPromptSettingsService:
     def resolve_model(self, provider_id: str) -> str:
         normalized = self._require_provider(provider_id)
         metadata = _PROVIDERS[normalized]
-        choice = self._configured_text(metadata["model_name"])
-        custom_model = self._configured_text(metadata["custom_model_name"])
+        with _SETTINGS_LOCK:
+            configured = self._load_locked()
+            choice = self._configured_text(configured, metadata["model_name"])
+            custom_model = self._configured_text(
+                configured, metadata["custom_model_name"]
+            )
         self._validate_model(normalized, choice, custom_model)
         return custom_model if choice == "custom" else choice
 
     def get_base_url_for_generation(self, provider_id: str) -> str:
         normalized = self._require_provider(provider_id)
-        return self._validate_base_url(
-            normalized,
-            self._configured_text(_PROVIDERS[normalized]["base_url_name"]),
+        with _SETTINGS_LOCK:
+            value = self._configured_text(
+                self._load_locked(), _PROVIDERS[normalized]["base_url_name"]
+            )
+        return self._validate_base_url(normalized, value)
+
+    def get_generation_snapshot(self) -> ThumbnailPromptGenerationSettings:
+        with _SETTINGS_LOCK:
+            configured = self._load_locked()
+            provider_id = self._require_provider(
+                self._configured_text(configured, "default_provider")
+            )
+            metadata = _PROVIDERS[provider_id]
+            api_key_value = self._configured_text(
+                configured, metadata["api_key_name"]
+            )
+            if not api_key_value:
+                raise ThumbnailPromptError(
+                    "PROVIDER_API_KEY_MISSING",
+                    f"{provider_id} provider key is not configured",
+                )
+            model_choice = self._configured_text(configured, metadata["model_name"])
+            custom_model = self._configured_text(
+                configured, metadata["custom_model_name"]
+            )
+            self._validate_model(provider_id, model_choice, custom_model)
+            model_id = custom_model if model_choice == "custom" else model_choice
+            base_url = self._validate_base_url(
+                provider_id,
+                self._configured_text(configured, metadata["base_url_name"]),
+            )
+            master_prompt = self._configured_text(configured, "master_prompt")
+            if not master_prompt:
+                raise ThumbnailPromptError(
+                    "THUMBNAIL_MASTER_PROMPT_MISSING",
+                    "ยังไม่ได้ตั้งค่า Thumbnail Master Prompt",
+                )
+            return ThumbnailPromptGenerationSettings(
+                provider_id=provider_id,
+                api_key=SecretStr(api_key_value),
+                model_id=model_id,
+                base_url=base_url,
+                master_prompt=master_prompt,
+            )
+
+    def _provider_from_config(
+        self, provider_id: str, configured: dict[str, object]
+    ) -> ThumbnailPromptProviderMetadata:
+        metadata = _PROVIDERS[provider_id]
+        readable_base_url, _ = self._readable_base_url(provider_id, configured)
+        return ThumbnailPromptProviderMetadata(
+            id=provider_id,
+            label=str(metadata["label"]),
+            models=[str(metadata["default_model"]), "custom"],
+            default_model=str(metadata["default_model"]),
+            custom_model_id=self._configured_text(
+                configured, metadata["custom_model_name"]
+            ),
+            base_url=readable_base_url,
+            api_key_configured=bool(
+                self._configured_text(configured, metadata["api_key_name"])
+            ),
+        )
+
+    def _settings_from_config(
+        self, configured: dict[str, object]
+    ) -> ThumbnailPromptSettings:
+        configured_provider = self._configured_text(configured, "default_provider")
+        readable_provider = (
+            configured_provider if configured_provider in _PROVIDERS else None
+        )
+        aihubmix_base_url, aihubmix_base_url_valid = self._readable_base_url(
+            "aihubmix", configured
+        )
+        openrouter_base_url, openrouter_base_url_valid = self._readable_base_url(
+            "openrouter", configured
+        )
+        configuration_errors = []
+        if not readable_provider:
+            configuration_errors.append(_INVALID_DEFAULT_PROVIDER_MESSAGE)
+        if not (aihubmix_base_url_valid and openrouter_base_url_valid):
+            configuration_errors.append(_INVALID_BASE_URL_MESSAGE)
+        return ThumbnailPromptSettings(
+            master_prompt=self._configured_text(configured, "master_prompt"),
+            default_provider=readable_provider,
+            configuration_error=" ".join(configuration_errors) or None,
+            aihubmix_model=self._configured_text(
+                configured, _PROVIDERS["aihubmix"]["model_name"]
+            ),
+            aihubmix_custom_model_id=self._configured_text(
+                configured, _PROVIDERS["aihubmix"]["custom_model_name"]
+            ),
+            aihubmix_base_url=aihubmix_base_url,
+            openrouter_model=self._configured_text(
+                configured, _PROVIDERS["openrouter"]["model_name"]
+            ),
+            openrouter_custom_model_id=self._configured_text(
+                configured, _PROVIDERS["openrouter"]["custom_model_name"]
+            ),
+            openrouter_base_url=openrouter_base_url,
         )
 
     def _validate_model(
@@ -203,7 +300,8 @@ class ThumbnailPromptSettingsService:
     ) -> None:
         normalized = self._require_provider(provider_id)
         choice = str(model_choice or "").strip()
-        if choice not in self.get_provider(normalized).models:
+        allowed_models = [str(_PROVIDERS[normalized]["default_model"]), "custom"]
+        if choice not in allowed_models:
             raise ThumbnailPromptError(
                 "PROVIDER_MODEL_UNSUPPORTED",
                 f"unsupported catalog model choice for {normalized}",
@@ -257,14 +355,48 @@ class ThumbnailPromptSettingsService:
             )
         return normalized.rstrip("/")
 
-    def _readable_base_url(self, provider_id: str) -> tuple[str, bool]:
+    def _readable_base_url(
+        self, provider_id: str, configured: dict[str, object]
+    ) -> tuple[str, bool]:
         metadata = _PROVIDERS[provider_id]
-        configured = self._configured_text(metadata["base_url_name"])
+        value = self._configured_text(configured, metadata["base_url_name"])
         try:
-            return self._validate_base_url(provider_id, configured), True
+            return self._validate_base_url(provider_id, value), True
         except ThumbnailPromptError:
             return "", False
 
     @staticmethod
-    def _configured_text(key: str) -> str:
-        return str(config.app.get(key, "") or "").strip()
+    def _configured_text(configured: dict[str, object], key: object) -> str:
+        return str(configured.get(str(key), "") or "").strip()
+
+    def _load_locked(self) -> dict[str, object]:
+        configured: dict[str, object] = dict(_DEFAULTS)
+        try:
+            persisted = toml.load(self._settings_path)
+        except (OSError, TypeError, toml.TomlDecodeError):
+            return configured
+        if isinstance(persisted, dict):
+            configured.update(
+                {key: persisted[key] for key in _DEFAULTS if key in persisted}
+            )
+        return configured
+
+    def _save_locked(self, configured: dict[str, object]) -> None:
+        self._settings_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{self._settings_path.name}.",
+            suffix=".tmp",
+            dir=self._settings_path.parent,
+        )
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as temporary_file:
+                temporary_file.write(toml.dumps(configured))
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+            os.chmod(temporary_path, 0o600)
+            os.replace(temporary_path, self._settings_path)
+            os.chmod(self._settings_path, 0o600)
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            raise

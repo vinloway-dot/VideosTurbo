@@ -5,10 +5,9 @@ import importlib
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import toml
 
 from app.asgi import exception_handler
-from app.config import config
-from app.config.config import THUMBNAIL_PROMPT_DEFAULTS
 from app.models.exception import HttpException
 from app.services.cloud_agent.thumbnail_prompt.errors import ThumbnailPromptError
 from app.services.cloud_agent.thumbnail_prompt.settings import (
@@ -21,10 +20,7 @@ def _controller():
 
 
 @pytest.fixture
-def services(monkeypatch):
-    monkeypatch.setattr(config, "app", dict(THUMBNAIL_PROMPT_DEFAULTS))
-    monkeypatch.setattr(config, "save_config", lambda: None)
-
+def services(tmp_path):
     class Library:
         def get_visible_job(self, job_id):
             return SimpleNamespace(id="visible") if job_id == "visible" else None
@@ -43,7 +39,9 @@ def services(monkeypatch):
     return SimpleNamespace(
         library=Library(),
         thumbnail=Thumbnail(),
-        settings=ThumbnailPromptSettingsService(),
+        settings=ThumbnailPromptSettingsService(
+            settings_path=tmp_path / "thumbnail_prompt" / "settings.toml"
+        ),
     )
 
 
@@ -78,6 +76,16 @@ def _settings_payload(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def _persist_settings(service, **updates):
+    service.settings_path.parent.mkdir(parents=True, exist_ok=True)
+    persisted = toml.load(service.settings_path) if service.settings_path.exists() else {}
+    persisted.update(updates)
+    serialized = toml.dumps(persisted)
+    if any("\x00" in str(value) for value in updates.values()):
+        serialized = serialized.replace("x00persisted", r"\u0000persisted")
+    service.settings_path.write_text(serialized)
 
 
 def test_thumbnail_prompt_endpoint_only_generates_for_visible_completed_job(
@@ -172,9 +180,10 @@ def test_thumbnail_prompt_settings_and_providers_redact_api_keys(client, service
 
 def test_invalid_saved_default_provider_returns_recoverable_settings_and_catalog(
     client,
+    services,
 ):
-    config.app["cloud_agent_thumbnail_prompt_default_provider"] = (
-        "private-invalid-provider-value"
+    _persist_settings(
+        services.settings, default_provider="private-invalid-provider-value"
     )
 
     settings = client.get("/api/v1/cloud-agent/thumbnail-prompt/settings")
@@ -196,12 +205,12 @@ def test_invalid_saved_default_provider_returns_recoverable_settings_and_catalog
 
 def test_invalid_saved_base_urls_return_redacted_recoverable_settings_and_catalog(
     client,
+    services,
 ):
-    config.app["cloud_agent_thumbnail_prompt_aihubmix_base_url"] = (
-        "https://user:userinfo-secret-marker@example.invalid/v1"
-    )
-    config.app["cloud_agent_thumbnail_prompt_openrouter_base_url"] = (
-        "https://example.invalid/v1?api_key=query-secret-marker"
+    _persist_settings(
+        services.settings,
+        aihubmix_base_url="https://user:userinfo-secret-marker@example.invalid/v1",
+        openrouter_base_url="https://example.invalid/v1?api_key=query-secret-marker",
     )
 
     settings = client.get("/api/v1/cloud-agent/thumbnail-prompt/settings")
@@ -224,10 +233,13 @@ def test_invalid_saved_base_urls_return_redacted_recoverable_settings_and_catalo
         assert "query-secret-marker" not in response.text
 
 
-def test_oversized_saved_base_url_returns_redacted_recoverable_state(client):
+def test_oversized_saved_base_url_returns_redacted_recoverable_state(
+    client, services
+):
     oversized_marker = "oversized-secret-marker-" + "x" * 2048
-    config.app["cloud_agent_thumbnail_prompt_aihubmix_base_url"] = (
-        f"https://example.invalid/{oversized_marker}"
+    _persist_settings(
+        services.settings,
+        aihubmix_base_url=f"https://example.invalid/{oversized_marker}",
     )
 
     settings = client.get("/api/v1/cloud-agent/thumbnail-prompt/settings")
@@ -253,9 +265,9 @@ def test_oversized_saved_base_url_returns_redacted_recoverable_state(client):
     ],
 )
 def test_saved_base_urls_with_backslashes_or_controls_are_redacted(
-    client, persisted_base_url
+    client, services, persisted_base_url
 ):
-    config.app["cloud_agent_thumbnail_prompt_aihubmix_base_url"] = persisted_base_url
+    _persist_settings(services.settings, aihubmix_base_url=persisted_base_url)
 
     settings = client.get("/api/v1/cloud-agent/thumbnail-prompt/settings")
     providers = client.get("/api/v1/cloud-agent/thumbnail-prompt/providers")
@@ -311,13 +323,10 @@ def test_thumbnail_prompt_settings_reject_invalid_base_url(client):
     assert response.status_code == 422
 
 
-def test_real_app_hides_oversized_submitted_base_url_secret(monkeypatch):
-    monkeypatch.setattr(config, "app", dict(THUMBNAIL_PROMPT_DEFAULTS))
+def test_app_hides_oversized_submitted_base_url_secret(client):
     secret_marker = "submitted-base-url-secret-must-not-leak-" + "x" * 2048
-    app = importlib.import_module("app.asgi").get_application()
-    real_client = TestClient(app, raise_server_exceptions=False)
 
-    response = real_client.put(
+    response = client.put(
         "/api/v1/cloud-agent/thumbnail-prompt/settings",
         json=_settings_payload(
             aihubmix_base_url=f"https://example.invalid/{secret_marker}"
@@ -360,13 +369,8 @@ def test_thumbnail_prompt_provider_key_rejects_oversized_input(client):
     assert secret not in response.text
 
 
-def test_thumbnail_prompt_provider_key_validation_hides_oversized_secret(
-    monkeypatch,
-):
-    monkeypatch.setattr(config, "app", dict(THUMBNAIL_PROMPT_DEFAULTS))
+def test_thumbnail_prompt_provider_key_validation_hides_oversized_secret(client):
     secret = "thumbnail-api-key-secret-must-not-leak-" + "x" * 4097
-    app = importlib.import_module("app.asgi").get_application()
-    client = TestClient(app, raise_server_exceptions=False)
 
     response = client.put(
         "/api/v1/cloud-agent/thumbnail-prompt/providers/aihubmix/api-key",

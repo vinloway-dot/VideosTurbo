@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, Mapping
 
+import httpx
 import openai
 from openai import OpenAI
 
@@ -18,7 +19,10 @@ from app.services.cloud_agent.thumbnail_prompt.settings import (
 _DISALLOWED_OUTPUT_MARKER = re.compile(
     r"(?im)^\s*(?:#{1,6}\s+\S|[-+*]\s+\S|>\s*\S|`{3}|~{3}|"
     r"(?:-{3,}|\*{3,}|_{3,})\s*$|(?:option|alternative|choice)\b"
-    r"(?:\s*(?:\d+|[a-z]))?\s*[:.)-]|(?:prompt|response|result)\s*:|"
+    r"(?:\s*(?:\d+|[a-z]))?\s*[:.)-]|"
+    r"here(?:\s+is|'s|’s)\s+your\s+prompt\s*:|"
+    r"thumbnail\s+prompt(?:\s*:|\s+[—–-]\s*)|พรอมต์หน้าปก\s*:|"
+    r"(?:prompt|response|result)\s*:|"
     r"(?:[a-z]|\d+)[.)]\s+\S)"
 )
 _DISALLOWED_INLINE_MARKDOWN = re.compile(
@@ -33,7 +37,7 @@ _DISALLOWED_INLINE_MARKDOWN = re.compile(
     r"(?<![\w_])_[^_\r\n]+_(?!\w))",
     re.IGNORECASE,
 )
-PROVIDER_TIMEOUT_SECONDS = 45
+PROVIDER_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
 
 
 def _instruction(master_prompt: str, thumbnail_master_prompt: str) -> str:
@@ -72,31 +76,20 @@ class ThumbnailPromptService:
                 "JOB_MASTER_PROMPT_UNAVAILABLE", str(exc)
             ) from exc
 
-        provider_id = self._settings.get_configured_provider_id()
-        api_key = self._settings.get_api_key_for_generation(provider_id)
-        model_id = self._settings.resolve_model(provider_id)
-        base_url = self._settings.get_base_url_for_generation(provider_id)
-        thumbnail_master_prompt = str(
-            self._settings.get_settings().master_prompt or ""
-        ).strip()
-        if not thumbnail_master_prompt:
-            raise ThumbnailPromptError(
-                "THUMBNAIL_MASTER_PROMPT_MISSING",
-                "ยังไม่ได้ตั้งค่า Thumbnail Master Prompt",
-            )
+        generation_settings = self._settings.get_generation_snapshot()
 
-        instruction = _instruction(video_master_prompt, thumbnail_master_prompt)
-        client = self._clients.get(provider_id)
+        instruction = _instruction(video_master_prompt, generation_settings.master_prompt)
+        client = self._clients.get(generation_settings.provider_id)
         try:
             if client is None:
                 client = self._client_factory(
-                    api_key=api_key.get_secret_value(),
-                    base_url=base_url,
-                    timeout=PROVIDER_TIMEOUT_SECONDS,
+                    api_key=generation_settings.api_key.get_secret_value(),
+                    base_url=generation_settings.base_url,
+                    timeout=PROVIDER_TIMEOUT,
                     max_retries=0,
                 )
             response = client.chat.completions.create(
-                model=model_id,
+                model=generation_settings.model_id,
                 messages=[{"role": "user", "content": instruction}],
             )
         except Exception as exc:

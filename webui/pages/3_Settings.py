@@ -46,7 +46,9 @@ def _render_settings_page():
             research_settings.update(cloud_agent._load_research_settings())
             research_provider_catalog = cloud_agent._load_research_provider_catalog()
             provider_catalog = cloud_agent._load_tts_provider_catalog()
-            thumbnail_prompt_settings.update(cloud_agent._load_thumbnail_prompt_settings())
+            thumbnail_prompt_settings.update(
+                cloud_agent._load_thumbnail_prompt_settings()
+            )
             thumbnail_prompt_provider_catalog = (
                 cloud_agent._load_thumbnail_prompt_provider_catalog()
             )

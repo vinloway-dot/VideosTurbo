@@ -1,11 +1,12 @@
 from types import SimpleNamespace
+import threading
 
+import httpx
 import pytest
 from pydantic import SecretStr
+import toml
 
 from app.services.cloud_agent.storage import CloudJobStorage
-from app.config import config
-from app.config.config import THUMBNAIL_PROMPT_DEFAULTS
 from app.services.cloud_agent.thumbnail_prompt.errors import ThumbnailPromptError
 from app.services.cloud_agent.thumbnail_prompt.service import ThumbnailPromptService
 from app.services.cloud_agent.thumbnail_prompt.settings import (
@@ -34,27 +35,14 @@ class FakeCompletionClient:
 
 
 class FakeSettings:
-    def get_configured_provider_id(self):
-        return "aihubmix"
-
-    def get_api_key_for_generation(self, provider_id):
-        assert provider_id == "aihubmix"
-        return SecretStr("thumbnail-secret")
-
-    def resolve_model(self, provider_id):
-        assert provider_id == "aihubmix"
-        return "thumbnail-model"
-
-    def get_provider(self, provider_id):
-        assert provider_id == "aihubmix"
-        return SimpleNamespace(base_url="https://thumbnail-provider.invalid/v1")
-
-    def get_base_url_for_generation(self, provider_id):
-        assert provider_id == "aihubmix"
-        return "https://thumbnail-provider.invalid/v1"
-
-    def get_settings(self):
-        return SimpleNamespace(master_prompt="Follow the thumbnail art direction.")
+    def get_generation_snapshot(self):
+        return SimpleNamespace(
+            provider_id="aihubmix",
+            api_key=SecretStr("thumbnail-secret"),
+            model_id="thumbnail-model",
+            base_url="https://thumbnail-provider.invalid/v1",
+            master_prompt="Follow the thumbnail art direction.",
+        )
 
 
 def ready_settings():
@@ -71,6 +59,46 @@ def service_with_completion(tmp_path, completion):
         settings=ready_settings(),
         clients={"aihubmix": FakeCompletionClient(completion)},
     )
+
+
+def test_generate_reads_one_generation_settings_snapshot(tmp_path):
+    storage = CloudJobStorage(tmp_path / "jobs")
+    storage.write_inputs(
+        "job-1", script="script", master_prompt="FULL VIDEO MASTER PROMPT"
+    )
+
+    class SnapshotOnlySettings:
+        def __init__(self):
+            self.calls = 0
+            self.lock = threading.Lock()
+
+        def get_generation_snapshot(self):
+            with self.lock:
+                self.calls += 1
+                return SimpleNamespace(
+                    provider_id="aihubmix",
+                    api_key=SecretStr("thumbnail-secret"),
+                    model_id="thumbnail-model",
+                    base_url="https://thumbnail-provider.invalid/v1",
+                    master_prompt="Follow the thumbnail art direction.",
+                )
+
+    class LockCheckingClient(FakeCompletionClient):
+        def create(self, *, model, messages):
+            assert settings.lock.acquire(blocking=False)
+            settings.lock.release()
+            return super().create(model=model, messages=messages)
+
+    settings = SnapshotOnlySettings()
+    client = LockCheckingClient("Solar flare over Earth")
+    service = ThumbnailPromptService(
+        storage=storage,
+        settings=settings,
+        clients={"aihubmix": client},
+    )
+
+    assert service.generate_for_job("job-1") == "Solar flare over Earth"
+    assert settings.calls == 1
 
 
 def test_generate_uses_full_saved_master_prompt_and_returns_one_plain_prompt(tmp_path):
@@ -113,6 +141,31 @@ def test_generate_rejects_labelled_or_alternative_provider_output(tmp_path, comp
 
     with pytest.raises(ThumbnailPromptError, match="ผลลัพธ์"):
         service.generate_for_job("job-1")
+
+
+@pytest.mark.parametrize(
+    "completion",
+    [
+        "Here is your prompt: Solar flare over Earth",
+        "Thumbnail prompt — Solar flare over Earth",
+        "Prompt: Solar flare over Earth",
+        "พรอมต์หน้าปก: เปลวสุริยะเหนือโลก",
+    ],
+)
+def test_generate_rejects_english_and_thai_prompt_preambles(tmp_path, completion):
+    service = service_with_completion(tmp_path, completion)
+
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.generate_for_job("job-1")
+
+    assert error.value.code == "THUMBNAIL_PROMPT_RESPONSE_INVALID"
+
+
+def test_generate_accepts_normal_prose_that_mentions_thumbnail_prompt(tmp_path):
+    prompt = "Cinematic thumbnail prompt lighting with Earth at sunrise, 16:9"
+    service = service_with_completion(tmp_path, prompt)
+
+    assert service.generate_for_job("job-1") == prompt
 
 
 def test_generate_rejects_lettered_list_alternatives(tmp_path):
@@ -273,42 +326,44 @@ def test_generate_sanitizes_client_factory_failures(tmp_path):
 @pytest.mark.parametrize(
     ("config_key", "value"),
     [
-        ("cloud_agent_thumbnail_prompt_default_provider", "unknown"),
-        ("cloud_agent_thumbnail_prompt_aihubmix_base_url", "not-a-url"),
+        ("default_provider", "unknown"),
+        ("aihubmix_base_url", "not-a-url"),
         (
-            "cloud_agent_thumbnail_prompt_aihubmix_base_url",
+            "aihubmix_base_url",
             "https://user:secret@example.invalid/v1",
         ),
         (
-            "cloud_agent_thumbnail_prompt_aihubmix_base_url",
+            "aihubmix_base_url",
             "https://example.invalid/v1?api_key=secret",
         ),
         (
-            "cloud_agent_thumbnail_prompt_aihubmix_base_url",
+            "aihubmix_base_url",
             "https://example.invalid/" + "x" * 2048,
         ),
         (
-            "cloud_agent_thumbnail_prompt_aihubmix_base_url",
+            "aihubmix_base_url",
             "https://example.invalid\\persisted-secret-marker/v1",
         ),
         (
-            "cloud_agent_thumbnail_prompt_aihubmix_base_url",
+            "aihubmix_base_url",
             "https://example.invalid/\x00persisted-secret-marker/v1",
         ),
     ],
 )
 def test_generate_rejects_invalid_provider_configuration_before_client_creation(
-    tmp_path, monkeypatch, config_key, value
+    tmp_path, config_key, value
 ):
-    app_config = dict(THUMBNAIL_PROMPT_DEFAULTS)
-    app_config.update(
+    settings_path = tmp_path / "settings.toml"
+    persisted = toml.dumps(
         {
-            "cloud_agent_thumbnail_prompt_master_prompt": "Art direction",
-            "cloud_agent_thumbnail_prompt_aihubmix_api_key": "secret",
+            "master_prompt": "Art direction",
+            "aihubmix_api_key": "secret",
             config_key: value,
         }
     )
-    monkeypatch.setattr(config, "app", app_config)
+    if "\x00" in value:
+        persisted = persisted.replace("x00persisted", r"\u0000persisted")
+    settings_path.write_text(persisted)
     storage = CloudJobStorage(tmp_path / "jobs")
     storage.write_inputs(
         "job-1", script="script", master_prompt="FULL VIDEO MASTER PROMPT"
@@ -317,7 +372,7 @@ def test_generate_rejects_invalid_provider_configuration_before_client_creation(
 
     service = ThumbnailPromptService(
         storage=storage,
-        settings=ThumbnailPromptSettingsService(),
+        settings=ThumbnailPromptSettingsService(settings_path=settings_path),
         client_factory=lambda **kwargs: factory_calls.append(kwargs),
     )
 
@@ -327,7 +382,7 @@ def test_generate_rejects_invalid_provider_configuration_before_client_creation(
     assert factory_calls == []
 
 
-def test_provider_timeout_is_shorter_than_the_callers_request_timeout(tmp_path):
+def test_provider_timeout_has_explicit_phase_budget_below_ui_deadline(tmp_path):
     storage = CloudJobStorage(tmp_path / "jobs")
     storage.write_inputs(
         "job-1", script="script", master_prompt="FULL VIDEO MASTER PROMPT"
@@ -346,5 +401,11 @@ def test_provider_timeout_is_shorter_than_the_callers_request_timeout(tmp_path):
 
     service.generate_for_job("job-1")
 
-    assert factory_calls[0]["timeout"] == 45
+    timeout = factory_calls[0]["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 5.0
+    assert timeout.read == 30.0
+    assert timeout.write == 5.0
+    assert timeout.pool == 5.0
+    assert sum((timeout.connect, timeout.read, timeout.write, timeout.pool)) <= 45.0
     assert factory_calls[0]["max_retries"] == 0
