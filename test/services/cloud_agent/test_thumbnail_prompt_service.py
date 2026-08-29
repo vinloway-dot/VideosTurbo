@@ -373,7 +373,7 @@ def test_generate_rejects_invalid_provider_configuration_before_client_creation(
     tmp_path, config_key, value
 ):
     settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
-    settings_path.parent.mkdir()
+    settings_path.parent.mkdir(mode=0o700)
     persisted = toml.dumps(
         {
             "master_prompt": "Art direction",
@@ -384,6 +384,7 @@ def test_generate_rejects_invalid_provider_configuration_before_client_creation(
     if "\x00" in value:
         persisted = persisted.replace("x00persisted", r"\u0000persisted")
     settings_path.write_text(persisted)
+    settings_path.chmod(0o600)
     storage = CloudJobStorage(tmp_path / "jobs")
     storage.write_inputs(
         "job-1", script="script", master_prompt="FULL VIDEO MASTER PROMPT"

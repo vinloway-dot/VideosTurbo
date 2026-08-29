@@ -1,3 +1,4 @@
+import fcntl
 import os
 import stat
 from dataclasses import FrozenInstanceError
@@ -102,8 +103,9 @@ def test_corrupt_settings_reads_return_sanitized_recovery_state(
     tmp_path, persisted, secret_marker
 ):
     settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
-    settings_path.parent.mkdir()
+    settings_path.parent.mkdir(mode=0o700)
     settings_path.write_bytes(persisted)
+    settings_path.chmod(0o600)
     service = ThumbnailPromptSettingsService(settings_path=settings_path)
 
     settings = service.get_settings()
@@ -127,7 +129,7 @@ def test_corrupt_settings_reads_return_sanitized_recovery_state(
 
 def test_settings_read_os_error_returns_sanitized_recovery_state(tmp_path):
     settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
-    settings_path.parent.mkdir()
+    settings_path.parent.mkdir(mode=0o700)
     settings_path.write_text('master_prompt = "must-not-leak"\n')
     settings_path.chmod(0)
     try:
@@ -143,9 +145,10 @@ def test_settings_read_os_error_returns_sanitized_recovery_state(tmp_path):
 
 def test_successful_settings_repair_preserves_corrupt_file(tmp_path):
     settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
-    settings_path.parent.mkdir()
+    settings_path.parent.mkdir(mode=0o700)
     corrupt_bytes = b'[broken = "corrupt-secret-marker"'
     settings_path.write_bytes(corrupt_bytes)
+    settings_path.chmod(0o600)
     service = ThumbnailPromptSettingsService(settings_path=settings_path)
 
     updated = service.update_settings(_valid_payload())
@@ -159,9 +162,10 @@ def test_successful_settings_repair_preserves_corrupt_file(tmp_path):
 
 def test_successful_api_key_repair_preserves_corrupt_file(tmp_path):
     settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
-    settings_path.parent.mkdir()
+    settings_path.parent.mkdir(mode=0o700)
     corrupt_bytes = b"\xffcorrupt-key-file"
     settings_path.write_bytes(corrupt_bytes)
+    settings_path.chmod(0o600)
     service = ThumbnailPromptSettingsService(settings_path=settings_path)
 
     provider = service.set_api_key("openrouter", "repaired-key")
@@ -175,10 +179,10 @@ def test_successful_api_key_repair_preserves_corrupt_file(tmp_path):
 
 def test_corrupt_backup_is_private_and_preserves_secret_bytes(tmp_path):
     settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
-    settings_path.parent.mkdir()
+    settings_path.parent.mkdir(mode=0o700)
     corrupt_bytes = b'[broken = "corrupt-secret-sentinel"'
     settings_path.write_bytes(corrupt_bytes)
-    settings_path.chmod(0o644)
+    settings_path.chmod(0o600)
     service = ThumbnailPromptSettingsService(settings_path=settings_path)
 
     updated = service.update_settings(_valid_payload())
@@ -194,9 +198,10 @@ def test_failed_atomic_repair_leaves_canonical_corrupt_state_unchanged(
     tmp_path, monkeypatch
 ):
     settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
-    settings_path.parent.mkdir()
+    settings_path.parent.mkdir(mode=0o700)
     corrupt_bytes = b'[broken = "canonical-secret-sentinel"'
     settings_path.write_bytes(corrupt_bytes)
+    settings_path.chmod(0o600)
     service = ThumbnailPromptSettingsService(settings_path=settings_path)
 
     def fail_replace(*args, **kwargs):
@@ -218,7 +223,7 @@ def test_failed_atomic_repair_leaves_canonical_corrupt_state_unchanged(
 
 def test_hard_linked_settings_file_is_unsafe_and_cannot_be_repaired(tmp_path):
     settings_dir = tmp_path / "thumbnail_prompt"
-    settings_dir.mkdir()
+    settings_dir.mkdir(mode=0o700)
     outside = tmp_path / "outside-settings.toml"
     outside_bytes = b'[broken = "hard-link-secret-sentinel"'
     outside.write_bytes(outside_bytes)
@@ -238,11 +243,164 @@ def test_hard_linked_settings_file_is_unsafe_and_cannot_be_repaired(tmp_path):
     assert list(settings_dir.glob(".corrupt-*")) == []
 
 
+def test_non_private_canonical_mode_is_unsafe_and_cannot_be_updated(tmp_path):
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    settings_path.parent.mkdir(mode=0o700)
+    persisted = b'aihubmix_api_key = "mode-secret-sentinel"\n'
+    settings_path.write_bytes(persisted)
+    settings_path.chmod(0o644)
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+
+    recovered = service.get_settings()
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.set_api_key("openrouter", "must-not-be-written")
+
+    assert recovered.configuration_error == _CORRUPT_SETTINGS_MESSAGE
+    assert "mode-secret-sentinel" not in recovered.model_dump_json()
+    assert error.value.code == "THUMBNAIL_PROMPT_SETTINGS_UNSAFE"
+    assert settings_path.read_bytes() == persisted
+
+
+def test_canonical_substitution_during_read_returns_sanitized_unsafe_state(tmp_path):
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    settings_path.parent.mkdir(mode=0o700)
+    settings_path.write_bytes(b'master_prompt = "original-safe-prompt"\n')
+    settings_path.chmod(0o600)
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+    real_read = service._read_bounded
+    attacker_bytes = b'master_prompt = "attacker-read-secret"\n'
+
+    def substitute_after_read(file_descriptor):
+        content = real_read(file_descriptor)
+        attacker_path = settings_path.parent / ".attacker-canonical"
+        attacker_path.write_bytes(attacker_bytes)
+        attacker_path.chmod(0o644)
+        os.replace(attacker_path, settings_path)
+        return content
+
+    service._read_bounded = substitute_after_read
+
+    recovered = service.get_settings()
+
+    assert recovered.configuration_error == _CORRUPT_SETTINGS_MESSAGE
+    assert "original-safe-prompt" not in recovered.model_dump_json()
+    assert "attacker-read-secret" not in recovered.model_dump_json()
+    assert settings_path.read_bytes() == attacker_bytes
+
+
+def test_foreign_owned_canonical_is_unsafe_and_secret_redacted(tmp_path, monkeypatch):
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    settings_path.parent.mkdir(mode=0o700)
+    persisted = b'aihubmix_api_key = "owner-secret-sentinel"\n'
+    settings_path.write_bytes(persisted)
+    settings_path.chmod(0o600)
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+    real_fstat = os.fstat
+
+    def report_foreign_owner(file_descriptor):
+        file_stat = real_fstat(file_descriptor)
+        target = os.readlink(f"/proc/self/fd/{file_descriptor}")
+        if target.endswith("/settings.toml"):
+            values = list(file_stat)
+            values[4] = file_stat.st_uid + 1
+            return os.stat_result(values)
+        return file_stat
+
+    monkeypatch.setattr(
+        "app.services.cloud_agent.thumbnail_prompt.settings.os.fstat",
+        report_foreign_owner,
+    )
+
+    recovered = service.get_settings()
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.set_api_key("openrouter", "must-not-be-written")
+
+    assert recovered.configuration_error == _CORRUPT_SETTINGS_MESSAGE
+    assert "owner-secret-sentinel" not in recovered.model_dump_json()
+    assert error.value.code == "THUMBNAIL_PROMPT_SETTINGS_UNSAFE"
+    assert settings_path.read_bytes() == persisted
+
+
+def test_oversized_sparse_corrupt_file_is_not_copied_or_repaired(tmp_path):
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    settings_path.parent.mkdir(mode=0o700)
+    with settings_path.open("wb") as settings_file:
+        settings_file.truncate(16 * 1024 * 1024)
+    settings_path.chmod(0o600)
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+
+    recovered = service.get_settings()
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.update_settings(_valid_payload())
+
+    assert recovered.configuration_error == _CORRUPT_SETTINGS_MESSAGE
+    assert error.value.code == "THUMBNAIL_PROMPT_SETTINGS_UNSAFE"
+    assert settings_path.stat().st_size == 16 * 1024 * 1024
+    assert list(settings_path.parent.glob(".corrupt-*")) == []
+
+
+def test_temp_substitution_is_rejected_and_attacker_file_is_not_deleted(tmp_path):
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+    real_verify_lock = service._verify_lock_identity_locked
+    attacker_bytes = b'aihubmix_api_key = "attacker-temp-secret"\n'
+    substituted = False
+
+    def substitute_temp_after_lock_check(directory_fd, lock_fd):
+        nonlocal substituted
+        real_verify_lock(directory_fd, lock_fd)
+        temporary_names = [
+            name
+            for name in os.listdir(directory_fd)
+            if name.startswith(".settings.toml.") and name.endswith(".tmp")
+        ]
+        if temporary_names and not substituted:
+            substituted = True
+            attacker_path = settings_path.parent / ".attacker-temp"
+            attacker_path.write_bytes(attacker_bytes)
+            attacker_path.chmod(0o644)
+            os.replace(attacker_path, settings_path.parent / temporary_names[0])
+
+    service._verify_lock_identity_locked = substitute_temp_after_lock_check
+
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.set_api_key("aihubmix", "legitimate-secret")
+
+    assert error.value.code == "THUMBNAIL_PROMPT_SETTINGS_UNSAFE"
+    assert not settings_path.exists()
+    remaining_temps = list(settings_path.parent.glob(".settings.toml.*.tmp"))
+    assert len(remaining_temps) == 1
+    assert remaining_temps[0].read_bytes() == attacker_bytes
+    assert stat.S_IMODE(remaining_temps[0].stat().st_mode) == 0o644
+
+
+def test_post_replace_canonical_mode_is_verified_before_success(tmp_path, monkeypatch):
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+    real_replace = os.replace
+
+    def replace_then_weaken_mode(source, destination, **kwargs):
+        real_replace(source, destination, **kwargs)
+        os.chmod(destination, 0o644, dir_fd=kwargs["dst_dir_fd"])
+
+    monkeypatch.setattr(
+        "app.services.cloud_agent.thumbnail_prompt.settings.os.replace",
+        replace_then_weaken_mode,
+    )
+
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.set_api_key("aihubmix", "legitimate-secret")
+
+    assert error.value.code == "THUMBNAIL_PROMPT_SETTINGS_UNSAFE"
+    assert stat.S_IMODE(settings_path.stat().st_mode) == 0o644
+
+
 def test_failed_validation_does_not_overwrite_or_preserve_corrupt_file(tmp_path):
     settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
-    settings_path.parent.mkdir()
+    settings_path.parent.mkdir(mode=0o700)
     corrupt_bytes = b"[invalid"
     settings_path.write_bytes(corrupt_bytes)
+    settings_path.chmod(0o600)
     service = ThumbnailPromptSettingsService(settings_path=settings_path)
 
     with pytest.raises(ThumbnailPromptError) as error:
@@ -409,7 +567,7 @@ def test_symlinked_settings_parent_is_rejected_without_outside_write(tmp_path):
 
 def test_symlinked_settings_file_is_not_read_or_written(tmp_path):
     settings_dir = tmp_path / "thumbnail_prompt"
-    settings_dir.mkdir()
+    settings_dir.mkdir(mode=0o700)
     outside_file = tmp_path / "outside-settings.toml"
     outside_bytes = b'master_prompt = "outside-secret-marker"\n'
     outside_file.write_bytes(outside_bytes)
@@ -430,7 +588,7 @@ def test_symlinked_settings_file_is_not_read_or_written(tmp_path):
 
 def test_symlinked_lock_file_is_rejected_without_outside_write(tmp_path):
     settings_dir = tmp_path / "thumbnail_prompt"
-    settings_dir.mkdir()
+    settings_dir.mkdir(mode=0o700)
     outside_lock = tmp_path / "outside-lock"
     outside_lock.write_bytes(b"outside-lock-sentinel")
     (settings_dir / ".settings.lock").symlink_to(outside_lock)
@@ -443,6 +601,51 @@ def test_symlinked_lock_file_is_rejected_without_outside_write(tmp_path):
     assert error.value.code == "THUMBNAIL_PROMPT_SETTINGS_UNSAFE"
     assert outside_lock.read_bytes() == b"outside-lock-sentinel"
     assert not settings_path.exists()
+
+
+def test_lock_fstat_failure_does_not_leak_open_descriptors(tmp_path, monkeypatch):
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+    descriptor_count_before = len(os.listdir("/proc/self/fd"))
+    real_fstat = os.fstat
+
+    def fail_lock_fstat(file_descriptor):
+        target = os.readlink(f"/proc/self/fd/{file_descriptor}")
+        if target.endswith("/.settings.lock"):
+            raise OSError("injected lock fstat failure")
+        return real_fstat(file_descriptor)
+
+    monkeypatch.setattr(
+        "app.services.cloud_agent.thumbnail_prompt.settings.os.fstat",
+        fail_lock_fstat,
+    )
+
+    recovered = service.get_settings()
+
+    assert recovered.configuration_error == _CORRUPT_SETTINGS_MESSAGE
+    assert len(os.listdir("/proc/self/fd")) == descriptor_count_before
+
+
+def test_unlock_failure_still_closes_all_directory_descriptors(tmp_path, monkeypatch):
+    settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+    descriptor_count_before = len(os.listdir("/proc/self/fd"))
+    real_flock = fcntl.flock
+
+    def fail_unlock(file_descriptor, operation):
+        if operation == fcntl.LOCK_UN:
+            raise OSError("injected unlock failure")
+        return real_flock(file_descriptor, operation)
+
+    monkeypatch.setattr(
+        "app.services.cloud_agent.thumbnail_prompt.settings.fcntl.flock",
+        fail_unlock,
+    )
+
+    recovered = service.get_settings()
+
+    assert recovered.configuration_error == _CORRUPT_SETTINGS_MESSAGE
+    assert len(os.listdir("/proc/self/fd")) == descriptor_count_before
 
 
 def test_atomic_save_fsyncs_file_and_containing_directory(tmp_path, monkeypatch):
@@ -496,6 +699,77 @@ def test_existing_parent_and_dedicated_leaf_permissions_are_unchanged(tmp_path):
     assert stat.S_IMODE(parent.stat().st_mode) == 0o751
     assert stat.S_IMODE(settings_dir.stat().st_mode) == 0o755
     assert stat.S_IMODE((settings_dir / ".settings.lock").stat().st_mode) == 0o600
+
+
+def test_group_world_writable_dedicated_leaf_is_rejected_without_mutation(tmp_path):
+    settings_dir = tmp_path / "thumbnail_prompt"
+    settings_dir.mkdir(mode=0o700)
+    settings_dir.chmod(0o777)
+    settings_path = settings_dir / "settings.toml"
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+
+    recovered = service.get_settings()
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.set_api_key("aihubmix", "must-not-be-written")
+
+    assert recovered.configuration_error == _CORRUPT_SETTINGS_MESSAGE
+    assert error.value.code == "THUMBNAIL_PROMPT_SETTINGS_UNSAFE"
+    assert stat.S_IMODE(settings_dir.stat().st_mode) == 0o777
+    assert list(settings_dir.iterdir()) == []
+
+
+def test_leaf_rename_replacement_before_commit_aborts_without_detached_write(tmp_path):
+    settings_dir = tmp_path / "thumbnail_prompt"
+    settings_path = settings_dir / "settings.toml"
+    detached_dir = tmp_path / "thumbnail_prompt-detached"
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+    real_verify_lock = service._verify_lock_identity_locked
+    replaced = False
+
+    def replace_leaf_after_lock_check(directory_fd, lock_fd):
+        nonlocal replaced
+        real_verify_lock(directory_fd, lock_fd)
+        temporary_exists = any(
+            name.startswith(".settings.toml.") and name.endswith(".tmp")
+            for name in os.listdir(directory_fd)
+        )
+        if temporary_exists and not replaced:
+            replaced = True
+            settings_dir.rename(detached_dir)
+            settings_dir.mkdir(mode=0o700)
+
+    service._verify_lock_identity_locked = replace_leaf_after_lock_check
+
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.set_api_key("aihubmix", "must-not-be-written")
+
+    assert error.value.code == "THUMBNAIL_PROMPT_SETTINGS_UNSAFE"
+    assert not settings_path.exists()
+    assert not (detached_dir / "settings.toml").exists()
+    assert list(settings_dir.iterdir()) == []
+    assert list(detached_dir.glob(".settings.toml.*.tmp")) == []
+
+
+def test_leaf_replacement_after_save_is_detected_before_returning_success(tmp_path):
+    settings_dir = tmp_path / "thumbnail_prompt"
+    settings_path = settings_dir / "settings.toml"
+    detached_dir = tmp_path / "thumbnail_prompt-after-save"
+    service = ThumbnailPromptSettingsService(settings_path=settings_path)
+    real_save = service._save_locked
+
+    def save_then_replace_leaf(*args, **kwargs):
+        real_save(*args, **kwargs)
+        settings_dir.rename(detached_dir)
+        settings_dir.mkdir(mode=0o700)
+
+    service._save_locked = save_then_replace_leaf
+
+    with pytest.raises(ThumbnailPromptError) as error:
+        service.set_api_key("aihubmix", "saved-before-leaf-replacement")
+
+    assert error.value.code == "THUMBNAIL_PROMPT_SETTINGS_UNSAFE"
+    assert not settings_path.exists()
+    assert (detached_dir / "settings.toml").exists()
 
 
 def test_only_dedicated_leaf_may_be_created(tmp_path):
@@ -734,8 +1008,9 @@ def test_invalid_configured_default_provider_is_not_silently_replaced(
     tmp_path, configured
 ):
     settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
-    settings_path.parent.mkdir()
+    settings_path.parent.mkdir(mode=0o700)
     settings_path.write_text(toml.dumps({"default_provider": configured}))
+    settings_path.chmod(0o600)
 
     with pytest.raises(ThumbnailPromptError) as error:
         ThumbnailPromptSettingsService(
@@ -757,8 +1032,9 @@ def test_invalid_configured_default_provider_is_not_silently_replaced(
 )
 def test_invalid_provider_base_url_is_rejected_for_generation(tmp_path, base_url):
     settings_path = tmp_path / "thumbnail_prompt" / "settings.toml"
-    settings_path.parent.mkdir()
+    settings_path.parent.mkdir(mode=0o700)
     settings_path.write_text(toml.dumps({"aihubmix_base_url": base_url}))
+    settings_path.chmod(0o600)
 
     with pytest.raises(ThumbnailPromptError) as error:
         ThumbnailPromptSettingsService(

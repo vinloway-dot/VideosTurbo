@@ -80,6 +80,7 @@ def _settings_payload(**overrides):
 
 def _persist_settings(service, **updates):
     service.settings_path.parent.mkdir(parents=True, exist_ok=True)
+    service.settings_path.parent.chmod(0o700)
     persisted = (
         toml.load(service.settings_path) if service.settings_path.exists() else {}
     )
@@ -88,6 +89,7 @@ def _persist_settings(service, **updates):
     if any("\x00" in str(value) for value in updates.values()):
         serialized = serialized.replace("x00persisted", r"\u0000persisted")
     service.settings_path.write_text(serialized)
+    service.settings_path.chmod(0o600)
 
 
 def test_thumbnail_prompt_endpoint_only_generates_for_visible_completed_job(
