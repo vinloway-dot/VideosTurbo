@@ -43,6 +43,30 @@ def delete_video(job_id: str) -> None:
     _api("DELETE", f"videos/{job_id}")
 
 
+def generate_thumbnail_prompt(job_id: str) -> str:
+    """Generate one thumbnail prompt for a completed library video."""
+    payload = _api("POST", f"videos/{job_id}/thumbnail-prompt")
+    prompt = str((payload or {}).get("prompt") or "").strip()
+    if not prompt:
+        raise ValueError("thumbnail prompt response was empty")
+    return prompt
+
+
+def store_thumbnail_prompt_error(
+    ui_state: MutableMapping, job_id: str, message: str
+) -> None:
+    """Record a retryable prompt error without affecting other cards."""
+    ui_state.setdefault("thumbnail_prompt_error_by_job", {})[job_id] = message
+
+
+def _thumbnail_prompt_error_message(error: Exception) -> str:
+    if isinstance(error, requests.RequestException):
+        detail = _api_error_message(error)
+        if getattr(error, "response", None) is not None:
+            return f"สร้าง Prompt หน้าปกไม่สำเร็จ: {detail} กรุณาลองอีกครั้ง"
+    return "ไม่สามารถสร้าง Prompt หน้าปกได้ กรุณาตรวจสอบการเชื่อมต่อแล้วลองอีกครั้ง"
+
+
 def load_video_media(final_url: str) -> bytes:
     """Fetch final media through the internal API for Streamlit marshalling."""
     parsed = urlsplit(str(final_url or ""))
@@ -108,6 +132,9 @@ def render_video_library(
     """Render completed videos and keep pagination/deletion state page-local."""
     ui_state.setdefault("cloud_agent_video_library_page", 1)
     ui_state.setdefault("cloud_agent_video_delete_pending_id", "")
+    ui_state.setdefault("thumbnail_prompt_result_by_job", {})
+    ui_state.setdefault("thumbnail_prompt_error_by_job", {})
+    ui_state.setdefault("thumbnail_prompt_busy_by_job", {})
     page = max(1, int(ui_state["cloud_agent_video_library_page"] or 1))
     ui_state["cloud_agent_video_library_page"] = page
     try:
@@ -132,6 +159,20 @@ def render_video_library(
             if callable(rerun):
                 rerun()
 
+    def request_thumbnail_prompt(job_id: str) -> str | None:
+        busy = ui_state["thumbnail_prompt_busy_by_job"]
+        busy[job_id] = True
+        ui_state["thumbnail_prompt_error_by_job"].pop(job_id, None)
+        try:
+            prompt = generate_thumbnail_prompt(job_id)
+        except (requests.RequestException, ValueError) as exc:
+            store_thumbnail_prompt_error(ui_state, job_id, _thumbnail_prompt_error_message(exc))
+            return None
+        finally:
+            busy.pop(job_id, None)
+        ui_state["thumbnail_prompt_result_by_job"][job_id] = prompt
+        return prompt
+
     def select_page(selected_page: int) -> None:
         ui_state["cloud_agent_video_library_page"] = selected_page
         rerun = getattr(st, "rerun", None)
@@ -147,6 +188,14 @@ def render_video_library(
             on_delete_request=request_delete,
             on_delete_confirm=confirm_delete,
             on_delete_cancel=cancel_delete,
+            on_thumbnail_prompt=request_thumbnail_prompt,
+            thumbnail_prompt_results=ui_state["thumbnail_prompt_result_by_job"],
+            thumbnail_prompt_errors=ui_state["thumbnail_prompt_error_by_job"],
+            thumbnail_prompt_busy_ids={
+                job_id
+                for job_id, is_busy in ui_state["thumbnail_prompt_busy_by_job"].items()
+                if is_busy
+            },
             on_page=select_page,
         )
     except Exception:

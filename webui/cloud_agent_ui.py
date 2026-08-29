@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
-from typing import Callable, Literal, Mapping
+from typing import Callable, Collection, Literal, Mapping
 
 import streamlit as st
 
@@ -89,8 +89,16 @@ def render_video_library(
     on_delete_request: Callable[[str], None],
     on_delete_confirm: Callable[[str], None],
     on_delete_cancel: Callable[[str], None],
-    on_page: Callable[[int], None],
+    on_page: Callable[[int], None] | None = None,
+    on_thumbnail_prompt: Callable[[str], str | None] | None = None,
+    thumbnail_prompt_results: Mapping[str, str] | None = None,
+    thumbnail_prompt_errors: Mapping[str, str] | None = None,
+    thumbnail_prompt_busy_ids: Collection[str] = (),
 ) -> None:
+    if thumbnail_prompt_results is None:
+        thumbnail_prompt_results = {}
+    if thumbnail_prompt_errors is None:
+        thumbnail_prompt_errors = {}
     with st.container(key="cloud_agent_video_library"):
         if show_heading:
             st.html('<h2 class="vt-video-library__title">วีดีโอที่สร้าง</h2>')
@@ -121,6 +129,24 @@ def render_video_library(
                                     '<p class="vt-video-library-card__time">'
                                     f"{escape(card.completed_at)}</p>"
                                 )
+                                prompt = thumbnail_prompt_results.get(card.job_id)
+                                if on_thumbnail_prompt is not None:
+                                    if st.button(
+                                        "Prompt หน้าปก",
+                                        key=f"thumbnail_prompt_{card.job_id}",
+                                        type="secondary",
+                                        disabled=card.job_id in thumbnail_prompt_busy_ids,
+                                    ):
+                                        prompt = on_thumbnail_prompt(card.job_id)
+                                if prompt:
+                                    st.text_area(
+                                        "Thumbnail Prompt",
+                                        value=prompt,
+                                        key=f"thumbnail_prompt_output_{card.job_id}",
+                                        disabled=True,
+                                    )
+                                if error := thumbnail_prompt_errors.get(card.job_id):
+                                    st.error(error)
                                 delete_requested = st.button(
                                     "ลบ",
                                     key=f"cloud_agent_delete_{card.job_id}",
@@ -156,7 +182,7 @@ def render_video_library(
                         str(page),
                         key=f"cloud_agent_video_page_{page}",
                         disabled=page == view.page,
-                    ):
+                    ) and on_page is not None:
                         on_page(page)
 
 

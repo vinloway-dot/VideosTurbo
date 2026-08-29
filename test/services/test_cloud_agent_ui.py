@@ -16,6 +16,87 @@ from webui import cloud_agent, cloud_agent_ui
 from webui.cloud_agent_ui import build_production_stages, derive_workflow_step
 
 
+def test_video_library_prompt_action_is_card_local_and_shows_one_copyable_result(
+    monkeypatch,
+):
+    class PromptStreamlit:
+        def __init__(self):
+            self.buttons = []
+            self.text_areas = []
+            self.errors = []
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def columns(self, count):
+            return [nullcontext() for _ in range(count)]
+
+        def html(self, _body):
+            return None
+
+        def video(self, _data, **_kwargs):
+            return None
+
+        def button(self, label, **kwargs):
+            self.buttons.append((label, kwargs))
+            return kwargs.get("key") == "thumbnail_prompt_job-1"
+
+        def text_area(self, label, **kwargs):
+            self.text_areas.append((label, kwargs))
+
+        def error(self, message):
+            self.errors.append(message)
+
+        def warning(self, _message):
+            return None
+
+    fake = PromptStreamlit()
+    monkeypatch.setattr(cloud_agent_ui, "st", fake)
+    requested = []
+    cloud_agent_ui.render_video_library(
+        cloud_agent_ui.VideoLibraryView(
+            items=(
+                cloud_agent_ui.VideoCardView(
+                    job_id="job-1", subject="One", completed_at="now", final_url="/one"
+                ),
+                cloud_agent_ui.VideoCardView(
+                    job_id="job-2", subject="Two", completed_at="now", final_url="/two"
+                ),
+            ),
+            page=1,
+            total_pages=1,
+            total_items=2,
+        ),
+        load_video=lambda _url: b"mp4",
+        pending_delete_id="job-2",
+        on_delete_request=lambda _job_id: None,
+        on_delete_confirm=lambda _job_id: None,
+        on_delete_cancel=lambda _job_id: None,
+        on_thumbnail_prompt=lambda job_id: requested.append(job_id) or "ready image prompt",
+        thumbnail_prompt_results={"job-1": "prior prompt"},
+        thumbnail_prompt_errors={"job-2": "provider timeout"},
+        thumbnail_prompt_busy_ids={"job-2"},
+        on_page=lambda _page: None,
+    )
+
+    assert requested == ["job-1"]
+    assert fake.text_areas == [
+        (
+            "Thumbnail Prompt",
+            {
+                "value": "ready image prompt",
+                "key": "thumbnail_prompt_output_job-1",
+                "disabled": True,
+            },
+        )
+    ]
+    assert fake.errors == ["provider timeout"]
+    assert any(
+        label == "Prompt หน้าปก" and config["key"] == "thumbnail_prompt_job-2" and config["disabled"]
+        for label, config in fake.buttons
+    )
+
+
 def test_video_library_view_keeps_only_public_card_fields():
     view = cloud_agent_ui.video_library_view(
         {
