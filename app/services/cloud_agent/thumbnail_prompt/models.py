@@ -18,10 +18,10 @@ class ThumbnailPromptSettingsPayload(BaseModel):
     default_provider: Literal["aihubmix", "openrouter"]
     aihubmix_model: str = Field(max_length=256)
     aihubmix_custom_model_id: str = Field(default="", max_length=256)
-    aihubmix_base_url: str = Field(max_length=2048)
+    aihubmix_base_url: str
     openrouter_model: str = Field(max_length=256)
     openrouter_custom_model_id: str = Field(default="", max_length=256)
-    openrouter_base_url: str = Field(max_length=2048)
+    openrouter_base_url: str
 
     @field_validator(
         "master_prompt",
@@ -46,7 +46,7 @@ class ThumbnailPromptSettings(BaseModel):
     configuration_error: str | None = None
     aihubmix_model: str
     aihubmix_custom_model_id: str = Field(default="", max_length=256)
-    aihubmix_base_url: str = Field(max_length=2048)
+    aihubmix_base_url: str
     openrouter_model: str
     openrouter_custom_model_id: str = Field(default="", max_length=256)
-    openrouter_base_url: str = Field(max_length=2048)
+    openrouter_base_url: str

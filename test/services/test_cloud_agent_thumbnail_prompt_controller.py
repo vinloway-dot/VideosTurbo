@@ -311,6 +311,26 @@ def test_thumbnail_prompt_settings_reject_invalid_base_url(client):
     assert response.status_code == 422
 
 
+def test_real_app_hides_oversized_submitted_base_url_secret(monkeypatch):
+    monkeypatch.setattr(config, "app", dict(THUMBNAIL_PROMPT_DEFAULTS))
+    secret_marker = "submitted-base-url-secret-must-not-leak-" + "x" * 2048
+    app = importlib.import_module("app.asgi").get_application()
+    real_client = TestClient(app, raise_server_exceptions=False)
+
+    response = real_client.put(
+        "/api/v1/cloud-agent/thumbnail-prompt/settings",
+        json=_settings_payload(
+            aihubmix_base_url=f"https://example.invalid/{secret_marker}"
+        ),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["message"] == (
+        "thumbnail prompt provider base URL is invalid; update settings"
+    )
+    assert secret_marker not in response.text
+
+
 def test_thumbnail_prompt_provider_key_can_be_updated_and_removed(client):
     updated = client.put(
         "/api/v1/cloud-agent/thumbnail-prompt/providers/aihubmix/api-key",

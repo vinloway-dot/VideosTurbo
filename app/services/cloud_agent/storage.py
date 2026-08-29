@@ -80,7 +80,9 @@ class CloudJobStorage:
             script_file=input_dir / "script.txt",
             master_prompt_file=input_dir / "master_prompt.txt",
             voice_file=audio_dir / "voice.mp3",
-            flow_files=tuple(flow_dir / f"clip_{index:02d}.mp4" for index in range(1, 7)),
+            flow_files=tuple(
+                flow_dir / f"clip_{index:02d}.mp4" for index in range(1, 7)
+            ),
             flow_archive_file=flow_downloads_dir / "product_clips.zip",
             final_file=final_dir / "final.mp4",
         )
@@ -165,26 +167,31 @@ class CloudJobStorage:
         return paths
 
     def read_master_prompt(self, job_id: str) -> str:
-        path = self._paths(job_id).master_prompt_file
+        safe_job_id = self._validate_job_id(job_id)
+        root_fd = None
+        job_fd = None
+        input_fd = None
+        prompt_fd = None
         try:
-            input_fd = os.open(path.parent, self._directory_open_flags())
-            try:
-                prompt_fd = os.open(
-                    path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=input_fd
-                )
-            finally:
-                os.close(input_fd)
-            try:
-                if not stat.S_ISREG(os.fstat(prompt_fd).st_mode):
-                    raise ValueError("job master prompt is unavailable")
-                with os.fdopen(prompt_fd, "r", encoding="utf-8") as prompt_file:
-                    prompt_fd = -1
-                    value = prompt_file.read().strip()
-            finally:
-                if prompt_fd >= 0:
-                    os.close(prompt_fd)
+            root_fd = os.open(self.root, self._directory_open_flags())
+            job_fd = os.open(safe_job_id, self._directory_open_flags(), dir_fd=root_fd)
+            input_fd = os.open("input", self._directory_open_flags(), dir_fd=job_fd)
+            prompt_fd = os.open(
+                "master_prompt.txt",
+                os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=input_fd,
+            )
+            if not stat.S_ISREG(os.fstat(prompt_fd).st_mode):
+                raise ValueError("job master prompt is unavailable")
+            with os.fdopen(prompt_fd, "r", encoding="utf-8") as prompt_file:
+                prompt_fd = None
+                value = prompt_file.read().strip()
         except OSError as exc:
             raise ValueError("job master prompt is unavailable") from exc
+        finally:
+            for descriptor in (prompt_fd, input_fd, job_fd, root_fd):
+                if descriptor is not None:
+                    os.close(descriptor)
         if not value:
             raise ValueError("job master prompt is empty")
         return value
@@ -205,9 +212,7 @@ class CloudJobStorage:
         paths = self.prepare(job_id)
         flow_root = paths.flow_dir.resolve()
         sources = [
-            path
-            for path in paths.flow_files
-            if path.exists() or path.is_symlink()
+            path for path in paths.flow_files if path.exists() or path.is_symlink()
         ]
         if not sources:
             return None
@@ -248,9 +253,7 @@ class CloudJobStorage:
             deleting_fd,
         ):
             try:
-                job_entry = os.stat(
-                    safe_job_id, dir_fd=root_fd, follow_symlinks=False
-                )
+                job_entry = os.stat(safe_job_id, dir_fd=root_fd, follow_symlinks=False)
             except FileNotFoundError as exc:
                 raise FileNotFoundError(paths.job_dir) from exc
             if not stat.S_ISDIR(job_entry.st_mode):

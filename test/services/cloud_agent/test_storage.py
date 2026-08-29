@@ -63,7 +63,9 @@ def test_write_inputs_writes_utf8_script_and_master_prompt(tmp_path):
 
 def test_read_master_prompt_returns_stripped_saved_job_prompt(tmp_path):
     storage = CloudJobStorage(tmp_path)
-    storage.write_inputs("job-123", script="script", master_prompt="  Full Master Prompt ✓\n")
+    storage.write_inputs(
+        "job-123", script="script", master_prompt="  Full Master Prompt ✓\n"
+    )
 
     assert storage.read_master_prompt("job-123") == "Full Master Prompt ✓"
 
@@ -77,7 +79,9 @@ def test_read_master_prompt_rejects_unavailable_or_empty_job_prompt(
 ):
     storage = CloudJobStorage(tmp_path)
     if prepared:
-        storage.prepare("job-123").master_prompt_file.write_text("  \n", encoding="utf-8")
+        storage.prepare("job-123").master_prompt_file.write_text(
+            "  \n", encoding="utf-8"
+        )
 
     with pytest.raises(ValueError, match=expected_message):
         storage.read_master_prompt("job-123")
@@ -97,6 +101,25 @@ def test_read_master_prompt_rejects_symlink_outside_the_job(tmp_path):
         storage.read_master_prompt("job-123")
 
     assert outside_prompt.read_text(encoding="utf-8") == "outside prompt"
+
+
+def test_read_master_prompt_rejects_job_symlink_to_another_job_in_the_root(tmp_path):
+    storage = CloudJobStorage(tmp_path / "jobs")
+    target = storage.write_inputs(
+        "job-b", script="script", master_prompt="job-b private prompt"
+    )
+    job_link = storage.root / "job-a"
+    try:
+        job_link.symlink_to(target.job_dir, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are unavailable in this environment")
+
+    with pytest.raises(ValueError, match="unavailable"):
+        storage.read_master_prompt("job-a")
+
+    assert target.master_prompt_file.read_text(encoding="utf-8") == (
+        "job-b private prompt"
+    )
 
 
 def test_default_root_reuses_repository_storage_helper(monkeypatch, tmp_path):

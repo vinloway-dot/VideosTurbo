@@ -189,7 +189,10 @@ def test_generate_requires_exactly_one_provider_choice(tmp_path, choice_count):
 
 
 def test_generate_keeps_normal_image_prompt_prose(tmp_path):
-    prompt = "Cinematic solar flare above Earth with dramatic golden rim light, 16:9."
+    prompt = (
+        "Cinematic solar flare above Earth [viewed from orbit] with dramatic "
+        "golden rim light, 16:9."
+    )
     service = service_with_completion(tmp_path, prompt)
 
     assert service.generate_for_job("job-1") == prompt
@@ -201,6 +204,9 @@ def test_generate_keeps_normal_image_prompt_prose(tmp_path):
         "[](https://example.invalid)",
         "![](https://example.invalid/image.png)",
         "[Earth]()",
+        r"[Earth\]](https://example.invalid/earth)",
+        "[Earth [orbit]](https://example.invalid/earth)",
+        r"![Earth\]](https://example.invalid/earth.png)",
         "[Earth]: https://example.invalid",
         "<mailto:user@example.invalid>",
     ],
