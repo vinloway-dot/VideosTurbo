@@ -39,11 +39,13 @@ class _RetainedPromptEntry:
     name: str
     identity: tuple[int, int]
     is_directory: bool
+    requires_safe_permissions: bool = False
 
 
 class CloudJobStorage:
     #: Maximum UTF-8 bytes accepted from one saved video master prompt.
     MASTER_PROMPT_MAX_BYTES = 1_048_576
+    MASTER_PROMPT_PRIVATE_MODE = 0o600
 
     def __init__(self, root: Path | None = None):
         if root is None:
@@ -175,8 +177,31 @@ class CloudJobStorage:
     def write_inputs(self, job_id: str, script: str, master_prompt: str) -> JobPaths:
         paths = self.prepare(job_id)
         paths.script_file.write_text(script, encoding="utf-8")
-        paths.master_prompt_file.write_text(master_prompt, encoding="utf-8")
+        self._write_private_master_prompt(paths.master_prompt_file, master_prompt)
         return paths
+
+    @classmethod
+    def _write_private_master_prompt(cls, path: Path, master_prompt: str) -> None:
+        if os.name != "posix":
+            path.write_text(master_prompt, encoding="utf-8")
+            return
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, cls.MASTER_PROMPT_PRIVATE_MODE)
+        try:
+            os.fchmod(descriptor, cls.MASTER_PROMPT_PRIVATE_MODE)
+            data = str(master_prompt).encode("utf-8")
+            written = 0
+            while written < len(data):
+                count = os.write(descriptor, data[written:])
+                if count <= 0:
+                    raise OSError("failed to write job master prompt")
+                written += count
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     def read_master_prompt(self, job_id: str) -> str:
         """Read at most ``MASTER_PROMPT_MAX_BYTES`` from a verified job prompt."""
@@ -192,18 +217,21 @@ class CloudJobStorage:
             anchor_identity = (anchor_stat.st_dev, anchor_stat.st_ino)
             current_fd = anchor_fd
             directory_names = (*root_path.parts[1:], safe_job_id, "input")
-            for name in directory_names:
+            safe_directory_start = len(directory_names) - 2
+            for index, name in enumerate(directory_names):
                 directory_fd = os.open(
                     name, self._directory_open_flags(), dir_fd=current_fd
                 )
                 try:
                     directory_stat = os.fstat(directory_fd)
-                except OSError:
+                    requires_safe_permissions = index >= safe_directory_start
+                    if requires_safe_permissions:
+                        self._require_safe_master_prompt_directory(directory_stat)
+                    elif not stat.S_ISDIR(directory_stat.st_mode):
+                        raise ValueError("job master prompt is unavailable")
+                except (OSError, ValueError):
                     os.close(directory_fd)
                     raise
-                if not stat.S_ISDIR(directory_stat.st_mode):
-                    os.close(directory_fd)
-                    raise ValueError("job master prompt is unavailable")
                 retained_entries.append(
                     _RetainedPromptEntry(
                         parent_fd=current_fd,
@@ -211,6 +239,7 @@ class CloudJobStorage:
                         name=name,
                         identity=(directory_stat.st_dev, directory_stat.st_ino),
                         is_directory=True,
+                        requires_safe_permissions=requires_safe_permissions,
                     )
                 )
                 current_fd = directory_fd
@@ -263,7 +292,18 @@ class CloudJobStorage:
             not stat.S_ISREG(prompt_stat.st_mode)
             or prompt_stat.st_uid != os.geteuid()
             or prompt_stat.st_nlink != 1
+            or stat.S_IMODE(prompt_stat.st_mode) != cls.MASTER_PROMPT_PRIVATE_MODE
             or prompt_stat.st_size > cls.MASTER_PROMPT_MAX_BYTES
+        ):
+            raise ValueError("job master prompt is unavailable")
+
+    @staticmethod
+    def _require_safe_master_prompt_directory(directory_stat: os.stat_result) -> None:
+        if (
+            not stat.S_ISDIR(directory_stat.st_mode)
+            or directory_stat.st_uid != os.geteuid()
+            or directory_stat.st_nlink < 2
+            or stat.S_IMODE(directory_stat.st_mode) & 0o022
         ):
             raise ValueError("job master prompt is unavailable")
 
@@ -299,7 +339,10 @@ class CloudJobStorage:
             held = os.fstat(entry.file_descriptor)
             named = os.stat(entry.name, dir_fd=entry.parent_fd, follow_symlinks=False)
             if entry.is_directory:
-                if not stat.S_ISDIR(held.st_mode) or not stat.S_ISDIR(named.st_mode):
+                if entry.requires_safe_permissions:
+                    cls._require_safe_master_prompt_directory(held)
+                    cls._require_safe_master_prompt_directory(named)
+                elif not stat.S_ISDIR(held.st_mode) or not stat.S_ISDIR(named.st_mode):
                     raise ValueError("job master prompt is unavailable")
             else:
                 cls._require_safe_master_prompt(held)
