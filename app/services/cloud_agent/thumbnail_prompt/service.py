@@ -72,7 +72,9 @@ _INLINE_TEXT_LABEL_DELIMITERS = frozenset(
 )
 _WEAK_INLINE_TEXT_LABEL_DELIMITERS = frozenset({",", ";", "/", "…"})
 _LETTER_LABEL_DELIMITERS = frozenset({":", ".", ")", "]", "}", "-", "–", "—"})
-_MARKER_PREFIX_WRAPPERS = frozenset({'"', "'", "“", "”", "‘", "’", "(", "[", "{"})
+_MARKER_PREFIX_WRAPPERS = frozenset(
+    {'"', "'", "“", "”", "‘", "’", "(", "[", "{"}
+)
 _ALLOWED_FORMAT_CONTROLS = frozenset({"\u200c", "\u200d"})
 _ROMAN_NUMERAL_SUFFIX = re.compile(r"[ivxlcdm]{1,8}\Z")
 _NUMERIC_PUNCTUATION_TRANSLATION = str.maketrans(
@@ -99,7 +101,7 @@ class _ProviderDeadlineExceeded(Exception):
 
 def _canonical_validation_text(text: str) -> str:
     """Normalize safe compatibility forms without changing returned prompt text."""
-    normalized = unicodedata.normalize("NFKD", text).translate(
+    normalized = unicodedata.normalize("NFKD", text.replace("…", ";")).translate(
         _NUMERIC_PUNCTUATION_TRANSLATION
     )
     result: list[str] = []
@@ -338,7 +340,9 @@ def _is_complete_ratio(text: str, rhs_start: int, lhs: int | None) -> bool:
 
 def _has_explicit_contrast_ratio_context(text: str, rhs_end: int) -> bool:
     cursor = rhs_end
-    while cursor < len(text) and (text[cursor].isspace() or text[cursor] in {",", ";"}):
+    while cursor < len(text) and (
+        text[cursor].isspace() or text[cursor] in {",", ";"}
+    ):
         cursor += 1
     return text[cursor:].casefold().startswith("contrast ratio")
 
@@ -432,11 +436,14 @@ def _has_inline_text_marker(text: str) -> bool:
         delimiter_index, delimiter = marker
         if delimiter in _INLINE_TEXT_LABEL_DELIMITERS:
             return True
-        if delimiter in _WEAK_INLINE_TEXT_LABEL_DELIMITERS and _weak_inline_marker_is_structural(
-            text,
-            start,
-            delimiter_index,
-            delimiter,
+        if (
+            delimiter in _WEAK_INLINE_TEXT_LABEL_DELIMITERS
+            and _weak_inline_marker_is_structural(
+                text,
+                start,
+                delimiter_index,
+                delimiter,
+            )
         ):
             return True
         if (
