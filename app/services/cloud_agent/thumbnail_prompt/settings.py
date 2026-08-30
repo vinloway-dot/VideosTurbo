@@ -29,7 +29,7 @@ def ensure_thumbnail_prompt_platform_supported() -> None:
 
 
 if _PLATFORM_SUPPORTED:
-    from app.services.cloud_agent.thumbnail_prompt._settings_posix import (  # noqa: F401
+    from app.services.cloud_agent.thumbnail_prompt._settings_guarded import (  # noqa: F401
         ThumbnailPromptSettingsService,
         fcntl,
     )
