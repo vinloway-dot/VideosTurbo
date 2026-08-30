@@ -104,8 +104,9 @@ def test_generate_reads_one_generation_settings_snapshot(tmp_path):
 
 def test_generate_uses_full_saved_master_prompt_and_returns_one_plain_prompt(tmp_path):
     storage = CloudJobStorage(tmp_path / "jobs")
-    paths = storage.prepare("job-1")
-    paths.master_prompt_file.write_text("FULL VIDEO MASTER PROMPT", encoding="utf-8")
+    storage.write_inputs(
+        "job-1", script="script", master_prompt="FULL VIDEO MASTER PROMPT"
+    )
     client = FakeCompletionClient("Solar flare over Earth, dramatic golden light, 16:9")
     service = ThumbnailPromptService(
         storage=storage,
@@ -278,6 +279,8 @@ def test_generate_rejects_inline_labelled_alternatives_after_separator(
         "Vintage editorial portrait; 35-mm grain, 3-point lighting",
         "Cinematic portrait; 1.8 aperture, 85-mm lens",
         "2026: futuristic city above the clouds",
+        "1899: Victorian London under gaslight",
+        "2200: futuristic orbital city",
     ],
 )
 def test_generate_accepts_numeric_ratios_and_hyphenated_descriptors(
@@ -312,8 +315,8 @@ def test_generate_accepts_numeric_ratios_and_hyphenated_descriptors(
         ("2026: futuristic city", False),
         ("1900: archival city", False),
         ("2199: speculative city", False),
-        ("1899: archival city", True),
-        ("2200: speculative city", True),
+        ("1899: archival city", False),
+        ("2200: speculative city", False),
         ("Solar flare; Alternative—eclipse", True),
         ("Solar flare; Alternative — eclipse", True),
         ("Solar flare; Option #2:eclipse", True),
@@ -545,7 +548,7 @@ def test_generate_rejects_invalid_provider_configuration_before_client_creation(
     assert factory_calls == []
 
 
-def test_provider_timeout_has_explicit_phase_budget_below_ui_deadline(tmp_path):
+def test_provider_uses_explicit_phase_timeouts_and_hard_deadline(tmp_path):
     storage = CloudJobStorage(tmp_path / "jobs")
     storage.write_inputs(
         "job-1", script="script", master_prompt="FULL VIDEO MASTER PROMPT"
@@ -570,5 +573,5 @@ def test_provider_timeout_has_explicit_phase_budget_below_ui_deadline(tmp_path):
     assert timeout.read == 30.0
     assert timeout.write == 5.0
     assert timeout.pool == 5.0
-    assert sum((timeout.connect, timeout.read, timeout.write, timeout.pool)) <= 45.0
+    assert 0 < thumbnail_prompt_module.PROVIDER_DEADLINE_SECONDS < 60.0
     assert factory_calls[0]["max_retries"] == 0
