@@ -61,6 +61,24 @@ jobs:
         if: matrix.python-version == '3.11'
         run: uv run --no-sync ruff check app cli.py main.py webui test
 
+      - name: Check Thumbnail Prompt formatting
+        if: matrix.python-version == '3.11'
+        run: >-
+          uv run --no-sync ruff format --check
+          app/services/cloud_agent/thumbnail_prompt/service.py
+          test/services/cloud_agent/test_thumbnail_prompt_parser_regressions.py
+
+      - name: Check patch whitespace
+        if: matrix.python-version == '3.11'
+        shell: bash
+        run: |
+          git diff --check
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git diff --check "${{ github.event.pull_request.base.sha }}...HEAD"
+          else
+            git diff --check HEAD^
+          fi
+
       - name: Run unit tests with coverage
         # pytest 兼容现有 unittest.TestCase，同时会收集仓库中的 pytest 风格
         # 测试，避免测试文件已存在但 CI 没有真正执行。
