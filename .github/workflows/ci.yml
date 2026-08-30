@@ -63,10 +63,12 @@ jobs:
 
       - name: Check Thumbnail Prompt formatting
         if: matrix.python-version == '3.11'
-        run: >-
-          uv run --no-sync ruff format --check
-          app/services/cloud_agent/thumbnail_prompt/service.py
-          test/services/cloud_agent/test_thumbnail_prompt_parser_regressions.py
+        shell: bash
+        run: |
+          uv run --no-sync ruff format --diff \
+            app/services/cloud_agent/thumbnail_prompt/service.py \
+            test/services/cloud_agent/test_thumbnail_prompt_parser_regressions.py | tee /tmp/thumbnail-format.diff
+          test ! -s /tmp/thumbnail-format.diff
 
       - name: Check patch whitespace
         if: matrix.python-version == '3.11'
