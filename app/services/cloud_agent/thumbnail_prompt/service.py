@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import math
 import re
 import unicodedata
 from typing import Any, Callable, Mapping
 
 import httpx
 import openai
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from app.services.cloud_agent.storage import CloudJobStorage
 from app.services.cloud_agent.thumbnail_prompt.errors import ThumbnailPromptError
@@ -67,24 +70,38 @@ _TEXT_MARKER_INITIALS = frozenset(label[0] for label in _MARKER_TEXT_LABELS)
 _INLINE_TEXT_LABEL_DELIMITERS = frozenset(
     {":", ")", "]", "}", "=", "|", "–", "—", "→", "⇒", "⟶", "⟹"}
 )
+_WEAK_INLINE_TEXT_LABEL_DELIMITERS = frozenset({",", ";", "/", "…"})
 _LETTER_LABEL_DELIMITERS = frozenset({":", ".", ")", "]", "}", "-", "–", "—"})
 _MARKER_PREFIX_WRAPPERS = frozenset({'"', "'", "“", "”", "‘", "’", "(", "[", "{"})
 _ALLOWED_FORMAT_CONTROLS = frozenset({"\u200c", "\u200d"})
 _ROMAN_NUMERAL_SUFFIX = re.compile(r"[ivxlcdm]{1,8}\Z")
+_NUMERIC_PUNCTUATION_TRANSLATION = str.maketrans(
+    {
+        "∶": ":",
+        "⁄": "/",
+        "∕": "/",
+        "٬": ",",
+    }
+)
 _MAX_TEXT_MARKER_SPAN = 48
 _MAX_NUMERIC_TOKEN_DIGITS = 12
 _MAX_RATIO_COMPONENT = (10**_MAX_NUMERIC_TOKEN_DIGITS) - 1
 _MAX_RATIO_IMBALANCE = 100
-# A deliberately narrow range keeps short ordinals and arbitrary numeric IDs labelled.
-_MIN_YEAR_PREFIX = 1900
-_MAX_YEAR_PREFIX = 2199
+_YEAR_TOKEN_DIGITS = 4
 _MAX_OUTPUT_CHARACTERS = 8000
 PROVIDER_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
+PROVIDER_DEADLINE_SECONDS = 45.0
+
+
+class _ProviderDeadlineExceeded(Exception):
+    """Internal sentinel used to sanitize a hard provider deadline."""
 
 
 def _canonical_validation_text(text: str) -> str:
-    """Normalize compatibility forms and remove marker-obfuscating characters."""
-    normalized = unicodedata.normalize("NFKD", text)
+    """Normalize safe compatibility forms without changing returned prompt text."""
+    normalized = unicodedata.normalize("NFKD", text).translate(
+        _NUMERIC_PUNCTUATION_TRANSLATION
+    )
     result: list[str] = []
     for character in normalized:
         category = unicodedata.category(character)
@@ -169,24 +186,23 @@ def _colon_belongs_to_ratio(text: str, colon_index: int) -> bool:
 
 
 def _period_belongs_to_initialism(text: str, period_index: int) -> bool:
-    if not _single_ascii_letter_before(text, period_index):
+    if not _single_letter_before(text, period_index):
         return False
     cursor = period_index + 1
     while cursor < len(text) and text[cursor].isspace():
         cursor += 1
     return (
         cursor + 1 < len(text)
-        and text[cursor].isascii()
         and text[cursor].isalpha()
         and text[cursor + 1] == "."
     )
 
 
-def _single_ascii_letter_before(text: str, period_index: int) -> bool:
+def _single_letter_before(text: str, period_index: int) -> bool:
     cursor = period_index - 1
     while cursor >= 0 and text[cursor].isspace():
         cursor -= 1
-    if cursor < 0 or not (text[cursor].isascii() and text[cursor].isalpha()):
+    if cursor < 0 or not text[cursor].isalpha():
         return False
     cursor -= 1
     while cursor >= 0 and text[cursor].isspace():
@@ -230,7 +246,7 @@ def _starts_with_numbered_marker(text: str, start: int) -> bool:
     if delimiter == ":":
         if content_start == len(text):
             return True
-        if number is not None and _MIN_YEAR_PREFIX <= number <= _MAX_YEAR_PREFIX:
+        if _looks_like_year_token(text, start, number_end):
             return False
         return not _is_complete_ratio(text, content_start, number)
     if delimiter == ".":
@@ -246,6 +262,12 @@ def _starts_with_numbered_marker(text: str, start: int) -> bool:
     if delimiter == "/" and _looks_like_fraction(text, cursor):
         return False
     return True
+
+
+def _looks_like_year_token(text: str, start: int, end: int) -> bool:
+    return end - start == _YEAR_TOKEN_DIGITS and all(
+        character.isdecimal() for character in text[start:end]
+    )
 
 
 def _read_decimal_token(text: str, start: int) -> tuple[int, int | None]:
@@ -322,7 +344,7 @@ def _has_explicit_contrast_ratio_context(text: str, rhs_end: int) -> bool:
 
 
 def _starts_with_letter_marker(text: str, start: int) -> bool:
-    if not (text[start].isascii() and text[start].isalpha()):
+    if not text[start].isalpha():
         return False
     cursor = start + 1
     while cursor < len(text) and text[cursor].isspace():
@@ -335,7 +357,6 @@ def _starts_with_letter_marker(text: str, start: int) -> bool:
             next_cursor += 1
         if (
             next_cursor + 1 < len(text)
-            and text[next_cursor].isascii()
             and text[next_cursor].isalpha()
             and text[next_cursor + 1] == "."
         ):
@@ -411,6 +432,13 @@ def _has_inline_text_marker(text: str) -> bool:
         delimiter_index, delimiter = marker
         if delimiter in _INLINE_TEXT_LABEL_DELIMITERS:
             return True
+        if delimiter in _WEAK_INLINE_TEXT_LABEL_DELIMITERS and _weak_inline_marker_is_structural(
+            text,
+            start,
+            delimiter_index,
+            delimiter,
+        ):
+            return True
         if (
             delimiter == "-"
             and delimiter_index + 1 < len(text)
@@ -418,6 +446,56 @@ def _has_inline_text_marker(text: str) -> bool:
         ):
             return True
     return False
+
+
+def _weak_inline_marker_is_structural(
+    text: str,
+    start: int,
+    delimiter_index: int,
+    delimiter: str,
+) -> bool:
+    raw_label = " ".join(text[start:delimiter_index].split())
+    folded_label = raw_label.casefold()
+    compact_label = folded_label.replace(" ", "")
+    if any(
+        compact_label.startswith(base_label)
+        and _is_marker_suffix(compact_label[len(base_label) :])
+        for base_label in _MARKER_SUFFIX_LABELS
+    ):
+        return True
+    if raw_label[:1].isupper():
+        return True
+    if delimiter in {";", "…"}:
+        return True
+    if delimiter == ",":
+        return _previous_word(text, start).casefold() not in {"a", "an"}
+    if delimiter == "/":
+        if folded_label == "alternative" and _next_word(
+            text, delimiter_index + 1
+        ).casefold() == "original":
+            return False
+        return True
+    return False
+
+
+def _previous_word(text: str, start: int) -> str:
+    cursor = start - 1
+    while cursor >= 0 and text[cursor].isspace():
+        cursor -= 1
+    end = cursor + 1
+    while cursor >= 0 and text[cursor].isalpha():
+        cursor -= 1
+    return text[cursor + 1 : end]
+
+
+def _next_word(text: str, start: int) -> str:
+    cursor = start
+    while cursor < len(text) and text[cursor].isspace():
+        cursor += 1
+    end = cursor
+    while end < len(text) and text[end].isalpha():
+        end += 1
+    return text[cursor:end]
 
 
 def _has_sequential_colon_markers(text: str) -> bool:
@@ -460,12 +538,17 @@ class ThumbnailPromptService:
         storage: CloudJobStorage,
         settings: ThumbnailPromptSettingsService,
         clients: Mapping[str, Any] | None = None,
-        client_factory: Callable[..., Any] = OpenAI,
+        client_factory: Callable[..., Any] = AsyncOpenAI,
+        provider_deadline_seconds: float = PROVIDER_DEADLINE_SECONDS,
     ) -> None:
+        deadline = float(provider_deadline_seconds)
+        if not math.isfinite(deadline) or deadline <= 0:
+            raise ValueError("provider_deadline_seconds must be a positive finite value")
         self._storage = storage
         self._settings = settings
         self._clients = dict(clients or {})
         self._client_factory = client_factory
+        self._provider_deadline_seconds = deadline
 
     def generate_for_job(self, job_id: str) -> str:
         ensure_thumbnail_prompt_platform_supported()
@@ -477,11 +560,11 @@ class ThumbnailPromptService:
             ) from exc
 
         generation_settings = self._settings.get_generation_snapshot()
-
         instruction = _instruction(
             video_master_prompt, generation_settings.master_prompt
         )
         client = self._clients.get(generation_settings.provider_id)
+        owns_client = client is None
         try:
             if client is None:
                 client = self._client_factory(
@@ -490,17 +573,49 @@ class ThumbnailPromptService:
                     timeout=PROVIDER_TIMEOUT,
                     max_retries=0,
                 )
-            response = client.chat.completions.create(
-                model=generation_settings.model_id,
-                messages=[{"role": "user", "content": instruction}],
+            response = asyncio.run(
+                self._request_completion(
+                    client,
+                    model=generation_settings.model_id,
+                    instruction=instruction,
+                    close_client=owns_client,
+                )
             )
         except Exception as exc:
             raise self._provider_error(exc) from exc
         return self._normalize_completion(response)
 
+    async def _request_completion(
+        self,
+        client: Any,
+        *,
+        model: str,
+        instruction: str,
+        close_client: bool,
+    ) -> Any:
+        try:
+            async with asyncio.timeout(self._provider_deadline_seconds):
+                try:
+                    response = client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "user", "content": instruction}],
+                    )
+                    if inspect.isawaitable(response):
+                        response = await response
+                    return response
+                finally:
+                    if close_client:
+                        close = getattr(client, "close", None)
+                        if callable(close):
+                            close_result = close()
+                            if inspect.isawaitable(close_result):
+                                await close_result
+        except TimeoutError as exc:
+            raise _ProviderDeadlineExceeded from exc
+
     @staticmethod
     def _provider_error(exc: Exception) -> ThumbnailPromptError:
-        if isinstance(exc, openai.APITimeoutError):
+        if isinstance(exc, (_ProviderDeadlineExceeded, openai.APITimeoutError)):
             return ThumbnailPromptError(
                 "PROVIDER_TIMEOUT", "ผู้ให้บริการใช้เวลาตอบนานเกินกำหนด กรุณาลองใหม่"
             )
