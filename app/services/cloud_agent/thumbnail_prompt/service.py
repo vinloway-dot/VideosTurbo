@@ -72,9 +72,7 @@ _INLINE_TEXT_LABEL_DELIMITERS = frozenset(
 )
 _WEAK_INLINE_TEXT_LABEL_DELIMITERS = frozenset({",", ";", "/", "…"})
 _LETTER_LABEL_DELIMITERS = frozenset({":", ".", ")", "]", "}", "-", "–", "—"})
-_MARKER_PREFIX_WRAPPERS = frozenset(
-    {'"', "'", "“", "”", "‘", "’", "(", "[", "{"}
-)
+_MARKER_PREFIX_WRAPPERS = frozenset({'"', "'", "“", "”", "‘", "’", "(", "[", "{"})
 _ALLOWED_FORMAT_CONTROLS = frozenset({"\u200c", "\u200d"})
 _ROMAN_NUMERAL_SUFFIX = re.compile(r"[ivxlcdm]{1,8}\Z")
 _NUMERIC_PUNCTUATION_TRANSLATION = str.maketrans(
@@ -193,11 +191,7 @@ def _period_belongs_to_initialism(text: str, period_index: int) -> bool:
     cursor = period_index + 1
     while cursor < len(text) and text[cursor].isspace():
         cursor += 1
-    return (
-        cursor + 1 < len(text)
-        and text[cursor].isalpha()
-        and text[cursor + 1] == "."
-    )
+    return cursor + 1 < len(text) and text[cursor].isalpha() and text[cursor + 1] == "."
 
 
 def _single_letter_before(text: str, period_index: int) -> bool:
@@ -340,9 +334,7 @@ def _is_complete_ratio(text: str, rhs_start: int, lhs: int | None) -> bool:
 
 def _has_explicit_contrast_ratio_context(text: str, rhs_end: int) -> bool:
     cursor = rhs_end
-    while cursor < len(text) and (
-        text[cursor].isspace() or text[cursor] in {",", ";"}
-    ):
+    while cursor < len(text) and (text[cursor].isspace() or text[cursor] in {",", ";"}):
         cursor += 1
     return text[cursor:].casefold().startswith("contrast ratio")
 
@@ -477,9 +469,10 @@ def _weak_inline_marker_is_structural(
     if delimiter == ",":
         return _previous_word(text, start).casefold() not in {"a", "an"}
     if delimiter == "/":
-        if folded_label == "alternative" and _next_word(
-            text, delimiter_index + 1
-        ).casefold() == "original":
+        if (
+            folded_label == "alternative"
+            and _next_word(text, delimiter_index + 1).casefold() == "original"
+        ):
             return False
         return True
     return False
@@ -550,7 +543,9 @@ class ThumbnailPromptService:
     ) -> None:
         deadline = float(provider_deadline_seconds)
         if not math.isfinite(deadline) or deadline <= 0:
-            raise ValueError("provider_deadline_seconds must be a positive finite value")
+            raise ValueError(
+                "provider_deadline_seconds must be a positive finite value"
+            )
         self._storage = storage
         self._settings = settings
         self._clients = dict(clients or {})
