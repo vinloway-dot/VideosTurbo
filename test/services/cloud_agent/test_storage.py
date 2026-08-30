@@ -81,9 +81,7 @@ def test_read_master_prompt_rejects_unavailable_or_empty_job_prompt(
 ):
     storage = CloudJobStorage(tmp_path)
     if prepared:
-        storage.prepare("job-123").master_prompt_file.write_text(
-            "  \n", encoding="utf-8"
-        )
+        storage.write_inputs("job-123", script="script", master_prompt="  \n")
 
     with pytest.raises(ValueError, match=expected_message):
         storage.read_master_prompt("job-123")
