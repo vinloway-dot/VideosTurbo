@@ -352,6 +352,23 @@ def test_patch_job_updates_status_checkpoint_and_progress(tmp_path):
     assert updated.voice_file.endswith("voice.mp3")
 
 
+def test_resume_job_rejects_non_resumable_state_without_mutating_progress(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    created = store.create_job(_request())
+    before = store.get_job(created.id)
+    assert before is not None
+
+    with pytest.raises(ValueError, match="not resumable"):
+        store.resume_job(created.id)
+
+    after = store.get_job(created.id)
+    assert after is not None
+    assert after.status is before.status
+    assert after.current_step == before.current_step
+    assert after.last_progress_at == before.last_progress_at
+    assert after.last_progress_milestone == before.last_progress_milestone
+
+
 def test_claim_is_exclusive_until_owner_releases_lease(tmp_path):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     created = store.create_job(_request())

@@ -447,6 +447,55 @@ class CloudJobStore:
             )
         return candidate
 
+    def resume_job(self, job_id: str) -> CloudJobRecord:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM cloud_agent_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            status = CloudJobStatus(row["status"])
+            if status not in {
+                CloudJobStatus.PAUSED,
+                CloudJobStatus.HUMAN_REQUIRED,
+            }:
+                raise ValueError(
+                    f"cloud agent job is not resumable from status {status.value}"
+                )
+
+            now = _utc_now()
+            connection.execute(
+                """
+                UPDATE cloud_agent_jobs
+                SET status = ?, current_step = ?, control_request = ?,
+                    error_code = '', error_message = '',
+                    last_progress_at = ?, last_progress_milestone = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    CloudJobStatus.QUEUED.value,
+                    "queued",
+                    CloudControlRequest.NONE.value,
+                    now,
+                    "operator.resumed",
+                    now,
+                    job_id,
+                ),
+            )
+            updated = connection.execute(
+                "SELECT * FROM cloud_agent_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            connection.commit()
+            return self._row_to_record(updated)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def mark_progress(
         self,
         job_id: str,
