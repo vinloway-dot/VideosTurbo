@@ -375,7 +375,7 @@ class FlowWorkspaceRun:
             RENAME_SURVIVING_CLIPS_INSTRUCTION,
         )
         self._wait_for_rename_response_then_refresh(response_count)
-        self._wait_for_stable_semantic_names(expected_count=5)
+        self._wait_for_stable_semantic_names(expected_counts=(5, 6))
         snapshot = paths.flow_snapshots_dir / f"partial-{attempt}.zip"
         self._download_project_archive_to(snapshot)
         capture = inspect_recovery_flow_archive(
@@ -587,16 +587,32 @@ class FlowWorkspaceRun:
         *,
         expected_numbers: tuple[int, ...] | None = None,
         expected_count: int | None = None,
+        expected_counts: tuple[int, ...] | None = None,
     ) -> tuple[int, ...]:
+        if sum(
+            option is not None
+            for option in (expected_numbers, expected_count, expected_counts)
+        ) != 1:
+            raise ValueError("exactly one semantic name expectation is required")
+        if expected_count is not None and not 0 <= expected_count <= 6:
+            raise ValueError("expected_count must be between 0 and 6")
+        if expected_counts is not None and (
+            not expected_counts
+            or len(set(expected_counts)) != len(expected_counts)
+            or any(count < 0 or count > 6 for count in expected_counts)
+        ):
+            raise ValueError("expected_counts must contain unique counts from 0 through 6")
+
         deadline = time.monotonic() + self.client.editor_ready_timeout_seconds
         previous: tuple[int, ...] | None = None
         while True:
             numbers = self._semantic_name_numbers()
-            matches = (
-                numbers == expected_numbers
-                if expected_numbers is not None
-                else len(numbers) == expected_count
-            )
+            if expected_numbers is not None:
+                matches = numbers == expected_numbers
+            elif expected_count is not None:
+                matches = len(numbers) == expected_count
+            else:
+                matches = len(numbers) in expected_counts
             if matches:
                 if numbers == previous:
                     return numbers
