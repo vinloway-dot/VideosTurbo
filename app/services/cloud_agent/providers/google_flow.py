@@ -415,13 +415,20 @@ class FlowWorkspaceRun:
         ):
             return FlowRecoveryObservation(FlowRecoveryRemoteState.RUNNING)
         semantic_numbers = self._semantic_name_numbers()
-        if semantic_numbers == tuple(range(1, 7)) and completed >= 6:
+        complete_numbers = tuple(range(1, 7))
+        if semantic_numbers == complete_numbers and completed >= 6:
+            self._wait_for_stable_semantic_names(
+                expected_numbers=complete_numbers,
+            )
             snapshot = self.download_recovery_snapshot(paths, attempt=attempt)
             return FlowRecoveryObservation(
                 FlowRecoveryRemoteState.COMPLETE_PROJECT,
                 snapshot,
             )
         if semantic_numbers == (missing_index,) and completed == 1:
+            self._wait_for_stable_semantic_names(
+                expected_numbers=(missing_index,),
+            )
             snapshot = self.download_recovery_snapshot(paths, attempt=attempt)
             return FlowRecoveryObservation(
                 FlowRecoveryRemoteState.REPLACEMENT_ONLY,
@@ -544,10 +551,11 @@ class FlowWorkspaceRun:
             )
 
     def _semantic_name_numbers(self) -> tuple[int, ...]:
+        media_cards = self.page.locator(_MEDIA_CARD_SELECTOR)
         return tuple(
             number
             for number in range(1, 7)
-            if self.page.get_by_text(f"clip {number}", exact=True).count() == 1
+            if media_cards.get_by_text(f"clip {number}", exact=True).count() == 1
         )
 
     def _semantic_names_are_complete(self, expected_count: int) -> bool:

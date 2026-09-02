@@ -244,6 +244,38 @@ def test_partial_inventory_mapping_error_keeps_capture_failure_detail(
     assert raised.value.__cause__ is capture_error
 
 
+@pytest.mark.parametrize(
+    ("capture_error", "detail"),
+    [
+        (FlowArchiveValidationError("project menu unavailable"), "project menu unavailable"),
+        (
+            FlowWorkspaceVerificationError(
+                "renamed names not stable after refresh"
+            ),
+            "renamed names not stable after refresh",
+        ),
+    ],
+)
+def test_resume_inventory_pending_mapping_error_keeps_capture_failure_detail(
+    tmp_path,
+    capture_error,
+    detail,
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _job_with_prompts(store)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare(job.id)
+    store.patch_job(job.id, flow_recovery_state=FlowRecoveryState.INVENTORY_PENDING)
+    workspace = CaptureErrorWorkspace(store, job.id, capture_error)
+
+    with pytest.raises(FlowRecoveryMappingError) as raised:
+        _coordinator(store, _inventory(paths), paths.flow_files).resume_unresolved_recovery(
+            store.get_job(job.id), workspace, paths
+        )
+
+    assert detail in str(raised.value)
+    assert raised.value.__cause__ is capture_error
+
+
 def test_unresolved_attempt_reconciles_without_second_submit(tmp_path):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     job = _job_with_prompts(store)

@@ -239,6 +239,9 @@ class FakeLocator:
             assert self.page.project_menu_open
             self.page.active_download.index = 0
             self.page.project_menu_open = False
+            self.page.semantic_name_reads_at_project_download.append(
+                dict(self.page.semantic_name_reads)
+            )
             self.page.actions.append(("click", "project_download"))
             return
         if self.kind == "download":
@@ -390,9 +393,15 @@ class FakeLocator:
             )
         if self.kind == "missing":
             return 0
-        if self.kind == "semantic_name":
+        if self.kind in {"semantic_name", "semantic_card_name"}:
             self.page.semantic_name_reads[self.index] += 1
-            return self.page.clip_names.count(f"clip {self.index}")
+            names = (
+                self.page.clip_names
+                if self.kind == "semantic_card_name"
+                or self.page.page_semantic_names is None
+                else self.page.page_semantic_names
+            )
+            return names.count(f"clip {self.index}")
         if self.kind in {"dialog", "confirm_delete"}:
             return int(self.page.confirmation_pending)
         raise AssertionError(f"count is unavailable for {self.kind}")
@@ -497,6 +506,18 @@ class FakeLocator:
             return FakeLocator(self.page, "confirm_delete")
         raise AssertionError(f"unexpected nested role lookup: {self.kind} {role} {pattern}")
 
+    def get_by_text(self, text, *, exact=None):
+        del exact
+        pattern = getattr(text, "pattern", str(text)).lower()
+        semantic = re.fullmatch(r"clip\s+([1-6])", pattern)
+        if self.kind == "media_cards" and semantic is not None:
+            return FakeLocator(
+                self.page,
+                "semantic_card_name",
+                index=int(semantic.group(1)),
+            )
+        raise AssertionError(f"unexpected nested text lookup: {self.kind} {pattern}")
+
     def nth(self, index):
         if self.kind == "downloads":
             return FakeLocator(self.page, "download", index=index)
@@ -526,6 +547,7 @@ class FakePage:
         agent_available=True,
         agent_text_available=None,
         clip_names=None,
+        page_semantic_names=None,
         empty_state_available=True,
         delete_available=True,
         prompt_label_available=True,
@@ -589,6 +611,9 @@ class FakePage:
             else agent_text_available
         )
         self.clip_names = list(clip_names or [])
+        self.page_semantic_names = (
+            None if page_semantic_names is None else list(page_semantic_names)
+        )
         self.empty_state_available = empty_state_available
         self.delete_available = delete_available
         self.selected_clip_indexes = set()
@@ -648,6 +673,7 @@ class FakePage:
         self.global_menu_name = global_menu_name
         self.project_menu_open = False
         self.semantic_name_reads = {number: 0 for number in range(1, 7)}
+        self.semantic_name_reads_at_project_download = []
         self.rename_response_text = rename_response_text
         self.in_clip_editor = False
         self.hovered_card_index = None
@@ -2146,6 +2172,46 @@ def test_partial_inventory_refresh_waits_for_five_stable_semantic_names_without_
     assert ("click", "project_download") in page.actions
 
 
+def test_flow_workspace_ignores_agent_history_semantic_names_outside_media_cards(
+    monkeypatch, tmp_path
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"draft-{number}" for number in range(1, 7)],
+        page_semantic_names=[f"clip {number}" for number in range(1, 7)],
+        renamed_clip_names=[f"draft-{number}" for number in range(1, 7)],
+        checkbox_count=0,
+        inventory_sequence=[6, 6, 6],
+        agent_enabled_states=[False],
+        send_enabled_after_click=False,
+        rename_response_text=(
+            "Agent history: renamed all six clips from clip 1 through clip 6."
+        ),
+    )
+    client, _ = _client(page, timeout_seconds=1.0, editor_ready_timeout_seconds=5.0)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        _timeout_clock(monkeypatch)
+        with pytest.raises(
+            FlowWorkspaceVerificationError,
+            match="^Google Flow semantic clip names could not be verified$",
+        ):
+            workspace.reconcile_and_download(
+                _job(flow_generation_unresolved=True),
+                paths,
+            )
+
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert ("click", "project_menu") not in page.actions
+    assert ("click", "project_download") not in page.actions
+
+
 def test_flow_workspace_rename_completes_from_semantic_names_when_send_stays_disabled(
     monkeypatch, tmp_path
 ):
@@ -3068,6 +3134,60 @@ def test_reconcile_never_clicks_generate(tmp_path):
 
     assert result.state in set(google_flow.FlowRecoveryRemoteState)
     assert page.actions.count(("click", "generate")) == 0
+
+
+@pytest.mark.parametrize(
+    (
+        "clip_names",
+        "completed_video_polls",
+        "missing_index",
+        "expected_state",
+        "expected_numbers",
+    ),
+    [
+        (
+            [f"clip {number}" for number in range(1, 7)],
+            [_completed_video_cards()],
+            2,
+            google_flow.FlowRecoveryRemoteState.COMPLETE_PROJECT,
+            tuple(range(1, 7)),
+        ),
+        (
+            ["clip 2"],
+            [_completed_video_cards(fingerprints=("replacement",))],
+            2,
+            google_flow.FlowRecoveryRemoteState.REPLACEMENT_ONLY,
+            (2,),
+        ),
+    ],
+    ids=("complete_project", "replacement_only"),
+)
+def test_reconcile_targeted_replacement_waits_for_stable_media_card_names_before_download(
+    tmp_path,
+    clip_names,
+    completed_video_polls,
+    missing_index,
+    expected_state,
+    expected_numbers,
+):
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        clip_names=clip_names,
+        completed_video_polls=completed_video_polls,
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=1.0)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+
+    result = google_flow.FlowWorkspaceRun(client, page).reconcile_targeted_replacement(
+        paths,
+        missing_index=missing_index,
+        attempt=1,
+    )
+
+    assert result.state is expected_state
+    assert page.semantic_name_reads_at_project_download
+    reads_before_download = page.semantic_name_reads_at_project_download[-1]
+    assert all(reads_before_download[number] >= 2 for number in expected_numbers)
 
 
 def test_google_flow_completed_video_cards_preserve_generated_image_failure_gate(
