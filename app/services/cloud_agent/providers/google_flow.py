@@ -8,6 +8,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlsplit, urlunsplit
+from zipfile import ZipFile
 
 from playwright.sync_api import Error as PlaywrightError
 
@@ -21,10 +22,12 @@ from app.services.cloud_agent.errors import (
     MediaValidationError,
 )
 from app.services.cloud_agent.flow_archive import (
+    FlowPartialInventory,
     FlowRecoveryCapture,
     FlowRecoveryMaterialization,
     inspect_recovery_flow_archive,
     materialize_flow_archive,
+    validate_flow_source_video,
 )
 from app.services.cloud_agent.providers._browser_session import BrowserSessionProvider
 from app.services.cloud_agent.providers._session_detection import (
@@ -60,7 +63,15 @@ _CARD_DELETE_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 _CARD_OVERFLOW_NAME_RE = re.compile(
-    r"^more_vert\s+(?:more|เพิ่มเติม)$",
+    r"^(?:more_vert\s+)?(?:more|เพิ่มเติม)$",
+    re.IGNORECASE,
+)
+_CARD_DOWNLOAD_NAME_RE = re.compile(
+    r"^(?:download\s+)?(?:download|ดาวน์โหลด)$",
+    re.IGNORECASE,
+)
+_CARD_720P_NAME_RE = re.compile(
+    r"^(?:720p(?:\s+video)?|video\s+720p|วิดีโอ\s*720p|720p\s*วิดีโอ)$",
     re.IGNORECASE,
 )
 _PROJECT_MENU_NAME_RE = re.compile(
@@ -221,6 +232,7 @@ class FlowWorkspaceRun:
         self._prepared_missing_index = 0
         self._prepared_generation_composer: AgentComposer | None = None
         self._prepared_recovery_composer: AgentComposer | None = None
+        self._prepared_recovery_baseline_cards: tuple[Any, ...] | None = None
 
     def preclean_and_verify_empty(self) -> None:
         while self.client._media_card_count(self.page):
@@ -314,7 +326,7 @@ class FlowWorkspaceRun:
         job: CloudJobRecord,
         paths: JobPaths,
         expected_count: int = 6,
-    ) -> tuple[Path, ...]:
+    ) -> tuple[Path, ...] | FlowPartialInventory:
         if expected_count != 6:
             raise ValueError("Google Flow workspace requires exactly six clips")
 
@@ -337,6 +349,7 @@ class FlowWorkspaceRun:
     ) -> AgentComposer:
         if missing_index < 1 or missing_index > 6:
             raise ValueError("missing_index must be between 1 and 6")
+        self._prepared_recovery_baseline_cards = self._pin_current_media_cards()
         prepared = self.client._prepare_agent_prompt(self.page, prompt)
         self._prepared_recovery_prompt = prompt
         self._prepared_missing_index = missing_index
@@ -375,24 +388,60 @@ class FlowWorkspaceRun:
             RENAME_SURVIVING_CLIPS_INSTRUCTION,
         )
         self._wait_for_rename_response_then_refresh(response_count)
-        self._wait_for_stable_semantic_names(expected_counts=(5, 6))
+        self._wait_for_recovery_archive_grace()
         snapshot = paths.flow_snapshots_dir / f"partial-{attempt}.zip"
+        capture = self._download_and_inspect_recovery_archive(snapshot, paths)
+        if isinstance(capture, FlowRecoveryMaterialization):
+            return capture
+        inventory = capture
+        if len(inventory.semantic_numbers) != 5:
+            raise FlowArchiveValidationError(
+                "Google Flow recovery archive must contain exactly five or six clips"
+            )
+        return inventory
+
+    def _wait_for_recovery_archive_grace(self) -> None:
+        deadline = time.monotonic() + self.client.post_refresh_grace_seconds
+        while True:
+            self.client._verify_workspace_session(self.page, "")
+            self.client._dismiss_safe_announcement_dialog(self.page)
+            actionable = self.client._is_editor_actionable(self.page)
+            if time.monotonic() >= deadline:
+                if actionable:
+                    return
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow project editor could not be verified during recovery grace"
+                )
+            time.sleep(self.client.poll_seconds)
+
+    def _download_and_inspect_recovery_archive(
+        self,
+        snapshot: Path,
+        paths: JobPaths,
+    ) -> FlowRecoveryCapture:
         self._download_project_archive_to(snapshot)
-        capture = inspect_recovery_flow_archive(
+        try:
+            materialized = materialize_flow_archive(
+                snapshot,
+                paths,
+                min_size_bytes=1,
+                expected_width=self.client.expected_width,
+                expected_height=self.client.expected_height,
+            )
+        except FlowArchiveValidationError:
+            pass
+        else:
+            return FlowRecoveryMaterialization(
+                paths=materialized,
+                source="latest_complete_archive",
+            )
+        return inspect_recovery_flow_archive(
             snapshot,
             paths,
             min_size_bytes=1,
             expected_width=self.client.expected_width,
             expected_height=self.client.expected_height,
         )
-        if isinstance(capture, FlowRecoveryMaterialization):
-            return capture
-        inventory = capture
-        if self._semantic_name_numbers() != inventory.semantic_numbers:
-            raise FlowWorkspaceVerificationError(
-                "Google Flow missing clip position could not be corroborated"
-            )
-        return inventory
 
     def download_recovery_snapshot(
         self,
@@ -406,6 +455,225 @@ class FlowWorkspaceRun:
         self._download_project_archive_to(snapshot)
         return snapshot
 
+    def _pin_current_media_cards(self) -> tuple[Any, ...] | None:
+        try:
+            cards = self.client._media_cards(self.page)
+            handles = []
+            for index in range(cards.count()):
+                card = cards.nth(index)
+                if not card.is_visible():
+                    return None
+                handle = card.element_handle()
+                if handle is None:
+                    return None
+                handles.append(handle)
+            return tuple(handles)
+        except PlaywrightError:
+            return None
+
+    @staticmethod
+    def _same_element(first: Any, second: Any) -> bool:
+        try:
+            return bool(
+                first.evaluate(
+                    "(element, other) => element === other",
+                    second,
+                )
+            )
+        except PlaywrightError as exc:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow replacement card identity could not be verified"
+            ) from exc
+
+    def _added_cards_with_preserved_baseline(
+        self,
+        current: list[tuple[Any, Any]],
+    ) -> list[tuple[Any, Any]] | None:
+        baseline = self._prepared_recovery_baseline_cards
+        if baseline is None or len(current) != len(baseline) + 1:
+            return None
+        matched_current: set[int] = set()
+        for prior in baseline:
+            matches = [
+                index
+                for index, (_card, handle) in enumerate(current)
+                if self._same_element(handle, prior)
+            ]
+            if len(matches) != 1 or matches[0] in matched_current:
+                return None
+            matched_current.add(matches[0])
+        return [
+            item for index, item in enumerate(current) if index not in matched_current
+        ]
+
+    @staticmethod
+    def _card_is_completed_video(card: Any) -> bool:
+        try:
+            if not card.is_visible() or card.get_attribute("aria-busy") == "true":
+                return False
+            text = str(card.inner_text() or "")
+            return bool(
+                not _CARD_PROCESSING_RE.search(text)
+                and not _CARD_FAILURE_RE.search(text)
+                and card.locator("video").count() == 1
+            )
+        except PlaywrightError as exc:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow replacement card could not be verified"
+            ) from exc
+
+    def _replacement_card_candidate(
+        self,
+        missing_index: int,
+    ) -> tuple[Any, Any] | None:
+        cards = self.client._media_cards(self.page)
+        current: list[tuple[Any, Any]] = []
+        try:
+            for index in range(cards.count()):
+                card = cards.nth(index)
+                if not card.is_visible():
+                    continue
+                handle = card.element_handle()
+                if handle is None:
+                    raise FlowWorkspaceVerificationError(
+                        "Google Flow replacement card identity could not be verified"
+                    )
+                current.append((card, handle))
+        except PlaywrightError as exc:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow replacement card identity could not be verified"
+            ) from exc
+
+        titled = [
+            item
+            for item in current
+            if item[0].get_by_text(
+                f"clip {missing_index}",
+                exact=True,
+            ).count()
+            == 1
+            and self._card_is_completed_video(item[0])
+        ]
+        if len(titled) == 1:
+            return titled[0]
+        if len(titled) > 1:
+            return None
+        added = self._added_cards_with_preserved_baseline(current)
+        if added is None:
+            return None
+        completed_added = [item for item in added if self._card_is_completed_video(item[0])]
+        return completed_added[0] if len(completed_added) == 1 else None
+
+    def _new_failed_card_observed(self) -> bool:
+        baseline = self._prepared_recovery_baseline_cards
+        if baseline is None:
+            return False
+        cards = self.client._media_cards(self.page)
+        try:
+            current = []
+            for index in range(cards.count()):
+                card = cards.nth(index)
+                handle = card.element_handle()
+                if handle is None:
+                    return False
+                current.append((card, handle))
+        except PlaywrightError as exc:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow replacement failure state could not be verified"
+            ) from exc
+        added = self._added_cards_with_preserved_baseline(current)
+        return bool(
+            added is not None
+            and len(added) == 1
+            and _CARD_FAILURE_RE.search(str(added[0][0].inner_text() or ""))
+        )
+
+    def _download_replacement_card_to(
+        self,
+        card: Any,
+        pinned_card: Any,
+        destination: Path,
+        *,
+        missing_index: int,
+    ) -> None:
+        temporary_video = destination.parent / f".{destination.stem}.clip-{missing_index}.mp4"
+        temporary_archive = destination.parent / f".{destination.name}.tmp"
+        temporary_video.unlink(missing_ok=True)
+        temporary_archive.unlink(missing_ok=True)
+        try:
+            current = card.element_handle()
+            if current is None or not self._same_element(current, pinned_card):
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow replacement card identity could not be verified"
+                )
+            pinned_card.hover()
+            overflow = card.get_by_role("button", name=_CARD_OVERFLOW_NAME_RE)
+            if not (
+                overflow.count() == 1
+                and overflow.is_visible()
+                and overflow.is_enabled()
+            ):
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow replacement card menu could not be verified"
+                )
+            overflow.click()
+            download = self.page.get_by_role(
+                "menuitem",
+                name=_CARD_DOWNLOAD_NAME_RE,
+            )
+            if not (
+                download.count() == 1
+                and download.is_visible()
+                and download.is_enabled()
+            ):
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow replacement card Download action could not be verified"
+                )
+            download.click()
+            format_deadline = time.monotonic() + self.client.editor_ready_timeout_seconds
+            while True:
+                video_format = self.page.get_by_role(
+                    "menuitem",
+                    name=_CARD_720P_NAME_RE,
+                )
+                if (
+                    video_format.count() == 1
+                    and video_format.is_visible()
+                    and video_format.is_enabled()
+                ):
+                    break
+                if time.monotonic() >= format_deadline:
+                    raise FlowWorkspaceVerificationError(
+                        "Google Flow replacement video download format could not be verified"
+                    )
+                time.sleep(self.client.poll_seconds)
+            with self.page.expect_download() as download_info:
+                video_format.click()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            download_info.value.save_as(str(temporary_video))
+        except PlaywrightError as exc:
+            temporary_video.unlink(missing_ok=True)
+            raise FlowWorkspaceVerificationError(
+                "Google Flow replacement download could not be verified"
+            ) from exc
+
+        try:
+            validate_flow_source_video(temporary_video, min_size_bytes=1)
+            with ZipFile(temporary_archive, "w") as archive:
+                archive.write(temporary_video, arcname=f"clip {missing_index}.mp4")
+            temporary_archive.replace(destination)
+        except (MediaValidationError, OSError) as exc:
+            raise FlowArchiveValidationError(
+                f"invalid Google Flow replacement download: {exc}"
+            ) from exc
+        finally:
+            temporary_video.unlink(missing_ok=True)
+            temporary_archive.unlink(missing_ok=True)
+        if not destination.is_file():
+            raise FlowArchiveValidationError(
+                "Google Flow replacement download did not produce an archive"
+            )
+
     def reconcile_targeted_replacement(
         self,
         paths: JobPaths,
@@ -415,14 +683,27 @@ class FlowWorkspaceRun:
     ) -> FlowRecoveryObservation:
         if missing_index < 1 or missing_index > 6:
             raise ValueError("missing_index must be between 1 and 6")
-        completed, failed = self.client._terminal_output_card_counts(self.page)
-        if failed:
-            return FlowRecoveryObservation(FlowRecoveryRemoteState.FAILED)
         if (
             self.page.locator('[aria-busy="true"]:visible').count()
             or self.page.get_by_role("progressbar").count()
         ):
             return FlowRecoveryObservation(FlowRecoveryRemoteState.RUNNING)
+        candidate = self._replacement_card_candidate(missing_index)
+        if candidate is not None:
+            snapshot = paths.flow_snapshots_dir / f"replacement-{attempt}.zip"
+            self._download_replacement_card_to(
+                candidate[0],
+                candidate[1],
+                snapshot,
+                missing_index=missing_index,
+            )
+            return FlowRecoveryObservation(
+                FlowRecoveryRemoteState.REPLACEMENT_ONLY,
+                snapshot,
+            )
+        completed, failed = self.client._terminal_output_card_counts(self.page)
+        if failed and self._new_failed_card_observed():
+            return FlowRecoveryObservation(FlowRecoveryRemoteState.FAILED)
         semantic_numbers = self._semantic_name_numbers()
         complete_numbers = tuple(range(1, 7))
         if semantic_numbers == complete_numbers and completed >= 6:
@@ -434,15 +715,6 @@ class FlowWorkspaceRun:
                 FlowRecoveryRemoteState.COMPLETE_PROJECT,
                 snapshot,
             )
-        if semantic_numbers == (missing_index,) and completed == 1:
-            self._wait_for_stable_semantic_names(
-                expected_numbers=(missing_index,),
-            )
-            snapshot = self.download_recovery_snapshot(paths, attempt=attempt)
-            return FlowRecoveryObservation(
-                FlowRecoveryRemoteState.REPLACEMENT_ONLY,
-                snapshot,
-            )
         return FlowRecoveryObservation(FlowRecoveryRemoteState.AMBIGUOUS)
 
     def submit_prepared_generation_and_download(
@@ -450,7 +722,7 @@ class FlowWorkspaceRun:
         job: CloudJobRecord,
         paths: JobPaths,
         expected_count: int = 6,
-    ) -> tuple[Path, ...]:
+    ) -> tuple[Path, ...] | FlowPartialInventory:
         if expected_count != 6:
             raise ValueError("Google Flow workspace requires exactly six clips")
         if self._prepared_master_prompt != job.master_prompt:
@@ -471,7 +743,7 @@ class FlowWorkspaceRun:
         job: CloudJobRecord,
         paths: JobPaths,
         expected_count: int = 6,
-    ) -> tuple[Path, ...]:
+    ) -> tuple[Path, ...] | FlowPartialInventory:
         del job
         if expected_count != 6:
             raise ValueError("Google Flow workspace requires exactly six clips")
@@ -498,7 +770,7 @@ class FlowWorkspaceRun:
         self,
         paths: JobPaths,
         expected_count: int,
-    ) -> tuple[Path, ...]:
+    ) -> tuple[Path, ...] | FlowPartialInventory:
         if not self._semantic_names_are_complete(expected_count):
             if self.client._has_completed_rename_response(self.page):
                 self._refresh_and_hydrate()
@@ -509,9 +781,15 @@ class FlowWorkspaceRun:
                     RENAME_CLIPS_INSTRUCTION,
                 )
                 self._wait_for_rename_response_then_refresh(response_count)
-            self._wait_for_stable_semantic_names(
-                expected_numbers=tuple(range(1, expected_count + 1)),
+            self._wait_for_recovery_archive_grace()
+            snapshot = paths.flow_snapshots_dir / "partial-0.zip"
+            capture = self._download_and_inspect_recovery_archive(
+                snapshot,
+                paths,
             )
+            if isinstance(capture, FlowRecoveryMaterialization):
+                return capture.paths
+            return capture
 
         self._download_project_archive(paths)
         return materialize_flow_archive(
@@ -587,32 +865,21 @@ class FlowWorkspaceRun:
         *,
         expected_numbers: tuple[int, ...] | None = None,
         expected_count: int | None = None,
-        expected_counts: tuple[int, ...] | None = None,
     ) -> tuple[int, ...]:
-        if sum(
-            option is not None
-            for option in (expected_numbers, expected_count, expected_counts)
-        ) != 1:
+        if (expected_numbers is None) == (expected_count is None):
             raise ValueError("exactly one semantic name expectation is required")
         if expected_count is not None and not 0 <= expected_count <= 6:
             raise ValueError("expected_count must be between 0 and 6")
-        if expected_counts is not None and (
-            not expected_counts
-            or len(set(expected_counts)) != len(expected_counts)
-            or any(count < 0 or count > 6 for count in expected_counts)
-        ):
-            raise ValueError("expected_counts must contain unique counts from 0 through 6")
 
         deadline = time.monotonic() + self.client.editor_ready_timeout_seconds
         previous: tuple[int, ...] | None = None
         while True:
             numbers = self._semantic_name_numbers()
-            if expected_numbers is not None:
-                matches = numbers == expected_numbers
-            elif expected_count is not None:
-                matches = len(numbers) == expected_count
-            else:
-                matches = len(numbers) in expected_counts
+            matches = (
+                numbers == expected_numbers
+                if expected_numbers is not None
+                else len(numbers) == expected_count
+            )
             if matches:
                 if numbers == previous:
                     return numbers
@@ -643,6 +910,7 @@ class GoogleFlowClient:
         service_url: str,
         generation_timeout_seconds: float = 1800.0,
         editor_ready_timeout_seconds: float = 120.0,
+        post_refresh_grace_seconds: float = 120.0,
         workspace_lock_timeout_seconds: float | None = None,
         poll_seconds: float = 1.0,
         settled_poll_count: int = 3,
@@ -656,6 +924,8 @@ class GoogleFlowClient:
             raise ValueError("generation_timeout_seconds must be positive")
         if editor_ready_timeout_seconds <= 0:
             raise ValueError("editor_ready_timeout_seconds must be positive")
+        if post_refresh_grace_seconds <= 0:
+            raise ValueError("post_refresh_grace_seconds must be positive")
         if poll_seconds < 0:
             raise ValueError("poll_seconds must be non-negative")
         if settled_poll_count <= 0:
@@ -668,6 +938,7 @@ class GoogleFlowClient:
         self.service_url = service_url
         self.generation_timeout_seconds = float(generation_timeout_seconds)
         self.editor_ready_timeout_seconds = float(editor_ready_timeout_seconds)
+        self.post_refresh_grace_seconds = float(post_refresh_grace_seconds)
         self.workspace_lock_timeout_seconds = (
             self.generation_timeout_seconds
             if workspace_lock_timeout_seconds is None
