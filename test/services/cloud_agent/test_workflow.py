@@ -21,6 +21,7 @@ from app.services.cloud_agent.errors import (
     HumanRequiredError,
     MediaValidationError,
 )
+from app.services.cloud_agent.flow_archive import FlowPartialInventory
 from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.media_probe import MediaProbe
 from app.services.cloud_agent.providers.canva import CanvaUIVerificationError
@@ -1378,6 +1379,73 @@ def test_incomplete_original_batch_delegates_to_targeted_recovery(
     ).run(job.id, worker_id=WORKER_ID)
 
     assert len(recovery.calls) == 1
+    assert workspace.generate_calls == 1
+    assert result.status is CloudJobStatus.COMPLETED
+
+
+def test_validated_five_clip_output_hands_inventory_to_recovery_without_recapture(
+    monkeypatch,
+    tmp_path,
+):
+    class PartialWorkspace(FenceWorkspace):
+        def __init__(self, store, events, inventory):
+            super().__init__(store, events)
+            self.inventory = inventory
+
+        def generate_and_download(self, job, paths, expected_count=6):
+            del paths, expected_count
+            current = self.store.get_job(job.id)
+            assert current is not None
+            self.generate_calls += 1
+            self.events.append("validated_partial_inventory")
+            return self.inventory
+
+    class CompletingRecovery:
+        def __init__(self):
+            self.captured = []
+
+        def recover_captured_inventory(
+            self, current_job, workspace, paths, inventory
+        ):
+            self.captured.append((current_job.id, workspace, inventory))
+            for path in paths.flow_files:
+                path.write_bytes(b"recovered")
+            return paths.flow_files
+
+        def recover_incomplete_batch(self, current_job, workspace, paths):
+            raise AssertionError("validated inventory must not be captured a second time")
+
+        def resume_unresolved_recovery(self, current_job, workspace, paths):
+            raise AssertionError("fresh validated inventory must not enter resume")
+
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _, paths = _make_tts_ready_job(store, storage, job.id)
+    inventory = FlowPartialInventory(
+        snapshot_path=paths.flow_snapshots_dir / "partial-0.zip",
+        semantic_numbers=(1, 2, 4, 5, 6),
+        missing_index=3,
+        staged_files=tuple(
+            paths.flow_staging_dir / f"clip {number}.mp4"
+            for number in (1, 2, 4, 5, 6)
+        ),
+        baseline_digest="a" * 64,
+    )
+    events = []
+    workspace = PartialWorkspace(store, events, inventory)
+    recovery = CompletingRecovery()
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        flow=FenceFlow(workspace, events),
+        flow_recovery=recovery,
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert len(recovery.captured) == 1
+    assert recovery.captured[0][2] is inventory
     assert workspace.generate_calls == 1
     assert result.status is CloudJobStatus.COMPLETED
 

@@ -182,6 +182,33 @@ def test_complete_capture_skips_paid_replacement_and_clears_recovery_state(tmp_p
     assert store.get_job(job.id).flow_recovery_state is FlowRecoveryState.NONE
 
 
+def test_captured_inventory_enters_targeted_recovery_without_second_capture(tmp_path):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _job_with_prompts(store)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare(job.id)
+    inventory = _inventory(paths, missing_index=3)
+    snapshot = paths.flow_snapshots_dir / "replacement-1.zip"
+    snapshot.write_bytes(b"snapshot")
+    workspace = RecoveryWorkspace(
+        store,
+        job.id,
+        inventory,
+        [FlowRecoveryObservation(FlowRecoveryRemoteState.REPLACEMENT_ONLY, snapshot)],
+    )
+
+    result = _coordinator(
+        store,
+        inventory,
+        paths.flow_files,
+    ).recover_captured_inventory(job, workspace, paths, inventory)
+
+    assert result == paths.flow_files
+    assert "capture_inventory" not in workspace.events
+    assert workspace.submit_calls == 1
+    assert "submit_clip_3" in workspace.events
+    assert store.get_job(job.id).flow_recovery_attempts == 1
+
+
 @pytest.mark.parametrize(
     "capture_error",
     [

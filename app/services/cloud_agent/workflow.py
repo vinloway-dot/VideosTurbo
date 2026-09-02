@@ -28,6 +28,7 @@ from app.services.cloud_agent.flow_recovery import (
     FlowRecoveryMappingError,
 )
 from app.services.cloud_agent.flow_archive import (
+    FlowPartialInventory,
     recover_flow_artifacts,
     validate_flow_source_video,
 )
@@ -53,6 +54,9 @@ class TTSClient(Protocol):
     def generate(self, job: CloudJobRecord, output_path: Path) -> Path: ...
 
 
+FlowWorkspaceOutput = tuple[Path, ...] | FlowPartialInventory
+
+
 class FlowWorkspace(Protocol):
     def prepare_for_generation(self) -> None: ...
 
@@ -61,14 +65,14 @@ class FlowWorkspace(Protocol):
         job: CloudJobRecord,
         paths: JobPaths,
         expected_count: int = 6,
-    ) -> tuple[Path, ...]: ...
+    ) -> FlowWorkspaceOutput: ...
 
     def reconcile_and_download(
         self,
         job: CloudJobRecord,
         paths: JobPaths,
         expected_count: int = 6,
-    ) -> tuple[Path, ...]: ...
+    ) -> FlowWorkspaceOutput: ...
 
     def cleanup_and_verify_empty(self) -> None: ...
 
@@ -296,6 +300,22 @@ class CloudAgentWorkflow:
         if remaining > 0:
             self.flow_workspace_retry_sleeper(remaining)
 
+    def _resolve_flow_workspace_output(
+        self,
+        job: CloudJobRecord,
+        workspace: FlowWorkspace,
+        paths: JobPaths,
+        output: FlowWorkspaceOutput,
+    ) -> tuple[Path, ...]:
+        if isinstance(output, FlowPartialInventory):
+            return self.flow_recovery.recover_captured_inventory(
+                self._get_job(job.id),
+                workspace,
+                paths,
+                output,
+            )
+        return output
+
     def _process_flow_workspace(
         self,
         job: CloudJobRecord,
@@ -319,12 +339,19 @@ class CloudAgentWorkflow:
                 progress=35,
             )
             try:
-                generated = workspace.reconcile_and_download(job, paths)
+                output = workspace.reconcile_and_download(job, paths)
             except (FlowBatchIncompleteError, FlowGenerationTimeoutError):
                 generated = self.flow_recovery.recover_incomplete_batch(
                     self._get_job(job.id),
                     workspace,
                     paths,
+                )
+            else:
+                generated = self._resolve_flow_workspace_output(
+                    job,
+                    workspace,
+                    paths,
+                    output,
                 )
         else:
             workspace.prepare_for_generation()
@@ -338,7 +365,7 @@ class CloudAgentWorkflow:
                 flow_generation_unresolved=True,
             )
             try:
-                generated = workspace.submit_prepared_generation_and_download(
+                output = workspace.submit_prepared_generation_and_download(
                     job,
                     paths,
                 )
@@ -347,6 +374,13 @@ class CloudAgentWorkflow:
                     self._get_job(job.id),
                     workspace,
                     paths,
+                )
+            else:
+                generated = self._resolve_flow_workspace_output(
+                    job,
+                    workspace,
+                    paths,
+                    output,
                 )
         if len(generated) != 6:
             raise MediaValidationError(

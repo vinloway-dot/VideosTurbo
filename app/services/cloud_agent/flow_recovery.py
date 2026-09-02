@@ -147,6 +147,48 @@ class FlowRecoveryCoordinator:
         self._report(current.id, "flow.inventory.5")
         return self._submit_until_complete(current, workspace, paths, inventory)
 
+    def recover_captured_inventory(
+        self,
+        job: CloudJobRecord,
+        workspace: FlowRecoveryWorkspace,
+        paths: JobPaths,
+        inventory: FlowPartialInventory,
+    ) -> tuple[Path, ...]:
+        """Adopt an already downloaded exact-five inventory without recapturing it."""
+        current = self.store.get_job(job.id)
+        if current is None:
+            raise KeyError(job.id)
+        if (
+            current.flow_recovery_state is not FlowRecoveryState.NONE
+            or current.flow_recovery_attempts != 0
+            or current.flow_missing_clip_index != 0
+            or current.flow_recovery_baseline
+        ):
+            raise FlowRecoveryMappingError(
+                "captured Flow inventory cannot replace durable recovery state"
+            )
+        if len(inventory.semantic_numbers) != 5:
+            raise FlowRecoveryMappingError(
+                "captured Flow inventory must contain exactly five clips"
+            )
+        expected_numbers = tuple(
+            number for number in range(1, 7) if number != inventory.missing_index
+        )
+        if inventory.semantic_numbers != expected_numbers:
+            raise FlowRecoveryMappingError(
+                "captured Flow inventory has an ambiguous missing position"
+            )
+
+        current = self.store.patch_job(
+            current.id,
+            flow_generation_unresolved=False,
+            flow_recovery_state=FlowRecoveryState.READY_TO_SUBMIT,
+            flow_missing_clip_index=inventory.missing_index,
+            flow_recovery_baseline=inventory.baseline_digest,
+        )
+        self._report(current.id, "flow.inventory.5")
+        return self._submit_until_complete(current, workspace, paths, inventory)
+
     def resume_unresolved_recovery(
         self,
         job: CloudJobRecord,
