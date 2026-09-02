@@ -2256,6 +2256,42 @@ def test_partial_inventory_refresh_waits_for_five_stable_semantic_names_without_
     assert ("click", "project_download") in page.actions
 
 
+def test_partial_inventory_refresh_accepts_six_complete_semantic_names(
+    monkeypatch, tmp_path
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"draft-{number}" for number in range(1, 7)],
+        renamed_clip_names=[f"clip {number}" for number in range(1, 7)],
+        checkbox_count=0,
+        inventory_sequence=[6, 6, 6],
+        agent_enabled_states=[False],
+        send_enabled_after_click=False,
+    )
+    client, _ = _client(page, timeout_seconds=1.0, editor_ready_timeout_seconds=5.0)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    materialization = google_flow.FlowRecoveryMaterialization(
+        paths=paths.flow_files,
+        source="complete_archive",
+    )
+    monkeypatch.setattr(
+        google_flow,
+        "inspect_recovery_flow_archive",
+        lambda *_args, **_kwargs: materialization,
+    )
+
+    _timeout_clock(monkeypatch)
+    result = google_flow.FlowWorkspaceRun(client, page).capture_partial_inventory(
+        paths,
+        attempt=0,
+    )
+
+    assert result is materialization
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert all(page.semantic_name_reads[number] >= 2 for number in range(1, 7))
+    assert ("click", "project_download") in page.actions
+
+
 def test_flow_workspace_ignores_agent_history_semantic_names_outside_media_cards(
     monkeypatch, tmp_path
 ):
