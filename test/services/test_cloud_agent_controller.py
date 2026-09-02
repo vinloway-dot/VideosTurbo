@@ -622,11 +622,14 @@ def test_resume_paused_or_human_required_requeues_and_preserves_checkpoint(tmp_p
     client, store = _client(tmp_path)
     paused = _created_job(store)
     human = _created_job(store)
+    stale_progress_at = "2026-01-01T00:00:00+00:00"
     store.patch_job(
         paused.id,
         status=CloudJobStatus.PAUSED,
         checkpoint=CloudJobCheckpoint.PREFLIGHT_PASSED,
         current_step="paused",
+        last_progress_at=stale_progress_at,
+        last_progress_milestone="preflight.passed",
     )
     store.patch_job(
         human.id,
@@ -635,6 +638,8 @@ def test_resume_paused_or_human_required_requeues_and_preserves_checkpoint(tmp_p
         current_step="human_required",
         error_code="HUMAN_REQUIRED",
         error_message="manual login required",
+        last_progress_at=stale_progress_at,
+        last_progress_milestone="tts.validated",
     )
 
     paused_response = client.post(f"/api/v1/cloud-agent/jobs/{paused.id}/resume")
@@ -645,6 +650,8 @@ def test_resume_paused_or_human_required_requeues_and_preserves_checkpoint(tmp_p
     assert paused_data["status"] == CloudJobStatus.QUEUED.value
     assert paused_data["checkpoint"] == CloudJobCheckpoint.PREFLIGHT_PASSED.value
     assert paused_data["control_request"] == CloudControlRequest.NONE.value
+    assert paused_data["last_progress_at"] > stale_progress_at
+    assert paused_data["last_progress_milestone"] == "operator.resumed"
 
     assert human_response.status_code == 200
     human_data = human_response.json()["data"]
@@ -652,6 +659,8 @@ def test_resume_paused_or_human_required_requeues_and_preserves_checkpoint(tmp_p
     assert human_data["checkpoint"] == CloudJobCheckpoint.TTS_READY.value
     assert human_data["error_code"] == ""
     assert human_data["error_message"] == ""
+    assert human_data["last_progress_at"] > stale_progress_at
+    assert human_data["last_progress_milestone"] == "operator.resumed"
 
 
 def test_resume_rejects_job_that_is_not_paused_or_human_required(tmp_path):

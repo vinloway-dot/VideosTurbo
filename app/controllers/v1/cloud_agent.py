@@ -845,17 +845,20 @@ def resume_cloud_agent_job(
     store: CloudJobStore = Depends(get_cloud_job_store),
 ):
     del request
-    job = _require_job(store, job_id)
-    if job.status not in {CloudJobStatus.PAUSED, CloudJobStatus.HUMAN_REQUIRED}:
-        _invalid_transition(job.id, "resume", job.status)
-    job = store.patch_job(
-        job.id,
-        status=CloudJobStatus.QUEUED,
-        current_step="queued",
-        control_request=CloudControlRequest.NONE,
-        error_code="",
-        error_message="",
-    )
+    try:
+        job = store.resume_job(job_id)
+    except KeyError as exc:
+        raise HttpException(
+            task_id=job_id,
+            status_code=404,
+            message=f"cloud agent job not found: {job_id}",
+        ) from exc
+    except ValueError as exc:
+        raise HttpException(
+            task_id=job_id,
+            status_code=409,
+            message=str(exc),
+        ) from exc
     return utils.get_response(200, _job_data(job))
 
 
