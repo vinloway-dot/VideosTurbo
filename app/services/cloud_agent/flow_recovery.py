@@ -126,7 +126,7 @@ class FlowRecoveryCoordinator:
             capture = workspace.capture_partial_inventory(paths, attempt=0)
         except (FlowArchiveValidationError, FlowWorkspaceVerificationError) as exc:
             raise FlowRecoveryMappingError(
-                "Flow partial inventory could not be mapped safely"
+                f"Flow partial inventory could not be mapped safely: {exc}"
             ) from exc
         if isinstance(capture, FlowRecoveryMaterialization):
             self.store.patch_job(
@@ -159,7 +159,12 @@ class FlowRecoveryCoordinator:
         if current.flow_recovery_state is FlowRecoveryState.NONE:
             raise FlowRecoveryMappingError("no durable Flow recovery is pending")
         if current.flow_recovery_state is FlowRecoveryState.INVENTORY_PENDING:
-            capture = workspace.capture_partial_inventory(paths, attempt=0)
+            try:
+                capture = workspace.capture_partial_inventory(paths, attempt=0)
+            except (FlowArchiveValidationError, FlowWorkspaceVerificationError) as exc:
+                raise FlowRecoveryMappingError(
+                    f"Flow partial inventory could not be mapped safely: {exc}"
+                ) from exc
             if isinstance(capture, FlowRecoveryMaterialization):
                 self.store.patch_job(
                     current.id,
