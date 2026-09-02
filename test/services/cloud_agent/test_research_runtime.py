@@ -88,6 +88,143 @@ def test_html_strips_chrome_but_preserves_complete_readable_text(runtime, fake_h
     assert source.title == "Article"
 
 
+def test_html_uses_meta_charset_when_header_omits_charset(runtime, fake_http):
+    html = (
+        '<html><head><meta charset="windows-874">'
+        "<title>สมุนไพร คำฝอย</title></head>"
+        "<body><main><p>ดอกคำฝอยใช้เป็นสมุนไพร</p></main></body></html>"
+    )
+    fake_http.preflight(
+        _response(
+            "https://public.example/thai-herb",
+            content_type="text/html",
+            body=html.encode("cp874"),
+        )
+    )
+
+    source = runtime.execute("fetch_url", "https://public.example/thai-herb")
+
+    assert source.title == "สมุนไพร คำฝอย"
+    assert source.content == "ดอกคำฝอยใช้เป็นสมุนไพร"
+
+
+def test_html_uses_legacy_http_equiv_meta_charset(runtime, fake_http):
+    html = (
+        '<html><head><meta http-equiv="Content-Type" '
+        'content="text/html; charset=windows-874">'
+        "<title>สรรพคุณสมุนไพร 200 ชนิด</title></head>"
+        "<body><main><p>ดอกคำฝอยใช้เป็นสมุนไพร</p></main></body></html>"
+    )
+    fake_http.preflight(
+        _response(
+            "https://public.example/legacy-thai-herb",
+            content_type="text/html",
+            body=html.encode("cp874"),
+        )
+    )
+
+    source = runtime.execute("fetch_url", "https://public.example/legacy-thai-herb")
+
+    assert source.title == "สรรพคุณสมุนไพร 200 ชนิด"
+    assert source.content == "ดอกคำฝอยใช้เป็นสมุนไพร"
+
+
+def test_http_charset_takes_precedence_over_meta_charset(runtime, fake_http):
+    html = (
+        '<html><head><meta charset="windows-874">'
+        "<title>สมุนไพร คำฝอย</title></head>"
+        "<body><main><p>ดอกคำฝอยใช้เป็นสมุนไพร</p></main></body></html>"
+    )
+    fake_http.preflight(
+        _response(
+            "https://public.example/http-charset",
+            content_type="text/html; charset=utf-8",
+            body=html.encode("utf-8"),
+        )
+    )
+
+    source = runtime.execute("fetch_url", "https://public.example/http-charset")
+
+    assert source.title == "สมุนไพร คำฝอย"
+    assert source.content == "ดอกคำฝอยใช้เป็นสมุนไพร"
+
+
+@pytest.mark.parametrize(
+    ("declared_charset", "encoding", "title"),
+    [
+        ("gb2312", "gbk", "中药资料"),
+        ("utf-16", "utf-16-le", "Herbal facts"),
+    ],
+)
+def test_html_supports_common_http_charset_aliases(
+    runtime,
+    fake_http,
+    declared_charset,
+    encoding,
+    title,
+):
+    html = (
+        f"<html><head><title>{title}</title></head>"
+        "<body><main><p>Readable fact</p></main></body></html>"
+    )
+    fake_http.preflight(
+        _response(
+            "https://public.example/http-charset-alias",
+            content_type=f"text/html; charset={declared_charset}",
+            body=html.encode(encoding),
+        )
+    )
+
+    source = runtime.execute("fetch_url", "https://public.example/http-charset-alias")
+
+    assert source.title == title
+    assert source.content == "Readable fact"
+
+
+def test_meta_charset_ignores_comments_and_unrelated_attributes(runtime, fake_http):
+    html = (
+        '<html><head><!-- <meta charset="utf-8"> -->'
+        '<meta data-charset="utf-8"><meta charset="windows-874">'
+        "<title>สมุนไพร คำฝอย</title></head>"
+        "<body><main><p>ดอกคำฝอยใช้เป็นสมุนไพร</p></main></body></html>"
+    )
+    fake_http.preflight(
+        _response(
+            "https://public.example/meta-lookalikes",
+            content_type="text/html",
+            body=html.encode("cp874"),
+        )
+    )
+
+    source = runtime.execute("fetch_url", "https://public.example/meta-lookalikes")
+
+    assert source.title == "สมุนไพร คำฝอย"
+    assert source.content == "ดอกคำฝอยใช้เป็นสมุนไพร"
+
+
+@pytest.mark.parametrize("charset", ["idna", "unicode_escape", "utf-7"])
+def test_unsupported_meta_charset_maps_to_typed_source_error(
+    runtime,
+    fake_http,
+    charset,
+):
+    fake_http.preflight(
+        _response(
+            "https://public.example/unsupported-meta-charset",
+            content_type="text/html",
+            body=(
+                f'<html><head><meta charset="{charset}"></head>'
+                "<body><main><p>Fact</p></main></body></html>"
+            ).encode("ascii"),
+        )
+    )
+
+    with pytest.raises(ResearchError) as excinfo:
+        runtime.execute("fetch_url", "https://public.example/unsupported-meta-charset")
+
+    assert excinfo.value.code == "URL_CONTENT_UNSUPPORTED"
+
+
 def test_long_html_is_not_product_truncated(runtime, fake_http):
     fake_http.preflight(
         _response(

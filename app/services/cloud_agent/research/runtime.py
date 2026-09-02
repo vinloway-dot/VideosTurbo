@@ -1,6 +1,8 @@
+import codecs
 import re
 from dataclasses import dataclass, field
 from hashlib import sha256
+from html.parser import HTMLParser
 from io import BytesIO
 from typing import Callable
 
@@ -49,6 +51,75 @@ _PAYWALL_MARKERS = (
     "premium content",
     "subscription required",
 )
+_CONTENT_CHARSET_RE = re.compile(
+    r"(?:^|;)\s*charset\s*=\s*['\"]?\s*([A-Za-z0-9._-]+)",
+    re.IGNORECASE,
+)
+_CHARSET_ALIASES = {
+    "ascii": "cp1252",
+    "chinese": "gbk",
+    "csiso58gb231280": "gbk",
+    "gb_2312-80": "gbk",
+    "iso-ir-58": "gbk",
+    "iso-8859-1": "cp1252",
+    "latin-1": "cp1252",
+    "latin1": "cp1252",
+    "tis-620": "cp874",
+    "us-ascii": "cp1252",
+    "x-gbk": "gbk",
+    "windows-874": "cp874",
+    "windows874": "cp874",
+}
+_PYTHON_CODEC_ALIASES = {
+    "gb2312": "gbk",
+    "iso8859-1": "cp1252",
+    "utf-16": "utf-16-le",
+}
+_HTML_TEXT_CODECS = frozenset(
+    {
+        "big5",
+        "big5hkscs",
+        "cp866",
+        "cp874",
+        "cp932",
+        "cp949",
+        "cp1250",
+        "cp1251",
+        "cp1252",
+        "cp1253",
+        "cp1254",
+        "cp1255",
+        "cp1256",
+        "cp1257",
+        "cp1258",
+        "euc_jp",
+        "euc_kr",
+        "gb18030",
+        "gbk",
+        "iso2022_jp",
+        "iso8859-2",
+        "iso8859-3",
+        "iso8859-4",
+        "iso8859-5",
+        "iso8859-6",
+        "iso8859-7",
+        "iso8859-8",
+        "iso8859-9",
+        "iso8859-10",
+        "iso8859-11",
+        "iso8859-13",
+        "iso8859-14",
+        "iso8859-15",
+        "iso8859-16",
+        "koi8-r",
+        "koi8-u",
+        "mac-roman",
+        "shift_jis",
+        "utf-16-be",
+        "utf-16-le",
+        "utf-8",
+    }
+)
 _HIDDEN_CLASS_TOKENS = frozenset(
     {
         "hidden",
@@ -60,6 +131,46 @@ _HIDDEN_CLASS_TOKENS = frozenset(
         "invisible",
     }
 )
+
+
+class _MetaCharsetParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.charset = ""
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        self._capture_charset(tag, attrs)
+
+    def handle_startendtag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        self._capture_charset(tag, attrs)
+
+    def _capture_charset(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        if self.charset or tag.casefold() != "meta":
+            return
+        attributes = {
+            str(name or "").casefold(): str(value or "") for name, value in attrs
+        }
+        direct = attributes.get("charset", "").strip()
+        if direct:
+            self.charset = direct
+            return
+        if attributes.get("http-equiv", "").strip().casefold() != "content-type":
+            return
+        match = _CONTENT_CHARSET_RE.search(attributes.get("content", ""))
+        if match:
+            self.charset = match.group(1)
 
 
 @dataclass(frozen=True)
@@ -136,10 +247,10 @@ class ResearchToolRuntime:
 
         try:
             html = response.body.decode(
-                self._charset_from_content_type(content_type),
+                self._charset_from_content_type(content_type, response.body),
                 "replace",
             )
-        except LookupError as exc:
+        except (LookupError, UnicodeError) as exc:
             raise ResearchError(
                 "URL_CONTENT_UNSUPPORTED",
                 "HTML declared an unsupported charset",
@@ -226,12 +337,29 @@ class ResearchToolRuntime:
     def _default_pdf_reader_factory(self, stream, *, current_url: str) -> PdfReader:  # noqa: ARG002
         return PdfReader(stream, strict=True)
 
-    def _charset_from_content_type(self, content_type: str) -> str:
+    def _charset_from_content_type(
+        self,
+        content_type: str,
+        body: bytes = b"",
+    ) -> str:
         for segment in content_type.split(";")[1:]:
             name, separator, value = segment.partition("=")
             if separator and name.strip().lower() == "charset":
-                return value.strip() or "utf-8"
+                return self._normalize_charset(value) or "utf-8"
+        parser = _MetaCharsetParser()
+        parser.feed(body[:4096].decode("iso-8859-1"))
+        if parser.charset:
+            return self._normalize_charset(parser.charset)
         return "utf-8"
+
+    def _normalize_charset(self, value: str) -> str:
+        label = str(value or "").strip().strip("'\"").lower()
+        label = _CHARSET_ALIASES.get(label, label)
+        codec = codecs.lookup(label).name
+        codec = _PYTHON_CODEC_ALIASES.get(codec, codec)
+        if codec not in _HTML_TEXT_CODECS:
+            raise LookupError(f"charset is not supported for HTML: {value}")
+        return codec
 
     def _remove_hidden_and_cookie_content(self, soup: BeautifulSoup) -> None:
         for tag in list(soup.find_all(True)):
