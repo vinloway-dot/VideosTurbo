@@ -8,7 +8,6 @@ from playwright.sync_api import Error as PlaywrightError
 
 from app.models.cloud_agent import ServiceSessionStatus
 from app.services.cloud_agent.errors import (
-    FlowArchiveValidationError,
     FlowBatchIncompleteError,
     FlowGenerationTimeoutError,
     FlowWorkspaceVerificationError,
@@ -217,7 +216,10 @@ class FakeLocator:
         if self.kind == "generate":
             self.page.actions.append(("click", "generate"))
             self.page.generate_clicked = True
-            if self.page.last_filled == google_flow.RENAME_CLIPS_INSTRUCTION:
+            if self.page.last_filled in {
+                google_flow.RENAME_CLIPS_INSTRUCTION,
+                google_flow.RENAME_SURVIVING_CLIPS_INSTRUCTION,
+            }:
                 self.page.pending_clip_names = list(self.page.renamed_clip_names)
                 self.page.agent_response_count += 1
             elif self.page.generation_completion_names is not None:
@@ -267,6 +269,8 @@ class FakeLocator:
             return self.page.download_count
         if self.kind == "project_menu":
             return int(self.page.project_menu_available)
+        if self.kind == "global_menu":
+            return 1
         if self.kind == "project_download":
             return int(self.page.project_menu_open)
         if self.kind == "agent_response_feedback":
@@ -387,6 +391,7 @@ class FakeLocator:
         if self.kind == "missing":
             return 0
         if self.kind == "semantic_name":
+            self.page.semantic_name_reads[self.index] += 1
             return self.page.clip_names.count(f"clip {self.index}")
         if self.kind in {"dialog", "confirm_delete"}:
             return int(self.page.confirmation_pending)
@@ -556,6 +561,8 @@ class FakePage:
         card_click_opens_editor=False,
         fallback_composer_available=False,
         project_menu_available=True,
+        project_header_menu_name=None,
+        global_menu_name=None,
         rename_response_text="",
     ):
         self.url = "about:blank"
@@ -637,7 +644,10 @@ class FakePage:
         self.card_click_opens_editor = card_click_opens_editor
         self.fallback_composer_available = fallback_composer_available
         self.project_menu_available = project_menu_available
+        self.project_header_menu_name = project_header_menu_name
+        self.global_menu_name = global_menu_name
         self.project_menu_open = False
+        self.semantic_name_reads = {number: 0 for number in range(1, 7)}
         self.rename_response_text = rename_response_text
         self.in_clip_editor = False
         self.hovered_card_index = None
@@ -728,7 +738,17 @@ class FakePage:
         if role == "button" and "download product clips" in pattern:
             return FakeLocator(self, "bulk_download")
         if role == "button" and "more_vert" in pattern:
-            return FakeLocator(self, "project_menu")
+            if self.project_header_menu_name is None:
+                return FakeLocator(self, "project_menu")
+
+            def matches(accessible_name):
+                return bool(name.search(accessible_name))
+
+            if matches(self.project_header_menu_name):
+                return FakeLocator(self, "project_menu")
+            if self.global_menu_name and matches(self.global_menu_name):
+                return FakeLocator(self, "global_menu")
+            return FakeLocator(self, "missing")
         if role == "button" and (
             "thumb_up" in pattern or "good response" in pattern or "คำตอบดี" in pattern
         ):
@@ -1895,7 +1915,7 @@ def test_flow_workspace_reconciliation_skips_rename_when_semantic_names_exist(
     assert ("click", "project_download") in page.actions
 
 
-def test_flow_workspace_uses_project_archive_after_rename_response_and_refresh(
+def test_flow_workspace_refuses_project_download_when_semantic_names_are_absent_after_rename_refresh(
     monkeypatch, tmp_path
 ):
     page = FakePage(
@@ -1921,25 +1941,33 @@ def test_flow_workspace_uses_project_archive_after_rename_response_and_refresh(
 
     with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
         _timeout_clock(monkeypatch)
-        result = workspace.reconcile_and_download(
-            _job(flow_generation_unresolved=True),
-            paths,
-        )
+        with pytest.raises(
+            FlowWorkspaceVerificationError,
+            match="^Google Flow semantic clip names could not be verified$",
+        ):
+            workspace.reconcile_and_download(
+                _job(flow_generation_unresolved=True),
+                paths,
+            )
 
-    assert result == paths.flow_files
+    assert page.actions.count(
+        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
+    ) == 1
     assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
-    assert ("click", "project_menu") in page.actions
-    assert ("click", "project_download") in page.actions
+    assert ("click", "project_menu") not in page.actions
+    assert ("click", "project_download") not in page.actions
     assert ("click", "bulk_download") not in page.actions
 
 
 def test_flow_workspace_reuses_existing_rename_confirmation_without_resubmitting(
     monkeypatch, tmp_path
 ):
+    complete_names = [f"clip {number}" for number in range(1, 7)]
     page = FakePage(
         progress_html=["<div>Generation progress 6 / 6</div>"],
         clip_names=[f"draft-{number}" for number in range(1, 7)],
         checkbox_count=0,
+        reload_state_updates=[{"clip_names": complete_names}],
         inventory_sequence=[6, 6, 6],
         rename_response_text=(
             "ผมได้เปลี่ยนชื่อคลิปทั้ง 6 เป็น CLIP 1 ถึง CLIP 6 "
@@ -1955,6 +1983,7 @@ def test_flow_workspace_reuses_existing_rename_confirmation_without_resubmitting
     )
 
     with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        _timeout_clock(monkeypatch)
         result = workspace.reconcile_and_download(
             _job(flow_generation_unresolved=True),
             paths,
@@ -1965,7 +1994,7 @@ def test_flow_workspace_reuses_existing_rename_confirmation_without_resubmitting
         action[:3] == ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
         for action in page.actions
     )
-    assert page.reload_calls == []
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
     assert ("click", "project_download") in page.actions
 
 
@@ -1973,6 +2002,148 @@ def test_project_download_selector_accepts_observed_icon_prefixed_thai_name():
     assert google_flow._PROJECT_DOWNLOAD_NAME_RE.fullmatch(
         "download ดาวน์โหลดโปรเจ็กต์"
     )
+
+
+@pytest.mark.parametrize(
+    "project_header_menu_name",
+    [
+        "more_vert More options",
+        "more_vert ตัวเลือกเพิ่มเติม",
+    ],
+)
+def test_project_archive_uses_header_menu_not_global_account_menu(
+    tmp_path, project_header_menu_name
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        project_header_menu_name=project_header_menu_name,
+        global_menu_name="more_vert เพิ่มเติม",
+    )
+    client, _ = _client(page)
+    destination = tmp_path / "project.zip"
+
+    google_flow.FlowWorkspaceRun(client, page)._download_project_archive_to(destination)
+
+    assert ("click", "project_menu") in page.actions
+    assert ("click", "global_menu") not in page.actions
+    assert ("click", "project_download") in page.actions
+
+
+def test_rename_response_reloads_once_then_requires_two_stable_semantic_observations_without_checkboxes(
+    monkeypatch, tmp_path
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"draft-{number}" for number in range(1, 7)],
+        renamed_clip_names=[f"clip {number}" for number in range(1, 7)],
+        checkbox_count=0,
+        inventory_sequence=[6, 6, 6],
+        agent_enabled_states=[False],
+        send_enabled_after_click=False,
+    )
+    client, _ = _client(page, timeout_seconds=1.0, editor_ready_timeout_seconds=5.0)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        _timeout_clock(monkeypatch)
+        result = workspace.reconcile_and_download(
+            _job(flow_generation_unresolved=True),
+            paths,
+        )
+
+    assert result == paths.flow_files
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.get_by_role("checkbox").count() == 0
+    assert all(page.semantic_name_reads[number] >= 2 for number in range(1, 7))
+    assert ("click", "project_download") in page.actions
+
+
+def test_rename_refuses_project_download_when_semantic_names_stay_incomplete(
+    monkeypatch, tmp_path
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"draft-{number}" for number in range(1, 7)],
+        renamed_clip_names=[
+            "clip 1",
+            "clip 2",
+            "clip 3",
+            "clip 4",
+            "clip 5",
+            "draft-6",
+        ],
+        inventory_sequence=[6, 6, 6],
+        agent_enabled_states=[False],
+        send_enabled_after_click=False,
+    )
+    client, _ = _client(page, timeout_seconds=1.0, editor_ready_timeout_seconds=5.0)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        _timeout_clock(monkeypatch)
+        with pytest.raises(
+            FlowWorkspaceVerificationError,
+            match="semantic clip names could not be verified",
+        ):
+            workspace.reconcile_and_download(
+                _job(flow_generation_unresolved=True),
+                paths,
+            )
+
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert ("click", "project_menu") not in page.actions
+    assert ("click", "project_download") not in page.actions
+
+
+def test_partial_inventory_refresh_waits_for_five_stable_semantic_names_without_checkboxes(
+    monkeypatch, tmp_path
+):
+    survivor_names = ["clip 1", "clip 2", "clip 4", "clip 5", "clip 6"]
+    page = FakePage(
+        progress_html=["<div>Generation progress 5 / 6</div>"],
+        clip_names=[f"draft-{number}" for number in range(1, 6)],
+        renamed_clip_names=survivor_names,
+        checkbox_count=0,
+        inventory_sequence=[5, 5, 5],
+        agent_enabled_states=[False],
+        send_enabled_after_click=False,
+    )
+    client, _ = _client(page, timeout_seconds=1.0, editor_ready_timeout_seconds=5.0)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    materialization = google_flow.FlowRecoveryMaterialization(
+        paths=paths.flow_files,
+        source="complete_archive",
+    )
+    monkeypatch.setattr(
+        google_flow,
+        "inspect_recovery_flow_archive",
+        lambda *_args, **_kwargs: materialization,
+    )
+
+    _timeout_clock(monkeypatch)
+    result = google_flow.FlowWorkspaceRun(client, page).capture_partial_inventory(
+        paths,
+        attempt=0,
+    )
+
+    assert result is materialization
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.get_by_role("checkbox").count() == 0
+    assert all(
+        page.semantic_name_reads[number] >= 2
+        for number in (1, 2, 4, 5, 6)
+    )
+    assert ("click", "project_download") in page.actions
 
 
 def test_flow_workspace_rename_completes_from_semantic_names_when_send_stays_disabled(
@@ -2076,7 +2247,7 @@ def test_flow_workspace_rename_ignores_stale_submit_locator_after_click(
     assert ("click", "delete_selected") not in page.actions
 
 
-def test_flow_workspace_rename_stale_submit_locator_downloads_archive_without_card_names(
+def test_flow_workspace_rename_stale_submit_locator_refuses_download_when_semantic_names_are_incomplete(
     monkeypatch, tmp_path
 ):
     page = FakePage(
@@ -2096,12 +2267,15 @@ def test_flow_workspace_rename_stale_submit_locator_downloads_archive_without_ca
 
     with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
         _timeout_clock(monkeypatch)
-        result = workspace.reconcile_and_download(
-            _job(flow_generation_unresolved=True),
-            paths,
-        )
+        with pytest.raises(
+            FlowWorkspaceVerificationError,
+            match="^Google Flow semantic clip names could not be verified$",
+        ):
+            workspace.reconcile_and_download(
+                _job(flow_generation_unresolved=True),
+                paths,
+            )
 
-    assert result == paths.flow_files
     assert page.actions.count(
         ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
     ) == 1
@@ -2109,19 +2283,19 @@ def test_flow_workspace_rename_stale_submit_locator_downloads_archive_without_ca
         action[:3] == ("fill", "prompt", _job().master_prompt)
         for action in page.actions
     )
-    assert ("click", "project_download") in page.actions
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert ("click", "project_menu") not in page.actions
+    assert ("click", "project_download") not in page.actions
     assert ("click", "delete_selected") not in page.actions
 
 
-def test_flow_workspace_rename_downloads_archive_when_names_are_not_rendered_after_refresh(
+def test_flow_workspace_rename_refuses_download_when_names_are_not_rendered_after_refresh(
     monkeypatch, tmp_path
 ):
-    complete_names = [f"clip {number}" for number in range(1, 7)]
     page = FakePage(
         progress_html=["<div>Generation progress 6 / 6</div>"],
         clip_names=[f"draft-{number}" for number in range(1, 7)],
-        renamed_clip_names=complete_names[:-1],
-        reload_state_updates=[{}, {"clip_names": complete_names}],
+        renamed_clip_names=[f"clip {number}" for number in range(1, 6)],
         inventory_sequence=[6, 6, 6],
         agent_enabled_states=[False],
         send_enabled_after_click=False,
@@ -2136,16 +2310,21 @@ def test_flow_workspace_rename_downloads_archive_when_names_are_not_rendered_aft
 
     with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
         _timeout_clock(monkeypatch)
-        result = workspace.reconcile_and_download(
-            _job(flow_generation_unresolved=True),
-            paths,
-        )
+        with pytest.raises(
+            FlowWorkspaceVerificationError,
+            match="^Google Flow semantic clip names could not be verified$",
+        ):
+            workspace.reconcile_and_download(
+                _job(flow_generation_unresolved=True),
+                paths,
+            )
 
-    assert result == paths.flow_files
     assert page.actions.count(
         ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
     ) == 1
     assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert ("click", "project_menu") not in page.actions
+    assert ("click", "project_download") not in page.actions
 
 
 @pytest.mark.parametrize(
@@ -2155,7 +2334,7 @@ def test_flow_workspace_rename_downloads_archive_when_names_are_not_rendered_aft
         ["clip 1", "clip 2", "clip 3", "clip 3", "clip 5", "clip 6"],
     ],
 )
-def test_flow_workspace_rename_downloads_archive_when_card_names_stay_incomplete(
+def test_flow_workspace_rename_refuses_download_when_semantic_names_stay_incomplete(
     monkeypatch, tmp_path, renamed_clip_names
 ):
     page = FakePage(
@@ -2176,10 +2355,14 @@ def test_flow_workspace_rename_downloads_archive_when_card_names_stay_incomplete
 
     with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
         _timeout_clock(monkeypatch)
-        result = workspace.reconcile_and_download(
-            _job(flow_generation_unresolved=True),
-            paths,
-        )
+        with pytest.raises(
+            FlowWorkspaceVerificationError,
+            match="^Google Flow semantic clip names could not be verified$",
+        ):
+            workspace.reconcile_and_download(
+                _job(flow_generation_unresolved=True),
+                paths,
+            )
 
     assert page.actions.count(
         ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
@@ -2188,8 +2371,9 @@ def test_flow_workspace_rename_downloads_archive_when_card_names_stay_incomplete
         action[:3] == ("fill", "prompt", _job().master_prompt)
         for action in page.actions
     )
-    assert result == paths.flow_files
-    assert ("click", "project_download") in page.actions
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert ("click", "project_menu") not in page.actions
+    assert ("click", "project_download") not in page.actions
     assert ("click", "delete_selected") not in page.actions
 
 
@@ -2377,7 +2561,7 @@ def test_flow_workspace_reconciliation_requires_stable_exact_six_before_rename(
     assert ("click", "generate") not in page.actions
 
 
-def test_flow_workspace_rejects_invalid_project_archive_after_rename(
+def test_flow_workspace_refuses_materialization_when_semantic_names_are_duplicate_after_rename(
     monkeypatch, tmp_path
 ):
     page = FakePage(
@@ -2387,17 +2571,30 @@ def test_flow_workspace_rejects_invalid_project_archive_after_rename(
     )
     client, _ = _client(page, editor_ready_timeout_seconds=5.0)
     paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
-    def reject_archive(*_args, **_kwargs):
-        raise FlowArchiveValidationError("archive must contain semantic clips 1 through 6")
+    materializer_calls = 0
 
-    monkeypatch.setattr(google_flow, "materialize_flow_archive", reject_archive)
+    def materialize_sentinel(*_args, **_kwargs):
+        nonlocal materializer_calls
+        materializer_calls += 1
+        return paths.flow_files
+
+    monkeypatch.setattr(google_flow, "materialize_flow_archive", materialize_sentinel)
 
     with client.acquire_workspace(_job()) as workspace:
         _timeout_clock(monkeypatch)
-        with pytest.raises(FlowArchiveValidationError, match="semantic clips"):
+        with pytest.raises(
+            FlowWorkspaceVerificationError,
+            match="^Google Flow semantic clip names could not be verified$",
+        ):
             workspace.generate_and_download(_job(), paths)
 
-    assert ("click", "project_download") in page.actions
+    assert page.actions.count(
+        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
+    ) == 1
+    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert materializer_calls == 0
+    assert ("click", "project_menu") not in page.actions
+    assert ("click", "project_download") not in page.actions
 
 
 def test_google_flow_agent_prompt_uses_observable_composer_when_locale_has_no_prompt_label():

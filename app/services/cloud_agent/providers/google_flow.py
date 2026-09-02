@@ -63,6 +63,10 @@ _CARD_OVERFLOW_NAME_RE = re.compile(
     r"^more_vert\s+(?:more|เพิ่มเติม)$",
     re.IGNORECASE,
 )
+_PROJECT_MENU_NAME_RE = re.compile(
+    r"^more_vert\s+(?:more options|ตัวเลือกเพิ่มเติม)$",
+    re.IGNORECASE,
+)
 _PROJECT_DOWNLOAD_NAME_RE = re.compile(
     r"^(?:download\s+)?(?:download project|ดาวน์โหลดโปรเจ็กต์)$",
     re.IGNORECASE,
@@ -362,6 +366,7 @@ class FlowWorkspaceRun:
             RENAME_SURVIVING_CLIPS_INSTRUCTION,
         )
         self._wait_for_rename_response_then_refresh(response_count)
+        self._wait_for_stable_semantic_names(expected_count=5)
         snapshot = paths.flow_snapshots_dir / f"partial-{attempt}.zip"
         self._download_project_archive_to(snapshot)
         capture = inspect_recovery_flow_archive(
@@ -477,16 +482,19 @@ class FlowWorkspaceRun:
         paths: JobPaths,
         expected_count: int,
     ) -> tuple[Path, ...]:
-        if not (
-            self._semantic_names_are_complete(expected_count)
-            or self.client._has_completed_rename_response(self.page)
-        ):
-            response_count = self.client._agent_response_count(self.page)
-            self.client._submit_agent_prompt(
-                self.page,
-                RENAME_CLIPS_INSTRUCTION,
+        if not self._semantic_names_are_complete(expected_count):
+            if self.client._has_completed_rename_response(self.page):
+                self._refresh_and_hydrate()
+            else:
+                response_count = self.client._agent_response_count(self.page)
+                self.client._submit_agent_prompt(
+                    self.page,
+                    RENAME_CLIPS_INSTRUCTION,
+                )
+                self._wait_for_rename_response_then_refresh(response_count)
+            self._wait_for_stable_semantic_names(
+                expected_numbers=tuple(range(1, expected_count + 1)),
             )
-            self._wait_for_rename_response_then_refresh(response_count)
 
         self._download_project_archive(paths)
         return materialize_flow_archive(
@@ -503,7 +511,7 @@ class FlowWorkspaceRun:
     def _download_project_archive_to(self, destination: Path) -> None:
         project_menu = self.page.get_by_role(
             "button",
-            name=_CARD_OVERFLOW_NAME_RE,
+            name=_PROJECT_MENU_NAME_RE,
         )
         if not (
             project_menu.count() == 1
@@ -536,44 +544,58 @@ class FlowWorkspaceRun:
             )
 
     def _semantic_name_numbers(self) -> tuple[int, ...]:
-        if self.page.get_by_role("checkbox").count() > 6:
-            return ()
-        numbers = tuple(
+        return tuple(
             number
             for number in range(1, 7)
             if self.page.get_by_text(f"clip {number}", exact=True).count() == 1
         )
-        if len(numbers) != self.page.get_by_role("checkbox").count():
-            return ()
-        return numbers
 
     def _semantic_names_are_complete(self, expected_count: int) -> bool:
-        if self.page.get_by_role("checkbox").count() != expected_count:
-            return False
-        return all(
-            self.page.get_by_text(f"clip {number}", exact=True).count() == 1
-            for number in range(1, expected_count + 1)
-        )
+        return self._semantic_name_numbers() == tuple(range(1, expected_count + 1))
 
     def _wait_for_rename_response_then_refresh(self, response_count: int) -> None:
         self.client._wait_for_agent_response(self.page, response_count)
+        self._refresh_and_hydrate()
+
+    def _refresh_and_hydrate(self) -> None:
         self.page.reload(wait_until="domcontentloaded")
         self.client._hydrate_project_workspace(
             self.page,
             flow_generation_unresolved=True,
         )
 
-    def _verify_semantic_names(self, expected_count: int) -> None:
-        if self.page.get_by_role("checkbox").count() != expected_count:
-            raise FlowWorkspaceVerificationError(
-                "Google Flow semantic clip count could not be verified"
+    def _wait_for_stable_semantic_names(
+        self,
+        *,
+        expected_numbers: tuple[int, ...] | None = None,
+        expected_count: int | None = None,
+    ) -> tuple[int, ...]:
+        deadline = time.monotonic() + self.client.editor_ready_timeout_seconds
+        previous: tuple[int, ...] | None = None
+        while True:
+            numbers = self._semantic_name_numbers()
+            matches = (
+                numbers == expected_numbers
+                if expected_numbers is not None
+                else len(numbers) == expected_count
             )
-        for number in range(1, expected_count + 1):
-            name = self.page.get_by_text(f"clip {number}", exact=True)
-            if name.count() != 1:
+            if matches:
+                if numbers == previous:
+                    return numbers
+                previous = numbers
+            else:
+                previous = None
+            if time.monotonic() >= deadline:
                 raise FlowWorkspaceVerificationError(
                     "Google Flow semantic clip names could not be verified"
                 )
+            time.sleep(self.client.poll_seconds)
+
+    def _verify_semantic_names(self, expected_count: int) -> None:
+        if not self._semantic_names_are_complete(expected_count):
+            raise FlowWorkspaceVerificationError(
+                "Google Flow semantic clip names could not be verified"
+            )
 
 
 class GoogleFlowClient:

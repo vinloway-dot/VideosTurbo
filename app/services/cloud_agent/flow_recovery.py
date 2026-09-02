@@ -126,7 +126,7 @@ class FlowRecoveryCoordinator:
             capture = workspace.capture_partial_inventory(paths, attempt=0)
         except (FlowArchiveValidationError, FlowWorkspaceVerificationError) as exc:
             raise FlowRecoveryMappingError(
-                "Flow partial inventory could not be mapped safely"
+                f"Flow partial inventory could not be mapped safely: {exc}"
             ) from exc
         if isinstance(capture, FlowRecoveryMaterialization):
             self.store.patch_job(
