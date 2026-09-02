@@ -45,7 +45,7 @@ class SixClipSegment(BaseModel):
 
 
 class SixClipPlan(BaseModel):
-    target_words: int = Field(default=130, ge=40, le=400)
+    target_words: int = Field(default=120, ge=40, le=400)
     segments: list[SixClipSegment] = Field(min_length=6, max_length=6)
 
     @model_validator(mode="after")
@@ -56,7 +56,7 @@ class SixClipPlan(BaseModel):
         return self
 
 
-def empty_six_clip_plan(target_words: int = 130) -> SixClipPlan:
+def empty_six_clip_plan(target_words: int = 120) -> SixClipPlan:
     return SixClipPlan(
         target_words=target_words,
         segments=[

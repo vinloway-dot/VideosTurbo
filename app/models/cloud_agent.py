@@ -74,7 +74,7 @@ class CloudJobCreate(BaseModel):
     clip_plan: SixClipPlan
     research_draft_id: str = Field(default="", exclude=True, max_length=64)
     language: str = ""
-    target_words: int = Field(default=130, ge=40, le=400)
+    target_words: int = Field(default=120, ge=40, le=400)
     tts_provider: str
     voice_id: str
     voice_speed: float = Field(default=1.0, gt=0)
@@ -137,7 +137,7 @@ class CloudJobDraftRequest(BaseModel):
     subject: str
     script: str = ""
     language: str = ""
-    target_words: int = Field(default=130, ge=40, le=400)
+    target_words: int = Field(default=120, ge=40, le=400)
     custom_system_prompt: str = Field(default="", max_length=8000)
 
     @field_validator("subject")

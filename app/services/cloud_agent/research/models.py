@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 class ResearchDraftRequest(BaseModel):
     subject: str
     language: str = ""
-    target_words: int = Field(default=130, ge=40, le=400)
+    target_words: int = Field(default=120, ge=40, le=400)
     provider: Literal["openrouter", "aihubmix"]
     model_choice: str = Field(max_length=256)
     custom_model_id: str = Field(default="", max_length=256)
