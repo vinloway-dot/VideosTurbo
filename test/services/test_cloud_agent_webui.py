@@ -717,6 +717,59 @@ def test_cloud_agent_language_selector_reuses_the_main_script_auto_contract():
     ]
 
 
+def test_cloud_agent_brief_defaults_target_words_to_120(monkeypatch):
+    class Column:
+        def __init__(self, parent):
+            self.parent = parent
+
+        def number_input(self, label, **kwargs):
+            if label == "Target words":
+                self.parent.target_words_default = kwargs["value"]
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, **_kwargs):
+            return options[0]
+
+    class Streamlit:
+        def __init__(self):
+            self.session_state = {}
+            self.target_words_default = None
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def text_area(self, *_args, **_kwargs):
+            return ""
+
+        def columns(self, _specification, **_kwargs):
+            return [Column(self), Column(self), Column(self)]
+
+        def expander(self, *_args, **_kwargs):
+            return nullcontext()
+
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def segmented_control(self, _label, _options, *, default, **_kwargs):
+            return default
+
+    fake_streamlit = Streamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+
+    brief = cloud_agent._render_video_brief(
+        ui_state=fake_streamlit.session_state,
+        defaults={"tts_provider": "elevenlabs", "voice_id": "", "voice_speed": 1.0},
+        research_settings={"enabled": True},
+        research_provider_catalog=[],
+    )
+
+    assert fake_streamlit.target_words_default == 120
+    assert brief.words == 120
+
+
 def test_cloud_agent_language_selector_formats_the_auto_empty_value(monkeypatch):
     class Column:
         def __init__(self, parent):

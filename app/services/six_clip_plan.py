@@ -47,7 +47,7 @@ def validate_six_clip_plan(plan: SixClipPlan) -> SixClipPlan:
     return plan
 
 
-def parse_ai_clip_plan(text: str, target_words: int = 130) -> SixClipPlan:
+def parse_ai_clip_plan(text: str, target_words: int = 120) -> SixClipPlan:
     try:
         payload = json.loads(_strip_code_fence(text))
     except json.JSONDecodeError as exc:
@@ -171,7 +171,7 @@ Analyze the narration below and divide it into exactly six chronological visual 
 def generate_six_clip_plan(
     video_script: str,
     language: str = "",
-    target_words: int = 130,
+    target_words: int = 120,
     app_config=None,
 ) -> SixClipPlan:
     # Keep provider selection/retry behavior centralized in the existing LLM service.

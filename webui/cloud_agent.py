@@ -687,7 +687,7 @@ def _render_video_brief(
         )
         brief_columns = st.columns([1.8, 0.55, 0.75], gap="medium")
         words = brief_columns[1].number_input(
-            "Target words", min_value=1, value=130, key="cloud_agent_words"
+            "Target words", min_value=1, value=120, key="cloud_agent_words"
         )
         language = brief_columns[2].selectbox(
             "Language",

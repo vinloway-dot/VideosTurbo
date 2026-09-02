@@ -22,7 +22,7 @@ def _request() -> CloudJobCreate:
         subject="Library test",
         script="A valid narration script for testing.",
         master_prompt="Create six chronological clips.",
-        clip_plan=empty_six_clip_plan(),
+        clip_plan=empty_six_clip_plan(target_words=130),
         language="English",
         target_words=130,
         tts_provider="test",
