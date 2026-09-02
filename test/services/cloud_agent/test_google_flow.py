@@ -138,10 +138,11 @@ class FakeDownloadExpectation:
 
 
 class FakeLocator:
-    def __init__(self, page, kind, index=None):
+    def __init__(self, page, kind, index=None, *, pinned=False):
         self.page = page
         self.kind = kind
         self.index = index
+        self.pinned = pinned
 
     def click(self):
         if self.kind in {"agent", "agent_role"}:
@@ -213,8 +214,18 @@ class FakeLocator:
             self.page.inventory_sequence = [0, 0, 0]
             self.page.last_inventory_count = 0
             return
-        if self.kind == "generate":
-            self.page.actions.append(("click", "generate"))
+        if self.kind in {"generate", "fallback_generate"}:
+            action_kind = self.kind
+            if (
+                self.kind == "fallback_generate"
+                and self.page.fallback_composer_x_positions[self.index or 0] >= 1000
+            ):
+                action_kind = (
+                    "side_panel_generate"
+                    if self.page.fallback_composer_y_positions[self.index or 0] >= 600
+                    else "upper_panel_generate"
+                )
+            self.page.actions.append(("click", action_kind))
             self.page.generate_clicked = True
             if self.page.last_filled in {
                 google_flow.RENAME_CLIPS_INSTRUCTION,
@@ -261,9 +272,22 @@ class FakeLocator:
         self.page.actions.append(("hover", "media_card", self.index))
 
     def fill(self, value):
-        self.page.actions.append(("fill", self.kind, value))
+        action_kind = self.kind
+        if (
+            self.kind == "fallback_prompt"
+            and self.page.fallback_composer_x_positions[self.index or 0] >= 1000
+        ):
+            action_kind = (
+                "side_panel_prompt"
+                if self.page.fallback_composer_y_positions[self.index or 0] >= 600
+                else "upper_panel_prompt"
+            )
+        self.page.actions.append(("fill", action_kind, value))
         self.page.fill_agent_pressed_states.append(self.page.agent_pressed)
         self.page.last_filled = value
+        if self.kind == "fallback_prompt":
+            self.page.command_prompt_values[self.index or 0] = value
+            self.page.fallback_prompt_was_filled = True
         if self.page.agent_deactivates_on_prompt_fill:
             self.page.agent_pressed = False
 
@@ -343,12 +367,17 @@ class FakeLocator:
             else:
                 self.page.last_empty_state = self.page.empty_state_available
             return int(not self.page.clip_names and self.page.last_empty_state)
+        if self.kind == "fallback_prompts":
+            return len(self.page.fallback_composer_x_positions)
         if self.kind in {
             "fallback_prompt",
             "fallback_container",
             "fallback_generate",
         }:
-            return int(self.page.fallback_composer_available)
+            return int(
+                self.index is not None
+                and self.index < len(self.page.fallback_composer_x_positions)
+            )
         if self.kind in {
             "prompt",
             "default_prompt",
@@ -467,7 +496,29 @@ class FakeLocator:
             "multiple_prompt",
             "fallback_prompt",
         }
+        if self.kind == "fallback_prompt":
+            if self.page.require_pinned_fallback_identity and not self.pinned:
+                return ""
+            return self.page.command_prompt_values.get(self.index or 0, "")
         return self.page.last_filled
+
+    def bounding_box(self):
+        if self.kind in {"fallback_prompt", "fallback_container"}:
+            return {
+                "x": self.page.fallback_composer_x_positions[self.index or 0],
+                "y": self.page.fallback_composer_y_positions[self.index or 0],
+                "width": 300,
+                "height": 80,
+            }
+        raise AssertionError(f"bounding_box is unavailable for {self.kind}")
+
+    def element_handle(self):
+        return FakeLocator(
+            self.page,
+            self.kind,
+            index=self.index,
+            pinned=True,
+        )
 
     def locator(self, selector):
         if self.kind in {"agent", "agent_role"} and str(selector).startswith("xpath="):
@@ -482,7 +533,12 @@ class FakeLocator:
             )
             return FakeLocator(self.page, prompt_kind)
         if self.kind == "fallback_prompt" and str(selector).startswith("xpath="):
-            return FakeLocator(self.page, "fallback_container")
+            return FakeLocator(
+                self.page,
+                "fallback_container",
+                index=self.index,
+                pinned=self.pinned,
+            )
         if self.kind == "media_list" and "role=\"button\"" in str(selector):
             return FakeLocator(self.page, "inventory_cards")
         if self.kind == "media_card" and str(selector) == "video":
@@ -497,7 +553,12 @@ class FakeLocator:
         if self.kind == "fallback_container" and role == "button" and (
             "generate" in pattern or "สร้าง" in pattern
         ):
-            return FakeLocator(self.page, "fallback_generate")
+            return FakeLocator(
+                self.page,
+                "fallback_generate",
+                index=self.index,
+                pinned=self.pinned,
+            )
         if self.kind == "media_card" and role == "button" and "more" in pattern:
             return FakeLocator(self.page, "card_menu", index=self.index)
         if self.kind == "dialog" and role == "button" and (
@@ -529,6 +590,8 @@ class FakeLocator:
             return FakeLocator(self.page, "generated_image", index=index)
         if self.kind == "agent_response_feedback":
             return FakeLocator(self.page, "agent_response_feedback", index=index)
+        if self.kind == "fallback_prompts":
+            return FakeLocator(self.page, "fallback_prompt", index=index)
         raise AssertionError(f"nth is unavailable for {self.kind}")
 
 
@@ -582,6 +645,9 @@ class FakePage:
         card_delete_removes=True,
         card_click_opens_editor=False,
         fallback_composer_available=False,
+        fallback_composer_x_positions=None,
+        fallback_composer_y_positions=None,
+        require_pinned_fallback_identity=False,
         project_menu_available=True,
         project_header_menu_name=None,
         global_menu_name=None,
@@ -668,6 +734,22 @@ class FakePage:
         self.card_delete_removes = card_delete_removes
         self.card_click_opens_editor = card_click_opens_editor
         self.fallback_composer_available = fallback_composer_available
+        self.fallback_composer_x_positions = list(
+            fallback_composer_x_positions
+            if fallback_composer_x_positions is not None
+            else ([0] if fallback_composer_available else [])
+        )
+        self.fallback_composer_y_positions = list(
+            fallback_composer_y_positions
+            if fallback_composer_y_positions is not None
+            else [700] * len(self.fallback_composer_x_positions)
+        )
+        assert len(self.fallback_composer_y_positions) == len(
+            self.fallback_composer_x_positions
+        )
+        self.require_pinned_fallback_identity = require_pinned_fallback_identity
+        self.fallback_prompt_was_filled = False
+        self.command_prompt_values = {}
         self.project_menu_available = project_menu_available
         self.project_header_menu_name = project_header_menu_name
         self.global_menu_name = global_menu_name
@@ -747,7 +829,9 @@ class FakePage:
         if selector == '[data-testid="virtuoso-item-list"]:visible':
             return FakeLocator(self, "media_list")
         if selector == '[data-slate-editor="true"][role="textbox"]:visible':
-            return FakeLocator(self, "fallback_prompt")
+            if len(self.fallback_composer_x_positions) == 1:
+                return FakeLocator(self, "fallback_prompt", index=0)
+            return FakeLocator(self, "fallback_prompts")
         if selector == '[aria-busy="true"]:visible':
             return FakeLocator(self, "busy")
         if selector == "img[alt]":
@@ -2778,6 +2862,133 @@ def test_google_flow_submits_rename_from_fallback_when_agent_panel_composer_is_m
     assert ("click", "fallback_generate") in page.actions
     assert not any(action[0] == "fill" and action[1] == "prompt" for action in page.actions)
     assert page.actions.count(("click", "fallback_generate")) == 1
+
+
+def test_google_flow_rename_uses_primary_bottom_composer_when_it_is_usable():
+    page = FakePage(progress_html=["<div>Generation progress 6 / 6</div>"])
+    client, _ = _client(page)
+
+    client._submit_agent_prompt(page, google_flow.RENAME_CLIPS_INSTRUCTION)
+
+    assert page.actions.count(
+        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
+    ) == 1
+    assert page.actions.count(("click", "generate")) == 1
+    assert not any(
+        action[1] == "side_panel_prompt"
+        for action in page.actions
+        if action[0] == "fill"
+    )
+    assert ("click", "side_panel_generate") not in page.actions
+
+
+@pytest.mark.parametrize(
+    "prompt_text",
+    [
+        google_flow.RENAME_CLIPS_INSTRUCTION,
+        google_flow.RENAME_SURVIVING_CLIPS_INSTRUCTION,
+    ],
+)
+def test_google_flow_rename_falls_back_to_right_agent_panel_when_primary_is_ambiguous(
+    prompt_text,
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        agent_prompt_count=2,
+        fallback_composer_x_positions=[400, 1200],
+        require_pinned_fallback_identity=True,
+    )
+    client, _ = _client(page)
+
+    client._submit_agent_prompt(page, prompt_text)
+
+    assert page.actions.count(("fill", "side_panel_prompt", prompt_text)) == 1
+    assert page.actions.count(("click", "side_panel_generate")) == 1
+    assert not any(
+        action[1] in {"prompt", "fallback_prompt"}
+        for action in page.actions
+        if action[0] == "fill"
+    )
+    assert ("click", "generate") not in page.actions
+    assert ("click", "fallback_generate") not in page.actions
+
+
+def test_google_flow_rename_uses_bottom_composer_when_right_panel_has_two_rows():
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        agent_prompt_count=2,
+        fallback_composer_x_positions=[1200, 1200],
+        fallback_composer_y_positions=[250, 700],
+    )
+    client, _ = _client(page)
+
+    client._submit_agent_prompt(page, google_flow.RENAME_CLIPS_INSTRUCTION)
+
+    assert page.actions.count(
+        ("fill", "side_panel_prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
+    ) == 1
+    assert page.actions.count(("click", "side_panel_generate")) == 1
+    assert not any(
+        action[1] == "upper_panel_prompt"
+        for action in page.actions
+        if action[0] == "fill"
+    )
+    assert ("click", "upper_panel_generate") not in page.actions
+
+
+def test_google_flow_rename_rejects_geometrically_ambiguous_fallback_composers():
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        agent_prompt_count=2,
+        fallback_composer_x_positions=[1200, 1200],
+        fallback_composer_y_positions=[700, 700],
+    )
+    client, _ = _client(page)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="could not be verified"):
+        client._submit_agent_prompt(page, google_flow.RENAME_CLIPS_INSTRUCTION)
+
+    assert not any(action[0] == "fill" for action in page.actions)
+    assert not any(action[0] == "click" for action in page.actions)
+
+
+def test_google_flow_rename_prefers_primary_bottom_composer_when_both_are_usable():
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        fallback_composer_x_positions=[400, 1200],
+    )
+    client, _ = _client(page)
+
+    client._submit_agent_prompt(page, google_flow.RENAME_CLIPS_INSTRUCTION)
+
+    assert page.actions.count(
+        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
+    ) == 1
+    assert page.actions.count(("click", "generate")) == 1
+    assert not any(
+        action[1] in {"fallback_prompt", "side_panel_prompt"}
+        for action in page.actions
+        if action[0] == "fill"
+    )
+    assert ("click", "fallback_generate") not in page.actions
+    assert ("click", "side_panel_generate") not in page.actions
+
+
+def test_google_flow_rename_fails_without_clicking_submit_when_no_composer_is_usable():
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        agent_available=False,
+        agent_text_available=False,
+        fallback_composer_available=False,
+    )
+    client, _ = _client(page)
+
+    with pytest.raises(FlowWorkspaceVerificationError, match="could not be verified"):
+        client._submit_agent_prompt(page, google_flow.RENAME_CLIPS_INSTRUCTION)
+
+    assert not any(action[0] == "fill" for action in page.actions)
+    assert ("click", "generate") not in page.actions
+    assert ("click", "fallback_generate") not in page.actions
 
 
 def test_ensure_agent_active_fails_closed_for_unknown_toggle_state():
