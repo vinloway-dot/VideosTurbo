@@ -9,7 +9,6 @@ from app.models.cloud_agent import (
 )
 from app.services.cloud_agent.errors import (
     MediaValidationError,
-    NarrationTooLongError,
     PreFlowRetryEligibilityError,
 )
 from app.services.cloud_agent.job_store import CloudJobStore
@@ -154,9 +153,9 @@ class PreFlowRetryService:
                 probe.duration,
                 min_playback_speed=self.canva_min_playback_speed,
             )
-        except (MediaValidationError, NarrationTooLongError) as exc:
+        except MediaValidationError as exc:
             raise PreFlowRetryEligibilityError(
-                "canonical narration is unavailable or violates the timing policy"
+                "canonical narration is unavailable or invalid"
             ) from exc
         try:
             requeue = (
