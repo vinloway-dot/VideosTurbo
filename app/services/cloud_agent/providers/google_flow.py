@@ -75,7 +75,7 @@ _CARD_720P_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 _PROJECT_MENU_NAME_RE = re.compile(
-    r"^more_vert\s+(?:more options|ตัวเลือกเพิ่มเติม)$",
+    r"^(?:more_vert\s+)?(?:more options|ตัวเลือกเพิ่มเติม|more|เพิ่มเติม)$",
     re.IGNORECASE,
 )
 _PROJECT_DOWNLOAD_NAME_RE = re.compile(
@@ -803,19 +803,41 @@ class FlowWorkspaceRun:
     def _download_project_archive(self, paths: JobPaths) -> None:
         self._download_project_archive_to(paths.flow_archive_file)
 
-    def _download_project_archive_to(self, destination: Path) -> None:
-        project_menu = self.page.get_by_role(
+    def _project_download_menu_control(self) -> Any:
+        controls = self.page.get_by_role(
             "button",
             name=_PROJECT_MENU_NAME_RE,
         )
-        if not (
-            project_menu.count() == 1
-            and project_menu.is_visible()
-            and project_menu.is_enabled()
-        ):
+        try:
+            count = controls.count()
+            if count == 1 and controls.is_visible() and controls.is_enabled():
+                return controls
+            visible = []
+            for index in range(count):
+                control = controls.nth(index)
+                if not control.is_visible() or not control.is_enabled():
+                    continue
+                box = control.bounding_box()
+                if box is None:
+                    continue
+                visible.append((float(box["x"]) + float(box["width"]), control))
+        except (KeyError, TypeError, PlaywrightError) as exc:
+            raise FlowArchiveValidationError(
+                "Google Flow project menu could not be verified"
+            ) from exc
+        if not visible:
             raise FlowArchiveValidationError(
                 "Google Flow project menu could not be verified"
             )
+        visible.sort(key=lambda item: item[0])
+        if len(visible) > 1 and visible[-1][0] == visible[-2][0]:
+            raise FlowArchiveValidationError(
+                "Google Flow project menu position was ambiguous"
+            )
+        return visible[-1][1]
+
+    def _download_project_archive_to(self, destination: Path) -> None:
+        project_menu = self._project_download_menu_control()
         project_menu.click()
         deadline = time.monotonic() + self.client.editor_ready_timeout_seconds
         while True:
