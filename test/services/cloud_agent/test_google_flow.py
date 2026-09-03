@@ -326,6 +326,9 @@ class FakeLocator:
         if self.kind == "global_menu":
             return 1
         if self.kind == "project_download":
+            if self.page.project_menu_open and self.page.project_download_delay_reads:
+                self.page.project_download_delay_reads -= 1
+                return 0
             return int(self.page.project_menu_open)
         if self.kind == "agent_response_feedback":
             self.page.agent_response_reads += 1
@@ -740,6 +743,7 @@ class FakePage:
         fallback_composer_y_positions=None,
         require_pinned_fallback_identity=False,
         project_menu_available=True,
+        project_download_delay_reads=0,
         project_header_menu_name=None,
         global_menu_name=None,
         rename_response_text="",
@@ -854,6 +858,7 @@ class FakePage:
         self.fallback_prompt_was_filled = False
         self.command_prompt_values = {}
         self.project_menu_available = project_menu_available
+        self.project_download_delay_reads = int(project_download_delay_reads)
         self.project_header_menu_name = project_header_menu_name
         self.global_menu_name = global_menu_name
         self.project_menu_open = False
@@ -2254,6 +2259,21 @@ def test_project_archive_uses_header_menu_not_global_account_menu(
 
     assert ("click", "project_menu") in page.actions
     assert ("click", "global_menu") not in page.actions
+    assert ("click", "project_download") in page.actions
+
+
+def test_project_archive_waits_for_download_menu_animation(tmp_path):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        project_download_delay_reads=2,
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=1.0)
+    destination = tmp_path / "project.zip"
+
+    google_flow.FlowWorkspaceRun(client, page)._download_project_archive_to(destination)
+
+    assert destination.is_file()
+    assert ("click", "project_menu") in page.actions
     assert ("click", "project_download") in page.actions
 
 
