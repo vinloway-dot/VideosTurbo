@@ -11,6 +11,7 @@ from urllib.parse import urlsplit, urlunsplit
 from zipfile import ZipFile
 
 from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from app.models.cloud_agent import CloudJobRecord, ServiceSessionStatus
 from app.services.cloud_agent.errors import (
@@ -856,10 +857,20 @@ class FlowWorkspaceRun:
                     "Google Flow Download Project action could not be verified"
                 )
             time.sleep(self.client.poll_seconds)
-        with self.page.expect_download() as download_info:
-            download_project.click()
+        try:
+            with self.page.expect_download(
+                timeout=int(
+                    self.client.project_archive_download_timeout_seconds * 1000
+                )
+            ) as download_info:
+                download_project.click()
+            download = download_info.value
+        except PlaywrightTimeoutError as exc:
+            raise FlowArchiveValidationError(
+                "Google Flow project archive download timed out"
+            ) from exc
         destination.parent.mkdir(parents=True, exist_ok=True)
-        download_info.value.save_as(str(destination))
+        download.save_as(str(destination))
         if not destination.is_file():
             raise FlowArchiveValidationError(
                 "Google Flow project download did not produce an archive"
@@ -937,6 +948,7 @@ class GoogleFlowClient:
         service_url: str,
         generation_timeout_seconds: float = 1800.0,
         editor_ready_timeout_seconds: float = 120.0,
+        project_archive_download_timeout_seconds: float = 300.0,
         post_refresh_grace_seconds: float = 120.0,
         workspace_lock_timeout_seconds: float | None = None,
         poll_seconds: float = 1.0,
@@ -951,6 +963,10 @@ class GoogleFlowClient:
             raise ValueError("generation_timeout_seconds must be positive")
         if editor_ready_timeout_seconds <= 0:
             raise ValueError("editor_ready_timeout_seconds must be positive")
+        if project_archive_download_timeout_seconds <= 0:
+            raise ValueError(
+                "project_archive_download_timeout_seconds must be positive"
+            )
         if post_refresh_grace_seconds <= 0:
             raise ValueError("post_refresh_grace_seconds must be positive")
         if poll_seconds < 0:
@@ -965,6 +981,9 @@ class GoogleFlowClient:
         self.service_url = service_url
         self.generation_timeout_seconds = float(generation_timeout_seconds)
         self.editor_ready_timeout_seconds = float(editor_ready_timeout_seconds)
+        self.project_archive_download_timeout_seconds = float(
+            project_archive_download_timeout_seconds
+        )
         self.post_refresh_grace_seconds = float(post_refresh_grace_seconds)
         self.workspace_lock_timeout_seconds = (
             self.generation_timeout_seconds
