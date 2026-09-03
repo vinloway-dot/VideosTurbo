@@ -108,10 +108,6 @@ _RENAME_COMPLETION_RESPONSE_RE = re.compile(
     r")",
     re.IGNORECASE | re.DOTALL,
 )
-_EMPTY_MEDIA_NAME_RE = re.compile(
-    r"(?:start creating or add media|เริ่มสร้างหรือวางสื่อ)",
-    re.IGNORECASE,
-)
 _FATAL_APPLICATION_ERROR_RE = re.compile(
     r"(?:application error:\s*a client-side exception has occurred|"
     r"cannot read properties of undefined \(reading ['\"]service['\"]\))",
@@ -1479,13 +1475,16 @@ class GoogleFlowClient:
             "Google Flow Agent control could not be verified"
         )
 
-    @staticmethod
-    def _media_inventory_is_observable(page: Any) -> bool:
+    @classmethod
+    def _media_inventory_is_observable(cls, page: Any) -> bool:
         media_list = page.locator('[data-testid="virtuoso-item-list"]:visible')
-        empty_state = page.get_by_text(_EMPTY_MEDIA_NAME_RE)
-        return (media_list.count() == 1 and media_list.is_visible()) or (
-            empty_state.count() == 1 and empty_state.is_visible()
-        )
+        if media_list.count() == 1 and media_list.is_visible():
+            return True
+        try:
+            cls._active_or_fallback_command_composer(page)
+        except FlowWorkspaceVerificationError:
+            return False
+        return True
 
     @classmethod
     def _active_agent_composer(cls, page: Any) -> AgentComposer:
@@ -1716,15 +1715,12 @@ class GoogleFlowClient:
                 return False
             if _FATAL_APPLICATION_ERROR_RE.search(page.content()):
                 return False
-            try:
-                self._agent_control(page)
-            except FlowWorkspaceVerificationError:
-                self._fallback_command_composer(page)
-            return (
-                self._media_inventory_is_observable(page)
-                and page.locator('[aria-busy="true"]:visible').count() == 0
-                and page.get_by_role("progressbar").count() == 0
-            )
+            if page.locator('[aria-busy="true"]:visible').count() != 0:
+                return False
+            if page.get_by_role("progressbar").count() != 0:
+                return False
+            self._ensure_agent_active(page)
+            return True
         except (FlowWorkspaceVerificationError, PlaywrightError):
             return False
 

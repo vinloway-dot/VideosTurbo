@@ -2337,7 +2337,7 @@ def test_flow_workspace_preclean_confirms_observable_delete_dialog():
     assert page.clip_names == []
 
 
-def test_flow_workspace_preclean_blocks_generation_when_inventory_is_unverifiable(
+def test_flow_workspace_preclean_accepts_verified_composer_without_empty_state(
     monkeypatch,
 ):
     page = FakePage(
@@ -2357,9 +2357,9 @@ def test_flow_workspace_preclean_blocks_generation_when_inventory_is_unverifiabl
     monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
 
     with client.acquire_workspace(_job()) as workspace:
-        with pytest.raises(FlowWorkspaceVerificationError, match="empty"):
-            workspace.preclean_and_verify_empty()
+        workspace.preclean_and_verify_empty()
 
+    assert page.clip_names == []
     assert ("click", "generate") not in page.actions
 
 
@@ -4014,23 +4014,18 @@ def test_google_flow_agent_prompt_uses_observable_composer_when_locale_has_no_pr
     assert ("click", "generate") in page.actions
 
 
-def test_settled_editor_does_not_require_a_hidden_agent_composer_before_activation(
-    monkeypatch,
-):
+def test_settled_editor_activates_agent_and_uses_composer_without_empty_state():
     page = FakePage(
         progress_html=["<div>Generation progress 6 / 6</div>"],
         agent_pressed=False,
+        media_list_available=False,
+        empty_state_available=False,
     )
     client, _ = _client(page)
-    monkeypatch.setattr(
-        client,
-        "_observable_composer",
-        lambda _agent: pytest.fail(
-            "editor readiness must not require an Agent composer before activation"
-        ),
-    )
 
     assert client._is_editor_actionable(page) is True
+    assert page.agent_click_count == 1
+    assert page.agent_pressed is True
 
 
 def test_ensure_agent_active_clicks_an_inactive_toggle_once_and_returns_composer():
