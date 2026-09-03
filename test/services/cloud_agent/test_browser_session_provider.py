@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from pathlib import Path
 
+import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from app.models.cloud_agent import ServiceSessionStatus
@@ -22,11 +23,32 @@ class FakeLocator:
     def wait_for(self, *, state, timeout):
         self.page.wait_calls.append((state, timeout))
 
+    def or_(self, other):
+        return self if self.visible else other
+
+    @property
+    def first(self):
+        return self
+
 
 class DelayedCanvaShareLocator(FakeLocator):
+    def __init__(self, page, *, role):
+        super().__init__(page)
+        self.roles = frozenset({role})
+
+    def or_(self, other):
+        combined = DelayedCanvaShareLocator(self.page, role=next(iter(self.roles)))
+        combined.roles = self.roles | other.roles
+        return combined
+
+    @property
+    def first(self):
+        return self
+
     def wait_for(self, *, state, timeout):
-        self.page.wait_calls.append((state, timeout))
-        self.page.html = _canva_ready_html()
+        self.page.wait_calls.append((tuple(sorted(self.roles)), state, timeout))
+        if self.page.ready_role in self.roles:
+            self.page.html = _canva_ready_html()
 
 
 class FakePage:
@@ -54,9 +76,22 @@ class FakePage:
 
 
 class DelayedCanvaPage(FakePage):
+    def __init__(self, *, ready_role, **kwargs):
+        super().__init__(**kwargs)
+        self.ready_role = ready_role
+
     def get_by_role(self, role, *, name):
-        if role == "menuitem":
-            return DelayedCanvaShareLocator(self)
+        name_pattern = getattr(name, "pattern", str(name))
+        if role in {"button", "menuitem"} and "share" in name_pattern.lower():
+            return DelayedCanvaShareLocator(self, role=role)
+        return super().get_by_role(role, name=name)
+
+
+class NoCanvaReadyWaitPage(FakePage):
+    def get_by_role(self, role, *, name):
+        name_pattern = getattr(name, "pattern", str(name))
+        if role in {"button", "menuitem"} and "share" in name_pattern.lower():
+            raise AssertionError("login and challenge states must not wait for Share")
         return super().get_by_role(role, name=name)
 
 
@@ -191,8 +226,9 @@ def test_canva_provider_opens_template_and_captures_job_evidence(tmp_path):
     assert browser.evidence_calls == [("job-2", "canva", "session-check")]
 
 
-def test_canva_provider_waits_for_observable_share_menuitem_before_classifying(tmp_path):
+def test_canva_provider_waits_for_delayed_share_button_before_classifying(tmp_path):
     page = DelayedCanvaPage(
+        ready_role="button",
         url="https://www.canva.com/design/demo/edit",
         html="<main>Loading editor</main>",
     )
@@ -205,7 +241,63 @@ def test_canva_provider_waits_for_observable_share_menuitem_before_classifying(t
     result = provider.check_session(job_id="job-delayed", headed=True)
 
     assert result.status is ServiceSessionStatus.READY
-    assert page.wait_calls == [("visible", 30_000)]
+    assert page.wait_calls == [
+        (("button", "menuitem"), "visible", 180_000),
+    ]
+
+
+def test_canva_provider_retains_legacy_share_menuitem_ready_marker(tmp_path):
+    page = DelayedCanvaPage(
+        ready_role="menuitem",
+        url="https://www.canva.com/design/demo/edit",
+        html="<main>Loading editor</main>",
+    )
+    browser = FakeBrowserManager(page, tmp_path)
+    provider = canva.CanvaSessionProvider(
+        browser,
+        service_url="https://www.canva.com/design/demo/edit",
+    )
+
+    result = provider.check_session(job_id="job-legacy-share", headed=True)
+
+    assert result.status is ServiceSessionStatus.READY
+    assert page.wait_calls == [
+        (("button", "menuitem"), "visible", 180_000),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("url", "html", "expected"),
+    [
+        (
+            "https://www.canva.com/login",
+            "<main>Log in to Canva</main>",
+            ServiceSessionStatus.SESSION_EXPIRED,
+        ),
+        (
+            "https://www.canva.com/design/demo/edit",
+            "<main>2-Step Verification</main>",
+            ServiceSessionStatus.TWO_FACTOR_REQUIRED,
+        ),
+    ],
+)
+def test_canva_provider_classifies_login_and_challenge_without_waiting_for_share(
+    tmp_path,
+    url,
+    html,
+    expected,
+):
+    page = NoCanvaReadyWaitPage(url=url, html=html)
+    browser = FakeBrowserManager(page, tmp_path)
+    provider = canva.CanvaSessionProvider(
+        browser,
+        service_url="https://www.canva.com/design/demo/edit",
+    )
+
+    result = provider.check_session(job_id="job-human-required", headed=True)
+
+    assert result.status is expected
+    assert page.wait_calls == []
 
 
 def test_provider_safe_repair_clicks_only_continue_with_google(tmp_path):
