@@ -20,7 +20,6 @@ from app.services.cloud_agent.errors import (
     FlowWorkspaceVerificationError,
     HumanRequiredError,
     MediaValidationError,
-    NarrationTooLongError,
 )
 from app.services.cloud_agent.flow_recovery import (
     FlowRecoveryCoordinator,
@@ -34,7 +33,10 @@ from app.services.cloud_agent.flow_archive import (
 )
 from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.media_probe import MediaProbe, validate_audio, validate_video
-from app.services.cloud_agent.providers.canva import CanvaUIVerificationError
+from app.services.cloud_agent.providers.canva import (
+    CanvaDownloadVerificationError,
+    CanvaUIVerificationError,
+)
 from app.services.cloud_agent.progress import ProgressReporter
 from app.services.cloud_agent.storage import CloudJobStorage, JobPaths
 from app.services.cloud_agent.timing import calculate_adaptive_timing
@@ -682,6 +684,16 @@ class CloudAgentWorkflow:
                 return completed
 
             return self._get_job(job.id)
+        except CanvaDownloadVerificationError as exc:
+            current = self._get_job(job.id)
+            return self.store.patch_job(
+                current.id,
+                status=CloudJobStatus.HUMAN_REQUIRED,
+                checkpoint=current.checkpoint,
+                current_step="human_required",
+                error_code="CANVA_DOWNLOAD_VERIFICATION_FAILED",
+                error_message=str(exc),
+            )
         except CanvaUIVerificationError as exc:
             current = self._get_job(job.id)
             return self.store.patch_job(
@@ -699,14 +711,6 @@ class CloudAgentWorkflow:
                     if exc.audio_card_count is not None
                     else "CANVA_UI_VERIFICATION_FAILED"
                 ),
-                error_message=str(exc),
-            )
-        except NarrationTooLongError as exc:
-            return self.store.patch_job(
-                job.id,
-                status=CloudJobStatus.FAILED,
-                current_step="failed",
-                error_code=exc.error_code,
                 error_message=str(exc),
             )
         except FlowRecoveryExhausted as exc:

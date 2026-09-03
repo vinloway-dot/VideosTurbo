@@ -24,7 +24,10 @@ from app.services.cloud_agent.errors import (
 from app.services.cloud_agent.flow_archive import FlowPartialInventory
 from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.media_probe import MediaProbe
-from app.services.cloud_agent.providers.canva import CanvaUIVerificationError
+from app.services.cloud_agent.providers.canva import (
+    CanvaDownloadVerificationError,
+    CanvaUIVerificationError,
+)
 from app.services.cloud_agent.storage import CloudJobStorage
 from app.services.cloud_agent.workflow import CloudAgentWorkflow
 from app.services.cloud_agent.worker import CloudAgentWorker
@@ -453,6 +456,14 @@ class GenericCanvaVerificationFailure(RecordingCanva):
         raise CanvaUIVerificationError("Canva Uploads sidebar cannot be verified")
 
 
+class DownloadVerificationFailure(RecordingCanva):
+    def assemble_and_export(self, job, clips, audio, output, progress=None):
+        del job, clips, audio, output, progress
+        raise CanvaDownloadVerificationError(
+            "Canva final Download did not become enabled"
+        )
+
+
 class EventRecordingCanva(RecordingCanva):
     def __init__(self, events):
         super().__init__()
@@ -767,6 +778,25 @@ def test_workflow_persists_generic_canva_verification_failure_for_webui(
     assert result.checkpoint is CloudJobCheckpoint.FLOW_READY
     assert result.error_code == "CANVA_UI_VERIFICATION_FAILED"
     assert "Uploads sidebar" in result.error_message
+
+
+def test_workflow_persists_canva_download_verification_failure_for_webui(
+    monkeypatch, tmp_path
+):
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        canva=DownloadVerificationFailure(),
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert result.status is CloudJobStatus.HUMAN_REQUIRED
+    assert result.checkpoint is CloudJobCheckpoint.FLOW_READY
+    assert result.error_code == "CANVA_DOWNLOAD_VERIFICATION_FAILED"
+    assert "did not become enabled" in result.error_message
 
 
 def test_generation_fence_precedes_submit_and_flow_ready_commit_is_atomic(
@@ -2072,7 +2102,9 @@ def test_63_second_narration_persists_adaptive_timing_before_flow(monkeypatch, t
     ]
 
 
-def test_narration_beyond_policy_fails_before_flow(monkeypatch, tmp_path):
+def test_narration_longer_than_sixty_seconds_continues_through_canva(
+    monkeypatch, tmp_path
+):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     job = _claimed_job(store)
     flow = RecordingFlow()
@@ -2082,10 +2114,12 @@ def test_narration_beyond_policy_fails_before_flow(monkeypatch, tmp_path):
 
     result = workflow.run(job.id, worker_id=WORKER_ID)
 
-    assert result.status is CloudJobStatus.FAILED
-    assert result.error_code == "NARRATION_TOO_LONG_FOR_SIX_CLIP"
-    assert flow.calls == []
-    assert canva.calls == []
+    assert result.status is CloudJobStatus.COMPLETED
+    assert result.audio_duration_seconds == pytest.approx(71.0)
+    assert result.canva_playback_speed == pytest.approx(60.0 / 71.0)
+    assert result.target_final_duration_seconds == pytest.approx(71.0)
+    assert len(flow.calls) == 1
+    assert len(canva.calls) == 1
 
 
 def test_tts_ready_resume_reuses_audio_and_reconciles_exact_timing(monkeypatch, tmp_path):

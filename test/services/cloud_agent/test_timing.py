@@ -2,7 +2,6 @@ import math
 
 import pytest
 
-from app.services.cloud_agent.errors import NarrationTooLongError
 from app.services.cloud_agent.timing import calculate_adaptive_timing
 
 
@@ -13,6 +12,7 @@ from app.services.cloud_agent.timing import calculate_adaptive_timing
         (60.0, 1.0, 60.0),
         (63.0, 60.0 / 63.0, 63.0),
         (70.0, 60.0 / 70.0, 70.0),
+        (120.0, 0.5, 120.0),
     ],
 )
 def test_calculate_adaptive_timing(duration, expected_speed, expected_target):
@@ -31,13 +31,12 @@ def test_decimal_duration_is_not_ceiled_before_calculation():
     assert result.target_final_duration_seconds == 62.1
 
 
-def test_required_speed_below_floor_is_rejected_with_actionable_error():
-    with pytest.raises(NarrationTooLongError) as exc_info:
-        calculate_adaptive_timing(71.0, min_playback_speed=0.85)
+def test_audio_longer_than_sixty_seconds_is_not_rejected_by_speed_floor():
+    result = calculate_adaptive_timing(120.0, min_playback_speed=0.85)
 
-    assert exc_info.value.error_code == "NARRATION_TOO_LONG_FOR_SIX_CLIP"
-    assert "71.000" in str(exc_info.value)
-    assert "0.85" in str(exc_info.value)
+    assert result.audio_duration_seconds == 120.0
+    assert result.canva_playback_speed == pytest.approx(0.5)
+    assert result.target_final_duration_seconds == 120.0
 
 
 @pytest.mark.parametrize("duration", [0.0, -1.0, math.inf, -math.inf, math.nan])

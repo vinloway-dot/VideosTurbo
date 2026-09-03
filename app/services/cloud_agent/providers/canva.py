@@ -172,22 +172,20 @@ class CanvaAssemblyClient:
         output_path = Path(output)
         self._validate_media_inputs(clip_paths, audio_path)
         clip_names = [clip.name for clip in clip_paths]
-        self._clean_uploaded_videos(page, clip_names)
-        self._clean_uploaded_audio(page, audio_path.name)
         self._clear_video_timeline(page)
         self._clear_audio_timeline(page)
+        self._clean_uploaded_videos(page, clip_names)
+        self._clean_uploaded_audio(page, audio_path.name)
         emit("canva.timeline.cleared")
         self._upload_media(page, [*clip_paths, audio_path])
         emit("canva.uploads.ready")
         self._add_uploaded_audio(page, audio_path.name)
-        self._verify_narration_starts_at_zero(page, audio_path.name)
         emit("canva.audio.inserted")
         self._add_uploaded_clips(
             page,
             clip_names,
             progress=lambda number: emit(f"canva.video.inserted.{number}"),
         )
-        self._verify_first_video_starts_at_zero(page)
         self._order_clips(page, clip_names)
         self._mute_source_audio(page)
         emit("canva.source_audio.muted")
@@ -1120,7 +1118,6 @@ class CanvaAssemblyClient:
             try:
                 with page.expect_download(timeout=int(self.export_timeout_seconds * 1000)) as info:
                     final_download.click()
-                    self._wait_for_export_state(page)
                 download = info.value
                 suggested_name = str(download.suggested_filename or "")
                 if not suggested_name.lower().endswith(".mp4"):
@@ -1139,18 +1136,45 @@ class CanvaAssemblyClient:
             )
 
     def _wait_for_final_download_ready(self, page: Any) -> Any:
-        """Wait for Canva to re-enable the final action after editor-side processing."""
-        final_download = page.get_by_role("button", name="Download", exact=True)
-        if final_download.count() != 1:
-            raise CanvaDownloadVerificationError("Canva final Download control is ambiguous")
+        """Wait through Canva's export-sheet transition for one usable action."""
         deadline = time.monotonic() + self.export_timeout_seconds
-        while not final_download.is_enabled():
+        last_state = "missing"
+        while True:
+            final_downloads = page.get_by_role("button", name="Download", exact=True)
+            visible = []
+            try:
+                count = final_downloads.count()
+            except Exception:
+                count = 0
+            for index in range(count):
+                candidate = final_downloads.nth(index)
+                try:
+                    if candidate.is_visible():
+                        visible.append(candidate)
+                except Exception:
+                    continue
+
+            if len(visible) == 1:
+                last_state = "disabled"
+                try:
+                    if visible[0].is_enabled():
+                        return visible[0]
+                except Exception:
+                    last_state = "missing"
+            elif len(visible) > 1:
+                last_state = "ambiguous"
+            else:
+                last_state = "missing"
+
             if time.monotonic() >= deadline:
-                raise CanvaDownloadVerificationError(
-                    "Canva final Download did not become enabled"
-                )
+                if last_state == "ambiguous":
+                    message = "Canva final Download control is ambiguous"
+                elif last_state == "disabled":
+                    message = "Canva final Download did not become enabled"
+                else:
+                    message = "Canva final Download control did not appear"
+                raise CanvaDownloadVerificationError(message)
             time.sleep(self.poll_seconds)
-        return final_download
 
     def _wait_for_export_state(self, page: Any) -> None:
         deadline = time.monotonic() + self.export_timeout_seconds

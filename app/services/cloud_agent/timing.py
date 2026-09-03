@@ -1,9 +1,6 @@
 import math
 from dataclasses import dataclass
 
-from app.services.cloud_agent.errors import NarrationTooLongError
-
-
 @dataclass(frozen=True)
 class AdaptiveTiming:
     audio_duration_seconds: float
@@ -40,12 +37,6 @@ def calculate_adaptive_timing(
     else:
         playback_speed = base_duration / duration
         target_duration = duration
-
-    if playback_speed < minimum_speed:
-        raise NarrationTooLongError(
-            f"narration duration {duration:.3f}s requires Canva playback speed "
-            f"{playback_speed:.3f}x, below configured minimum {minimum_speed:.3f}x"
-        )
 
     return AdaptiveTiming(
         audio_duration_seconds=duration,
