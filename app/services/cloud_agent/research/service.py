@@ -152,6 +152,7 @@ ClipPlanGenerator = Callable[[str, str, int], SixClipPlan]
 class ResearchScriptService:
     MAX_TOOL_EXECUTIONS = 3
     MAX_PROVIDER_ROUNDS = 3
+    MAX_GENERATION_ATTEMPTS = 3
     CONTEXT_PROTOCOL_RESERVE_TOKENS = 2048
     OUTPUT_RESERVE_TOKENS = 2048
 
@@ -171,22 +172,54 @@ class ResearchScriptService:
         self.clip_plan_generator = clip_plan_generator or self._generate_clip_plan
 
     def create_draft(self, request: ResearchDraftRequest) -> ResearchDraftResponse:
-        state = _AttemptState()
         try:
             self._validate_supplied_url_count(request.source_urls)
             canonical_urls = self.runtime.preflight_urls(request.source_urls)
             generation = self._require_generation_settings(request)
             adapter = self._require_adapter(generation.provider_id)
-            capability = adapter.resolve_capability(
-                generation.model_id,
-                generation.api_key,
-            )
-            if not capability.supports_tools:
-                raise ResearchError(
-                    "PROVIDER_TOOL_CALLING_UNSUPPORTED",
-                    "selected model does not support tools",
-                )
+        except ResearchError as exc:
+            if exc.accounting is None:
+                exc.accounting = ResearchAccounting()
+            raise
 
+        for attempt_number in range(1, self.MAX_GENERATION_ATTEMPTS + 1):
+            try:
+                capability = adapter.resolve_capability(
+                    generation.model_id,
+                    generation.api_key,
+                )
+                if not capability.supports_tools:
+                    raise ResearchError(
+                        "PROVIDER_TOOL_CALLING_UNSUPPORTED",
+                        "selected model does not support tools",
+                    )
+                return self._create_draft_attempt(
+                    request=request,
+                    canonical_urls=canonical_urls,
+                    generation=generation,
+                    adapter=adapter,
+                    capability=capability,
+                )
+            except ResearchError as exc:
+                if (
+                    attempt_number >= self.MAX_GENERATION_ATTEMPTS
+                    or not exc.retryable
+                ):
+                    raise
+
+        raise RuntimeError("research generation attempts exhausted")
+
+    def _create_draft_attempt(
+        self,
+        *,
+        request: ResearchDraftRequest,
+        canonical_urls: tuple[str, ...],
+        generation: _GenerationSettings,
+        adapter: ToolCallingAdapter,
+        capability: ModelCapability,
+    ) -> ResearchDraftResponse:
+        state = _AttemptState()
+        try:
             state.messages = self._initial_messages(
                 request,
                 canonical_urls,
@@ -217,13 +250,22 @@ class ResearchScriptService:
                     raise ResearchError(
                         "RESEARCH_RESPONSE_INVALID",
                         "missing final payload",
+                        retryable=True,
                     )
-                return self._persist_valid_final(
-                    result.final_payload,
-                    state,
-                    request,
-                    generation,
-                )
+                try:
+                    return self._persist_valid_final(
+                        result.final_payload,
+                        state,
+                        request,
+                        generation,
+                    )
+                except ResearchError as exc:
+                    if exc.code in {
+                        "RESEARCH_RESPONSE_INVALID",
+                        "SOURCE_EVIDENCE_EMPTY",
+                    }:
+                        exc.retryable = True
+                    raise
 
             raise ResearchError(
                 "PROVIDER_ROUND_LIMIT_EXCEEDED",

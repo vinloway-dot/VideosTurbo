@@ -185,7 +185,12 @@ class OpenAICompatibleToolCallingAdapter:
             )
         except Exception as exc:
             raise self._classify_provider_error(exc, operation="completion") from exc
-        return self._parse_response(response)
+        try:
+            return self._parse_response(response)
+        except ResearchError as exc:
+            if exc.code == "RESEARCH_RESPONSE_INVALID":
+                exc.retryable = True
+            raise
 
     def _build_client(self, api_key: SecretStr):
         return self._client_factory(
@@ -403,7 +408,11 @@ class OpenAICompatibleToolCallingAdapter:
         if isinstance(exc, ResearchError):
             return exc
         if isinstance(exc, (openai.APITimeoutError, TimeoutError, openai.APIConnectionError)):
-            return ResearchError("PROVIDER_TIMEOUT", f"{operation} timed out")
+            return ResearchError(
+                "PROVIDER_TIMEOUT",
+                f"{operation} timed out",
+                retryable=True,
+            )
         if isinstance(exc, openai.AuthenticationError):
             return ResearchError(
                 "PROVIDER_AUTHENTICATION_FAILED",
@@ -443,9 +452,25 @@ class OpenAICompatibleToolCallingAdapter:
                     f"{operation} could not find the selected model",
                 )
             if status_code in {408, 504}:
-                return ResearchError("PROVIDER_TIMEOUT", f"{operation} timed out")
+                return ResearchError(
+                    "PROVIDER_TIMEOUT",
+                    f"{operation} timed out",
+                    retryable=True,
+                )
+            if status_code == 429 or (
+                isinstance(status_code, int) and status_code >= 500
+            ):
+                return ResearchError(
+                    "RESEARCH_RESPONSE_INVALID",
+                    f"{operation} failed before a valid provider response was produced",
+                    retryable=True,
+                )
         if "timeout" in str(exc).lower():
-            return ResearchError("PROVIDER_TIMEOUT", f"{operation} timed out")
+            return ResearchError(
+                "PROVIDER_TIMEOUT",
+                f"{operation} timed out",
+                retryable=True,
+            )
         return ResearchError(
             "RESEARCH_RESPONSE_INVALID",
             f"{operation} failed before a valid provider response was produced",
