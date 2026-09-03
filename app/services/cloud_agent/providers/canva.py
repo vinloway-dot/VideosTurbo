@@ -11,6 +11,7 @@ from loguru import logger
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from app.models.cloud_agent import ServiceSessionStatus
+from app.services.cloud_agent.download_transport import save_download_with_url_fallback
 from app.services.cloud_agent.providers._browser_session import BrowserSessionProvider
 from app.services.cloud_agent.providers._session_detection import (
     classify_security_challenge,
@@ -1123,7 +1124,11 @@ class CanvaAssemblyClient:
                 if not suggested_name.lower().endswith(".mp4"):
                     raise CanvaDownloadVerificationError("Canva final download is not an MP4")
                 output.parent.mkdir(parents=True, exist_ok=True)
-                download.save_as(str(output))
+                save_download_with_url_fallback(
+                    download,
+                    output,
+                    timeout_seconds=self.export_timeout_seconds,
+                )
             except CanvaDownloadVerificationError:
                 raise
             except Exception as exc:

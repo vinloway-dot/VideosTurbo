@@ -4604,6 +4604,8 @@ def test_reconcile_targeted_replacement_downloads_exact_named_card_after_restart
         ("download Download", "720p video"),
         ("ดาวน์โหลด", "วิดีโอ 720p"),
         ("download ดาวน์โหลด", "วิดีโอ 720p"),
+        ("ดาวน์โหลด", "720p\nขนาดดั้งเดิม"),
+        ("Download", "720p\nOriginal size"),
     ],
 )
 def test_reconcile_targeted_replacement_downloads_only_exact_named_card(

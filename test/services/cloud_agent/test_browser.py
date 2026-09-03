@@ -113,14 +113,12 @@ def test_open_uses_dedicated_persistent_profiles_and_headless_policy(tmp_path):
         {
             "user_data_dir": str(tmp_path / "profiles" / "google-flow"),
                 "headless": True,
-                "channel": "chrome",
                 "chromium_sandbox": True,
                 "args": ["--hide-crash-restore-bubble"],
         },
         {
             "user_data_dir": str(tmp_path / "profiles" / "canva"),
                 "headless": False,
-                "channel": "chrome",
                 "chromium_sandbox": True,
                 "args": ["--hide-crash-restore-bubble"],
         },

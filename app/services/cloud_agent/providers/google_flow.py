@@ -27,6 +27,7 @@ from app.services.cloud_agent.errors import (
     HumanRequiredError,
     MediaValidationError,
 )
+from app.services.cloud_agent.download_transport import save_download_with_url_fallback
 from app.services.cloud_agent.flow_archive import (
     FlowPartialInventory,
     FlowRecoveryCapture,
@@ -77,7 +78,8 @@ _CARD_DOWNLOAD_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 _CARD_720P_NAME_RE = re.compile(
-    r"^(?:720p(?:\s+video)?|video\s+720p|วิดีโอ\s*720p|720p\s*วิดีโอ)$",
+    r"^(?:720p(?:\s+(?:video|original\s+size|ขนาดดั้งเดิม))?"
+    r"|video\s+720p|วิดีโอ\s*720p|720p\s*วิดีโอ)$",
     re.IGNORECASE,
 )
 _PROJECT_MENU_NAME_RE = re.compile(
@@ -694,7 +696,11 @@ class FlowWorkspaceRun:
             with self.page.expect_download() as download_info:
                 video_format.click()
             destination.parent.mkdir(parents=True, exist_ok=True)
-            download_info.value.save_as(str(temporary_video))
+            save_download_with_url_fallback(
+                download_info.value,
+                temporary_video,
+                timeout_seconds=self.client.project_archive_download_timeout_seconds,
+            )
         except PlaywrightError as exc:
             temporary_video.unlink(missing_ok=True)
             raise FlowWorkspaceVerificationError(
@@ -1035,7 +1041,11 @@ class FlowWorkspaceRun:
         temporary_archive = destination.parent / f".{destination.name}.project.tmp"
         temporary_archive.unlink(missing_ok=True)
         try:
-            download.save_as(str(temporary_archive))
+            save_download_with_url_fallback(
+                download,
+                temporary_archive,
+                timeout_seconds=self.client.project_archive_download_timeout_seconds,
+            )
         except PlaywrightError as exc:
             temporary_archive.unlink(missing_ok=True)
             if "target page, context or browser has been closed" in str(exc).casefold():
