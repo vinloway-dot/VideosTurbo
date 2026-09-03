@@ -693,7 +693,11 @@ class FlowWorkspaceRun:
                         "Google Flow replacement video download format could not be verified"
                     )
                 time.sleep(self.client.poll_seconds)
-            with self.page.expect_download() as download_info:
+            with self.page.expect_download(
+                timeout=int(
+                    self.client.project_archive_download_timeout_seconds * 1000
+                )
+            ) as download_info:
                 video_format.click()
             destination.parent.mkdir(parents=True, exist_ok=True)
             save_download_with_url_fallback(
@@ -867,9 +871,6 @@ class FlowWorkspaceRun:
         def validated_result() -> Any:
             return None if validate is None else validate(destination)
 
-        if self.prefer_individual_download:
-            self._download_individual_cards_archive_to(destination)
-            return validated_result()
         try:
             self._download_project_archive_to(destination)
             return validated_result()
