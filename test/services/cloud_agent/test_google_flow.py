@@ -2277,6 +2277,50 @@ def test_project_archive_waits_for_download_menu_animation(tmp_path):
     assert ("click", "project_download") in page.actions
 
 
+def test_project_download_chooses_rightmost_more_control():
+    class HeaderControl:
+        def __init__(self, x):
+            self.x = x
+
+        def is_visible(self):
+            return True
+
+        def is_enabled(self):
+            return True
+
+        def bounding_box(self):
+            return {"x": self.x, "y": 20, "width": 40, "height": 40}
+
+    class HeaderControls:
+        def __init__(self):
+            self.items = [HeaderControl(80), HeaderControl(1080)]
+
+        def count(self):
+            return len(self.items)
+
+        def nth(self, index):
+            return self.items[index]
+
+    page = FakePage(progress_html=["<div>Generation progress 6 / 6</div>"])
+    original_get_by_role = page.get_by_role
+    controls = HeaderControls()
+
+    def get_by_role(role, *, name=None, exact=None):
+        if role == "button" and name is google_flow._PROJECT_MENU_NAME_RE:
+            return controls
+        return original_get_by_role(role, name=name, exact=exact)
+
+    page.get_by_role = get_by_role
+    client, _ = _client(page)
+
+    selected = google_flow.FlowWorkspaceRun(
+        client,
+        page,
+    )._project_download_menu_control()
+
+    assert selected is controls.items[1]
+
+
 def test_rename_response_reloads_once_then_requires_two_stable_semantic_observations_without_checkboxes(
     monkeypatch, tmp_path
 ):
