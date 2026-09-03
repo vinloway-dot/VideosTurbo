@@ -899,7 +899,9 @@ class FakePage:
         self._content_index = 0
 
     def reload(self, **kwargs):
-        self.reload_calls.append(kwargs)
+        self.reload_calls.append(
+            {key: value for key, value in kwargs.items() if key != "timeout"}
+        )
         if self.reload_progress_html:
             self.progress_html = self.reload_progress_html.pop(0)
             self._content_index = 0
@@ -2543,6 +2545,98 @@ def test_normal_rename_waits_full_grace_then_accepts_validated_six_archive(
     assert clock[0] >= 2.0
     assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
     assert page.actions.count(("click", "project_download")) == 1
+
+
+def test_normal_rename_reload_timeout_at_project_url_hydrates_waits_grace_then_downloads(
+    monkeypatch, tmp_path
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"draft-{number}" for number in range(1, 7)],
+        renamed_clip_names=[f"clip {number}" for number in range(1, 7)],
+        card_semantic_names=[],
+        inventory_sequence=[6, 6, 6],
+        agent_enabled_states=[False],
+        send_enabled_after_click=False,
+    )
+    client, _ = _client(
+        page,
+        timeout_seconds=1.0,
+        editor_ready_timeout_seconds=5.0,
+        post_refresh_grace_seconds=2.0,
+    )
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    materialization = google_flow.FlowRecoveryMaterialization(
+        paths=paths.flow_files,
+        source="latest_complete_archive",
+    )
+    monkeypatch.setattr(
+        google_flow,
+        "inspect_recovery_flow_archive",
+        lambda *_args, **_kwargs: materialization,
+    )
+    reload_calls = []
+    original_reload = page.reload
+
+    def slow_reload(**kwargs):
+        reload_calls.append(kwargs)
+        original_reload(**kwargs)
+        raise PlaywrightTimeoutError("Timeout 5000ms exceeded")
+
+    monkeypatch.setattr(page, "reload", slow_reload)
+    clock = [-0.25]
+
+    def monotonic():
+        clock[0] += 0.25
+        return clock[0]
+
+    monkeypatch.setattr(google_flow.time, "monotonic", monotonic)
+    monkeypatch.setattr(google_flow.time, "sleep", lambda _seconds: None)
+
+    with client.acquire_workspace(_job(flow_generation_unresolved=True)) as workspace:
+        result = workspace.reconcile_and_download(
+            _job(flow_generation_unresolved=True),
+            paths,
+        )
+
+    assert result == paths.flow_files
+    assert reload_calls == [
+        {"wait_until": "domcontentloaded", "timeout": 5_000}
+    ]
+    assert clock[0] >= 2.0
+    assert page.actions.count(("click", "project_download")) == 1
+
+
+def test_post_rename_reload_timeout_after_redirect_fails_closed(monkeypatch):
+    page = FakePage(progress_html=["<div>Generation progress 6 / 6</div>"])
+    client, _ = _client(page, editor_ready_timeout_seconds=5.0)
+    page.url = client.service_url
+    hydrate_calls = []
+    reload_calls = []
+
+    def redirected_reload(**kwargs):
+        reload_calls.append(kwargs)
+        page.url = "https://accounts.google.com/v3/signin/identifier"
+        raise PlaywrightTimeoutError("Timeout 5000ms exceeded")
+
+    monkeypatch.setattr(page, "reload", redirected_reload)
+    monkeypatch.setattr(
+        client,
+        "_hydrate_project_workspace",
+        lambda *_args, **_kwargs: hydrate_calls.append((_args, _kwargs)),
+    )
+
+    with pytest.raises(
+        FlowWorkspaceVerificationError,
+        match="refresh did not reach the configured project URL",
+    ) as exc_info:
+        google_flow.FlowWorkspaceRun(client, page)._refresh_and_hydrate()
+
+    assert reload_calls == [
+        {"wait_until": "domcontentloaded", "timeout": 5_000}
+    ]
+    assert hydrate_calls == []
+    assert isinstance(exc_info.value.__cause__, PlaywrightTimeoutError)
 
 
 def test_normal_rename_caches_validated_five_archive_for_recovery_coordinator(

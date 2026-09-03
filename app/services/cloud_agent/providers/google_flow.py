@@ -892,7 +892,22 @@ class FlowWorkspaceRun:
         self._refresh_and_hydrate()
 
     def _refresh_and_hydrate(self) -> None:
-        self.page.reload(wait_until="domcontentloaded")
+        try:
+            self.page.reload(
+                wait_until="domcontentloaded",
+                timeout=int(self.client.editor_ready_timeout_seconds * 1000),
+            )
+        except PlaywrightTimeoutError as exc:
+            try:
+                reached_project = self.client._is_configured_project_url(
+                    self.page.url
+                )
+            except PlaywrightError:
+                reached_project = False
+            if not reached_project:
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow refresh did not reach the configured project URL"
+                ) from exc
         self.client._hydrate_project_workspace(
             self.page,
             flow_generation_unresolved=True,
@@ -1032,6 +1047,15 @@ class GoogleFlowClient:
                 "Google Flow project URL could not be used for safe home warmup"
             )
         return urlunsplit((parsed.scheme, parsed.netloc, home_path, "", ""))
+
+    def _is_configured_project_url(self, current_url: str) -> bool:
+        expected = urlsplit(self.service_url)
+        current = urlsplit(str(current_url or ""))
+        return (
+            current.scheme.casefold() == expected.scheme.casefold()
+            and current.netloc.casefold() == expected.netloc.casefold()
+            and current.path.rstrip("/") == expected.path.rstrip("/")
+        )
 
     @staticmethod
     def _verify_workspace_session(page: Any, job_id: str) -> None:
