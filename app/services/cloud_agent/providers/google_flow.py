@@ -1046,6 +1046,7 @@ class GoogleFlowClient:
                 page,
                 target_url=self._flow_home_url(),
                 job_id=job.id,
+                allow_expected_session_expired=True,
             )
             self._navigate_workspace_page(
                 page,
@@ -1094,6 +1095,7 @@ class GoogleFlowClient:
         *,
         target_url: str | None = None,
         job_id: str = "",
+        allow_expected_session_expired: bool = False,
     ) -> None:
         expected_url = self.service_url if target_url is None else target_url
         navigation_options = {
@@ -1122,7 +1124,13 @@ class GoogleFlowClient:
             reached_target = False
 
         try:
-            self._verify_workspace_session(page, job_id)
+            self._verify_workspace_session(
+                page,
+                job_id,
+                allow_session_expired=(
+                    allow_expected_session_expired and reached_target
+                ),
+            )
         except HumanRequiredError as human_required:
             if navigation_error is not None:
                 raise human_required from navigation_error
@@ -1173,7 +1181,12 @@ class GoogleFlowClient:
             raise error
 
     @staticmethod
-    def _verify_workspace_session(page: Any, job_id: str) -> None:
+    def _verify_workspace_session(
+        page: Any,
+        job_id: str,
+        *,
+        allow_session_expired: bool = False,
+    ) -> None:
         try:
             status = classify_google_flow_session(
                 url=page.url,
@@ -1190,6 +1203,8 @@ class GoogleFlowClient:
             # A direct project boot can expose a vendor shell before project
             # hydration. The same owned page's bounded hydration loop decides
             # whether that shell becomes a usable editor or fails closed.
+            return
+        if allow_session_expired and status is ServiceSessionStatus.SESSION_EXPIRED:
             return
         raise HumanRequiredError(
             f"google_flow session requires human recovery for job {job_id}: "
