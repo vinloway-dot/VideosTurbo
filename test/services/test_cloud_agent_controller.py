@@ -131,6 +131,7 @@ def _client(tmp_path):
                 voice_id="",
                 voice_speed=1.0,
                 custom_system_prompt="",
+                create_canva_captions=False,
             )
 
         def get(self):
@@ -146,6 +147,7 @@ def _client(tmp_path):
                 voice_id="",
                 voice_speed=1.0,
                 custom_system_prompt="",
+                create_canva_captions=False,
             )
             return self.value
 
@@ -379,15 +381,18 @@ def test_cloud_agent_defaults_api_persists_and_resets_operator_preferences(tmp_p
             "voice_id": "elevenlabs:P9NVJuTccNIK9usP8iEI:001",
             "voice_speed": 1.1,
             "custom_system_prompt": "Write in a calm documentary tone.",
+            "create_canva_captions": True,
         },
     )
     reset = client.post("/api/v1/cloud-agent/defaults/reset")
 
     assert saved.status_code == 200
     assert saved.json()["data"]["voice_id"] == "elevenlabs:P9NVJuTccNIK9usP8iEI:001"
+    assert saved.json()["data"]["create_canva_captions"] is True
     assert reset.status_code == 200
     assert reset.json()["data"]["tts_provider"] == "azure-tts-v1"
     assert reset.json()["data"]["custom_system_prompt"] == ""
+    assert reset.json()["data"]["create_canva_captions"] is False
 
 
 def test_draft_generates_a_complete_start_payload_without_starting_production_work(

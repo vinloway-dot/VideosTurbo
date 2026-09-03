@@ -100,6 +100,12 @@ def test_cloud_job_create_rejects_non_positive_voice_speed():
         CloudJobCreate(**_valid_request(voice_speed=0))
 
 
+def test_cloud_job_create_disables_canva_captions_by_default():
+    request = CloudJobCreate(**_valid_request())
+
+    assert request.create_canva_captions is False
+
+
 def test_cloud_job_record_keeps_status_checkpoint_and_control_independent():
     record = CloudJobRecord(
         **_valid_record(

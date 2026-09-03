@@ -1380,11 +1380,12 @@ class FakeReactivatingUploadInventoryPage(FakeZeroVideoUploadInventoryPage):
         return _SidebarTab(self, name)
 
 
-def _assembly_job(*, speed=0.95, target_seconds=63.25):
+def _assembly_job(*, speed=0.95, target_seconds=63.25, create_captions=True):
     return SimpleNamespace(
         id="job-canva-123",
         canva_playback_speed=speed,
         target_final_duration_seconds=target_seconds,
+        create_canva_captions=create_captions,
     )
 
 
@@ -1470,6 +1471,28 @@ def test_canva_reports_only_verified_postconditions(tmp_path):
         "canva.export.started",
         "canva.export.downloaded",
     ]
+
+
+def test_canva_exports_without_requesting_captions_when_job_disables_them(tmp_path):
+    page = FakeCanvaEditorPage()
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+    milestones = []
+
+    result = client.assemble_and_export(
+        _assembly_job(create_captions=False),
+        clips,
+        audio,
+        output,
+        progress=milestones.append,
+    )
+
+    assert result == output
+    assert ("auto_captions",) not in page.actions
+    assert "canva.captions.requested" not in milestones
+    assert "canva.captions.stable" not in milestones
+    assert "canva.captions.skipped" in milestones
+    assert ("export_mp4_1080p",) in page.actions
 
 
 def test_failed_caption_postcondition_does_not_emit_stable_milestone(

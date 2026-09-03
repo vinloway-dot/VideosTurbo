@@ -14,7 +14,11 @@ from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.errors import RecoveryBudgetExhausted
 
 
-def _request(subject: str = "Why Saturn Has a Hexagon") -> CloudJobCreate:
+def _request(
+    subject: str = "Why Saturn Has a Hexagon",
+    *,
+    create_canva_captions: bool = False,
+) -> CloudJobCreate:
     return CloudJobCreate(
         subject=subject,
         script="A valid narration script.",
@@ -25,6 +29,7 @@ def _request(subject: str = "Why Saturn Has a Hexagon") -> CloudJobCreate:
         tts_provider="azure-tts-v1",
         voice_id="en-US-JennyNeural-Female",
         voice_speed=1.0,
+        create_canva_captions=create_canva_captions,
     )
 
 
@@ -115,7 +120,7 @@ def test_create_job_persists_defaults_and_six_clip_plan_across_reopen(tmp_path):
     db_path = tmp_path / "agent.sqlite3"
     store = CloudJobStore(str(db_path))
 
-    created = store.create_job(_request())
+    created = store.create_job(_request(create_canva_captions=True))
 
     assert created.status is CloudJobStatus.QUEUED
     assert created.checkpoint is CloudJobCheckpoint.NONE
@@ -123,6 +128,7 @@ def test_create_job_persists_defaults_and_six_clip_plan_across_reopen(tmp_path):
     assert created.current_step == "queued"
     assert created.progress == 0
     assert created.clip_plan.model_dump() == _request().clip_plan.model_dump()
+    assert created.create_canva_captions is True
 
     reopened = CloudJobStore(str(db_path))
     loaded = reopened.get_job(created.id)
@@ -132,6 +138,33 @@ def test_create_job_persists_defaults_and_six_clip_plan_across_reopen(tmp_path):
     assert loaded.script == created.script
     assert loaded.master_prompt == created.master_prompt
     assert loaded.clip_plan.model_dump() == created.clip_plan.model_dump()
+    assert loaded.create_canva_captions is True
+
+
+def test_fresh_database_defaults_omitted_caption_choice_to_disabled(tmp_path):
+    db_path = tmp_path / "agent.sqlite3"
+    store = CloudJobStore(str(db_path))
+    source = store.create_job(_request(create_canva_captions=True))
+
+    with sqlite3.connect(db_path) as connection:
+        columns = [
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(cloud_agent_jobs)"
+            ).fetchall()
+            if row[1] != "create_canva_captions"
+        ]
+        selected = ["?" if column == "id" else column for column in columns]
+        connection.execute(
+            f"INSERT INTO cloud_agent_jobs ({', '.join(columns)}) "
+            f"SELECT {', '.join(selected)} FROM cloud_agent_jobs WHERE id = ?",
+            ("omitted-caption-choice", source.id),
+        )
+
+    loaded = store.get_job("omitted-caption-choice")
+
+    assert loaded is not None
+    assert loaded.create_canva_captions is False
 
 
 def test_first_completed_transition_sets_completion_time_and_terminal_fields(tmp_path):
@@ -206,6 +239,7 @@ def test_pre_v22_database_is_migrated_without_losing_job(tmp_path):
     assert migrated.canva_restart_attempts == 0
     assert migrated.last_progress_at == ""
     assert migrated.last_progress_milestone == ""
+    assert migrated.create_canva_captions is True
     with sqlite3.connect(db_path) as connection:
         columns = {
             row[1]
@@ -226,6 +260,7 @@ def test_pre_v22_database_is_migrated_without_losing_job(tmp_path):
         "last_progress_milestone",
         "stage_started_at",
         "canva_attempt_started_at",
+        "create_canva_captions",
     } <= columns
 
     updated = store.patch_job(

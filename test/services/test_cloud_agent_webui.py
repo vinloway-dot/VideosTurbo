@@ -1848,6 +1848,7 @@ def test_start_job_sends_the_draft_clip_plan_required_by_the_api(monkeypatch):
         tts_provider="azure-tts-v1",
         voice_id="en-AU-NatashaNeural-Female",
         voice_speed=1.0,
+        create_canva_captions=False,
         prepared_voice_fingerprint="a" * 64,
     ) == {"id": "job-123"}
     assert recorded["method"] == "POST"
@@ -1855,6 +1856,7 @@ def test_start_job_sends_the_draft_clip_plan_required_by_the_api(monkeypatch):
     assert recorded["json"]["clip_plan"] == clip_plan
     assert recorded["json"]["script"] == "Ready narration"
     assert recorded["json"]["prepared_voice_fingerprint"] == "a" * 64
+    assert recorded["json"]["create_canva_captions"] is False
 
 
 def test_prepare_draft_voice_posts_the_full_script_and_selected_voice(monkeypatch):
@@ -1891,11 +1893,13 @@ def test_cloud_agent_defaults_payload_keeps_voice_and_custom_system_prompt_toget
         voice_id="elevenlabs:P9NVJuTccNIK9usP8iEI:001",
         voice_speed=1.1,
         custom_system_prompt="Write in a calm documentary tone.",
+        create_canva_captions=False,
     ) == {
         "tts_provider": "elevenlabs",
         "voice_id": "elevenlabs:P9NVJuTccNIK9usP8iEI:001",
         "voice_speed": 1.1,
         "custom_system_prompt": "Write in a calm documentary tone.",
+        "create_canva_captions": False,
     }
 
 
@@ -2389,6 +2393,11 @@ def test_start_button_forwards_stored_research_draft_id(monkeypatch):
         def selectbox(self, _label, options, **_kwargs):
             return options[0]
 
+        def checkbox(self, label, **kwargs):
+            assert label == "สร้าง Caption ใน Canva"
+            assert kwargs["key"] == "cloud_agent_create_canva_captions"
+            return True
+
         def radio(self, _label, options, **_kwargs):
             return "Standard Script"
 
@@ -2446,6 +2455,7 @@ def test_start_button_forwards_stored_research_draft_id(monkeypatch):
     cloud_agent.render_cloud_agent_panel()
 
     assert recorded["research_draft_id"] == "draft-1"
+    assert recorded["create_canva_captions"] is True
     assert rendered_statuses[-1][1]["status"] == "QUEUED"
 
 

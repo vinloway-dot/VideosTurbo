@@ -190,11 +190,14 @@ class CanvaAssemblyClient:
         self._order_clips(page, clip_names)
         self._mute_source_audio(page)
         emit("canva.source_audio.muted")
-        self._generate_auto_captions(
-            page,
-            requested=lambda: emit("canva.captions.requested"),
-        )
-        emit("canva.captions.stable")
+        if getattr(job, "create_canva_captions", True):
+            self._generate_auto_captions(
+                page,
+                requested=lambda: emit("canva.captions.requested"),
+            )
+            emit("canva.captions.stable")
+        else:
+            emit("canva.captions.skipped")
         self._export_mp4_1080p(page)
         emit("canva.export.started")
         self._download_export(page, output_path)
