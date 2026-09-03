@@ -35,6 +35,16 @@ def _valid_members() -> list[tuple[str, bytes]]:
     return [(f"clip {number}.mp4", f"video-{number}".encode()) for number in range(1, 7)]
 
 
+def _sanitized_vendor_members(numbers=range(1, 7)) -> list[tuple[str, bytes]]:
+    return [
+        (
+            f"Holy_Basil_CLIP_{number}_202609030325.mp4",
+            f"video-{number}".encode(),
+        )
+        for number in numbers
+    ]
+
+
 def _video_probe(path: Path, *, width: int = 1080, height: int = 1920) -> MediaProbe:
     return MediaProbe(
         path=Path(path),
@@ -157,6 +167,112 @@ def test_vendor_export_names_materialize_in_semantic_order(monkeypatch, tmp_path
         b"five",
         b"six",
     ]
+
+
+def test_sanitized_vendor_recovery_archive_materializes_unordered_six(
+    monkeypatch,
+    tmp_path,
+):
+    flow_archive = _flow_archive_module()
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    snapshot = paths.flow_snapshots_dir / "partial-0.zip"
+    _write_archive(
+        snapshot,
+        _sanitized_vendor_members((4, 1, 6, 2, 5, 3)),
+    )
+    _accept_video(monkeypatch, flow_archive)
+
+    result = flow_archive.inspect_recovery_flow_archive(
+        snapshot,
+        paths,
+        min_size_bytes=1,
+        expected_width=1080,
+        expected_height=1920,
+    )
+
+    assert result.source == "latest_complete_archive"
+    assert result.paths == paths.flow_files
+    assert [path.read_bytes() for path in result.paths] == [
+        f"video-{number}".encode() for number in range(1, 7)
+    ]
+
+
+def test_sanitized_vendor_recovery_archive_exact_five_identifies_gap(
+    monkeypatch,
+    tmp_path,
+):
+    flow_archive = _flow_archive_module()
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    snapshot = paths.flow_snapshots_dir / "partial-0.zip"
+    _write_archive(snapshot, _sanitized_vendor_members((1, 2, 3, 5, 6)))
+    _accept_video(monkeypatch, flow_archive)
+
+    result = flow_archive.inspect_recovery_flow_archive(
+        snapshot,
+        paths,
+        min_size_bytes=1,
+        expected_width=1080,
+        expected_height=1920,
+    )
+
+    assert result.missing_index == 4
+    assert result.semantic_numbers == (1, 2, 3, 5, 6)
+    assert [path.read_bytes() for path in result.staged_files] == [
+        b"video-1",
+        b"video-2",
+        b"video-3",
+        b"video-5",
+        b"video-6",
+    ]
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        [
+            *_sanitized_vendor_members(),
+            ("Sacred_Basil_CLIP_1_202609030326.mp4", b"duplicate"),
+        ],
+        [
+            *_sanitized_vendor_members(range(1, 6)),
+            ("Holy_Basil_CLIP_7_202609030325.mp4", b"out-of-range"),
+        ],
+        [
+            (
+                "Holy_Basil_CLIP_1_CLIP_2_202609030325.mp4",
+                b"ambiguous",
+            ),
+            *_sanitized_vendor_members(range(2, 7)),
+        ],
+        [*_sanitized_vendor_members(), ("README.txt", b"unexpected")],
+        _sanitized_vendor_members(range(1, 6)),
+    ],
+    ids=[
+        "duplicate-index",
+        "out-of-range-index",
+        "multiple-clip-numbers",
+        "unexpected-non-video",
+        "missing-clip",
+    ],
+)
+def test_sanitized_vendor_archive_remains_fail_closed(
+    monkeypatch,
+    tmp_path,
+    members,
+):
+    flow_archive = _flow_archive_module()
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    _write_archive(paths.flow_archive_file, members)
+    _accept_video(monkeypatch, flow_archive)
+
+    with pytest.raises(FlowArchiveValidationError):
+        flow_archive.materialize_flow_archive(
+            paths.flow_archive_file,
+            paths,
+            min_size_bytes=1,
+            expected_width=1080,
+            expected_height=1920,
+        )
 
 
 def test_vendor_export_name_with_unicode_em_dash_is_accepted(monkeypatch, tmp_path):

@@ -22,6 +22,14 @@ from app.services.cloud_agent.storage import CloudJobStorage, JobPaths
 
 _SEMANTIC_CLIP_RE = re.compile(r"^clip\s+([1-6])\.mp4$", re.IGNORECASE)
 _VENDOR_SEMANTIC_CLIP_RE = re.compile(r"^clip_([1-6])_.+\.mp4$", re.IGNORECASE)
+_SANITIZED_VENDOR_SEMANTIC_CLIP_RE = re.compile(
+    r"^(?:[^\W_]+_)+clip_([1-6])_[0-9]{12}\.mp4$",
+    re.IGNORECASE,
+)
+_VENDOR_CLIP_TOKEN_RE = re.compile(
+    r"(?:^|_)clip_([0-9]+)(?=_)",
+    re.IGNORECASE,
+)
 
 
 class FlowArtifactRecovery(NamedTuple):
@@ -93,10 +101,23 @@ def _collect_semantic_members(archive: ZipFile) -> dict[int, ZipInfo]:
 
         basename = unicodedata.normalize("NFKC", PurePosixPath(member.filename).name)
         if Path(basename).suffix.lower() != ".mp4":
-            continue
+            raise FlowArchiveValidationError(
+                "unexpected non-video Flow archive entry"
+            )
         match = _SEMANTIC_CLIP_RE.fullmatch(basename)
         if match is None:
+            vendor_tokens = _VENDOR_CLIP_TOKEN_RE.findall(basename)
+            if len(vendor_tokens) != 1:
+                raise FlowArchiveValidationError(
+                    "ambiguous or unexpected Flow video entry"
+                )
             match = _VENDOR_SEMANTIC_CLIP_RE.fullmatch(basename)
+            if match is None:
+                match = _SANITIZED_VENDOR_SEMANTIC_CLIP_RE.fullmatch(
+                    basename
+                )
+            if match is not None and int(vendor_tokens[0]) != int(match.group(1)):
+                match = None
         if match is None:
             raise FlowArchiveValidationError("ambiguous or unexpected Flow video entry")
         number = int(match.group(1))
