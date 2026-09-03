@@ -215,6 +215,7 @@ def test_invalid_final_message_raises_research_response_invalid():
         adapter.complete(_provider_request())
 
     assert captured.value.code == "RESEARCH_RESPONSE_INVALID"
+    assert captured.value.retryable is True
 
 
 @pytest.mark.parametrize(
@@ -314,6 +315,7 @@ def test_timeout_and_auth_failures_are_classified_without_leaking_secrets():
         timeout_adapter.complete(_provider_request())
 
     assert timeout_error.value.code == "PROVIDER_TIMEOUT"
+    assert timeout_error.value.retryable is True
 
     auth_error = openai.AuthenticationError(
         "key=secret raw-response",
@@ -327,8 +329,27 @@ def test_timeout_and_auth_failures_are_classified_without_leaking_secrets():
         auth_adapter.complete(_provider_request(api_key=SecretStr("secret")))
 
     assert auth_captured.value.code == "PROVIDER_AUTHENTICATION_FAILED"
+    assert auth_captured.value.retryable is False
     assert "secret" not in str(auth_captured.value)
     assert "raw-response" not in str(auth_captured.value)
+
+
+def test_bad_request_failure_is_not_retryable():
+    from app.services.cloud_agent.research.adapters import OpenRouterToolCallingAdapter
+
+    bad_request = openai.BadRequestError(
+        "request was rejected",
+        response=httpx.Response(400, request=httpx.Request("POST", "https://example.com")),
+        body={"message": "request was rejected"},
+    )
+    client = _FakeClient(completion_error=bad_request)
+    adapter = OpenRouterToolCallingAdapter(client_factory=_RecordingFactory(client))
+
+    with pytest.raises(ResearchError) as captured:
+        adapter.complete(_provider_request())
+
+    assert captured.value.code == "RESEARCH_RESPONSE_INVALID"
+    assert captured.value.retryable is False
 
 
 def test_non_finite_provider_usage_and_cost_are_ignored_safely():

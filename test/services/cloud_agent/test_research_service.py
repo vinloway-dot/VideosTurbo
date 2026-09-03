@@ -351,8 +351,16 @@ def test_generation_retries_twice_then_returns_the_successful_draft(
 ):
     responses = iter(
         [
-            ResearchError("PROVIDER_TIMEOUT", "first attempt timed out"),
-            ResearchError("RESEARCH_RESPONSE_INVALID", "second attempt was malformed"),
+            ResearchError(
+                "PROVIDER_TIMEOUT",
+                "first attempt timed out",
+                retryable=True,
+            ),
+            ResearchError(
+                "RESEARCH_RESPONSE_INVALID",
+                "second attempt was malformed",
+                retryable=True,
+            ),
             ProviderResult(
                 tool_calls=(
                     RequestedToolCall(
@@ -398,7 +406,11 @@ def test_generation_stops_after_three_retryable_failures(
 ):
     def fail(request):
         adapter.calls.append(request)
-        raise ResearchError("PROVIDER_TIMEOUT", "provider timed out")
+        raise ResearchError(
+            "PROVIDER_TIMEOUT",
+            "provider timed out",
+            retryable=True,
+        )
 
     monkeypatch.setattr(adapter, "complete", fail)
 
@@ -421,7 +433,11 @@ def test_generation_retries_provider_capability_timeout(
         nonlocal attempts
         attempts += 1
         if attempts < 3:
-            raise ResearchError("PROVIDER_TIMEOUT", "capability lookup timed out")
+            raise ResearchError(
+                "PROVIDER_TIMEOUT",
+                "capability lookup timed out",
+                retryable=True,
+            )
         return resolve_capability(model_id, api_key)
 
     monkeypatch.setattr(adapter, "resolve_capability", resolve)
@@ -430,6 +446,37 @@ def test_generation_retries_provider_capability_timeout(
 
     assert result.script == "Narration from research."
     assert attempts == 3
+
+
+def test_generation_retries_missing_final_payload_then_succeeds(
+    service,
+    adapter,
+):
+    adapter.rounds = [
+        ProviderResult(),
+        ProviderResult(),
+        ProviderResult(
+            tool_calls=(
+                RequestedToolCall(
+                    "call-1",
+                    "fetch_url",
+                    {"url": "https://example.com/article"},
+                ),
+            ),
+            usage={"prompt_tokens": 10, "completion_tokens": 2},
+            cost=0.001,
+        ),
+        ProviderResult(
+            final_payload=_final_payload(),
+            usage={"prompt_tokens": 20, "completion_tokens": 4},
+            cost=0.002,
+        ),
+    ]
+
+    result = service.create_draft(request_with_one_url())
+
+    assert result.script == "Narration from research."
+    assert len(adapter.calls) == 4
 
 
 def test_generation_does_not_retry_permanent_provider_failure(
@@ -636,6 +683,7 @@ def test_multi_tool_batch_emits_each_evidence_block_once(service, adapter, runti
 
 def test_evidence_claim_quote_must_exist_in_successful_source(service, adapter):
     adapter.queue_final(evidence_quote="invented words")
+    adapter.rounds *= 3
 
     with pytest.raises(ResearchError) as captured:
         service.create_draft(request_with_one_url())
@@ -645,6 +693,7 @@ def test_evidence_claim_quote_must_exist_in_successful_source(service, adapter):
 
 def test_model_only_final_is_rejected_even_after_source_read(service, adapter):
     adapter.queue_final(source_ids_used=[], evidence_claims=[])
+    adapter.rounds *= 3
 
     with pytest.raises(ResearchError) as captured:
         service.create_draft(request_with_one_url())
@@ -713,6 +762,7 @@ def test_citation_narration_requires_toggle_even_when_prompt_requests_it(
     service, adapter, script
 ):
     adapter.queue_final(script=script)
+    adapter.rounds *= 3
     request = request_with_one_url().model_copy(
         update={"custom_system_prompt": "Include citations and URLs."}
     )
@@ -855,6 +905,7 @@ def test_later_recoverable_failure_batch_continues_with_prior_source(
 
 def test_errors_do_not_persist_research_draft(service, adapter, store):
     adapter.queue_final(evidence_quote="invented words")
+    adapter.rounds *= 3
 
     with pytest.raises(ResearchError):
         service.create_draft(request_with_one_url())

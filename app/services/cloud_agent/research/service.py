@@ -153,9 +153,6 @@ class ResearchScriptService:
     MAX_TOOL_EXECUTIONS = 3
     MAX_PROVIDER_ROUNDS = 3
     MAX_GENERATION_ATTEMPTS = 3
-    RETRYABLE_PROVIDER_ERROR_CODES = frozenset(
-        {"PROVIDER_TIMEOUT", "RESEARCH_RESPONSE_INVALID"}
-    )
     CONTEXT_PROTOCOL_RESERVE_TOKENS = 2048
     OUTPUT_RESERVE_TOKENS = 2048
 
@@ -187,15 +184,10 @@ class ResearchScriptService:
 
         for attempt_number in range(1, self.MAX_GENERATION_ATTEMPTS + 1):
             try:
-                try:
-                    capability = adapter.resolve_capability(
-                        generation.model_id,
-                        generation.api_key,
-                    )
-                except ResearchError as exc:
-                    if exc.code in self.RETRYABLE_PROVIDER_ERROR_CODES:
-                        exc._retryable_generation = True
-                    raise
+                capability = adapter.resolve_capability(
+                    generation.model_id,
+                    generation.api_key,
+                )
                 if not capability.supports_tools:
                     raise ResearchError(
                         "PROVIDER_TOOL_CALLING_UNSUPPORTED",
@@ -211,7 +203,7 @@ class ResearchScriptService:
             except ResearchError as exc:
                 if (
                     attempt_number >= self.MAX_GENERATION_ATTEMPTS
-                    or not getattr(exc, "_retryable_generation", False)
+                    or not exc.retryable
                 ):
                     raise
 
@@ -246,12 +238,7 @@ class ResearchScriptService:
                     state.accounting,
                 )
                 state.accounting.provider_rounds += 1
-                try:
-                    result = adapter.complete(provider_request)
-                except ResearchError as exc:
-                    if exc.code in self.RETRYABLE_PROVIDER_ERROR_CODES:
-                        exc._retryable_generation = True
-                    raise
+                result = adapter.complete(provider_request)
                 self._account_provider_result(state.accounting, result)
 
                 if result.tool_calls:
@@ -263,13 +250,22 @@ class ResearchScriptService:
                     raise ResearchError(
                         "RESEARCH_RESPONSE_INVALID",
                         "missing final payload",
+                        retryable=True,
                     )
-                return self._persist_valid_final(
-                    result.final_payload,
-                    state,
-                    request,
-                    generation,
-                )
+                try:
+                    return self._persist_valid_final(
+                        result.final_payload,
+                        state,
+                        request,
+                        generation,
+                    )
+                except ResearchError as exc:
+                    if exc.code in {
+                        "RESEARCH_RESPONSE_INVALID",
+                        "SOURCE_EVIDENCE_EMPTY",
+                    }:
+                        exc.retryable = True
+                    raise
 
             raise ResearchError(
                 "PROVIDER_ROUND_LIMIT_EXCEEDED",

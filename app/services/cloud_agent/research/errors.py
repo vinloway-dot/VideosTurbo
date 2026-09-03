@@ -66,6 +66,7 @@ class ResearchError(RuntimeError):
         detail: str = "",
         *,
         accounting: "ResearchUsageAccounting | None" = None,
+        retryable: bool = False,
     ) -> None:
         normalized_code = str(code or "").strip()
         if normalized_code not in RESEARCH_ERROR_CODES:
@@ -73,4 +74,5 @@ class ResearchError(RuntimeError):
         self.code = normalized_code
         self.detail = str(detail or "").strip()
         self.accounting = accounting
+        self.retryable = bool(retryable)
         super().__init__(public_research_message(self.code))
