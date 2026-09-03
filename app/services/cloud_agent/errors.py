@@ -9,6 +9,10 @@ class FlowWorkspaceVerificationError(MediaValidationError):
     """Raised when the shared Flow workspace state cannot be proven safe."""
 
 
+class FlowBrowserClosedError(FlowWorkspaceVerificationError):
+    """Raised when Chrome closes while a safely repeatable Flow action is running."""
+
+
 class FlowGenerationTimeoutError(FlowWorkspaceVerificationError):
     """Raised when a paid Flow batch needs archive reconciliation after timeout."""
 
@@ -24,8 +28,7 @@ class FlowBatchIncompleteError(MediaValidationError):
         self.completed_count = int(completed_count)
         self.failed_count = int(failed_count)
         super().__init__(
-            "Google Flow batch ended with "
-            f"{self.completed_count} completed and {self.failed_count} failed clips"
+            f"Google Flow batch ended with {self.completed_count} completed and {self.failed_count} failed clips"
         )
 
 

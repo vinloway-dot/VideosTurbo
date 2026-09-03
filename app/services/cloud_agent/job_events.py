@@ -93,11 +93,13 @@ class EventPublishingCloudJobStore(CloudJobStore):
         *,
         delay_seconds: float,
         worker_id: str,
+        enter_inventory_recovery: bool = False,
     ) -> CloudJobRecord | None:
         after = super().reserve_flow_workspace_retry(
             job_id,
             delay_seconds=delay_seconds,
             worker_id=worker_id,
+            enter_inventory_recovery=enter_inventory_recovery,
         )
         if after is not None:
             self.publish_snapshot(after, event_type=CloudJobEventType.JOB_UPDATED)

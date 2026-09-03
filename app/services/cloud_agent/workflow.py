@@ -16,6 +16,7 @@ from app.models.cloud_agent import (
 from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
     FlowBatchIncompleteError,
+    FlowBrowserClosedError,
     FlowGenerationTimeoutError,
     FlowWorkspaceVerificationError,
     HumanRequiredError,
@@ -32,7 +33,11 @@ from app.services.cloud_agent.flow_archive import (
     validate_flow_source_video,
 )
 from app.services.cloud_agent.job_store import CloudJobStore
-from app.services.cloud_agent.media_probe import MediaProbe, validate_audio, validate_video
+from app.services.cloud_agent.media_probe import (
+    MediaProbe,
+    validate_audio,
+    validate_video,
+)
 from app.services.cloud_agent.providers.canva import (
     CanvaDownloadVerificationError,
     CanvaUIVerificationError,
@@ -80,9 +85,7 @@ class FlowWorkspace(Protocol):
 
     def capture_partial_inventory(self, paths: JobPaths, *, attempt: int): ...
 
-    def prepare_targeted_replacement(
-        self, prompt: str, *, missing_index: int
-    ): ...
+    def prepare_targeted_replacement(self, prompt: str, *, missing_index: int): ...
 
     def submit_targeted_replacement(
         self, prompt: str, *, missing_index: int
@@ -112,7 +115,9 @@ class CanvaClient(Protocol):
 
     def clean_workspace(self, job_id: str) -> None: ...
 
-    def open_job_session(self, job: CloudJobRecord) -> ContextManager["CanvaClient"]: ...
+    def open_job_session(
+        self, job: CloudJobRecord
+    ) -> ContextManager["CanvaClient"]: ...
 
 
 _CHECKPOINT_RANK = {
@@ -216,7 +221,9 @@ class CloudAgentWorkflow:
             target_final_duration_seconds=timing.target_final_duration_seconds,
         )
 
-    def _validate_audio_checkpoint(self, job: CloudJobRecord, paths: JobPaths) -> CloudJobRecord:
+    def _validate_audio_checkpoint(
+        self, job: CloudJobRecord, paths: JobPaths
+    ) -> CloudJobRecord:
         checkpoint = job.checkpoint
         if not paths.voice_file.is_file():
             raise MediaValidationError(
@@ -233,7 +240,9 @@ class CloudAgentWorkflow:
             ) from exc
         return self._timing_from_probe(job.id, probe)
 
-    def _validate_flow_checkpoint(self, checkpoint: CloudJobCheckpoint, paths: JobPaths) -> None:
+    def _validate_flow_checkpoint(
+        self, checkpoint: CloudJobCheckpoint, paths: JobPaths
+    ) -> None:
         missing = [path for path in paths.flow_files if not path.is_file()]
         if missing:
             raise MediaValidationError(
@@ -269,7 +278,9 @@ class CloudAgentWorkflow:
                 f"checkpoint {checkpoint.value} has invalid final artifact: {exc}"
             ) from exc
 
-    def _validate_checkpoint_artifacts(self, job: CloudJobRecord, paths: JobPaths) -> None:
+    def _validate_checkpoint_artifacts(
+        self, job: CloudJobRecord, paths: JobPaths
+    ) -> None:
         checkpoint = job.checkpoint
         if self._at_least(checkpoint, CloudJobCheckpoint.TTS_READY):
             job = self._validate_audio_checkpoint(job, paths)
@@ -301,6 +312,58 @@ class CloudAgentWorkflow:
         ).total_seconds()
         if remaining > 0:
             self.flow_workspace_retry_sleeper(remaining)
+
+    def _reserve_flow_workspace_reopen(
+        self,
+        current: CloudJobRecord,
+        *,
+        worker_id: str,
+        error: FlowWorkspaceVerificationError,
+        enter_inventory_recovery: bool = False,
+    ) -> CloudJobRecord:
+        if (
+            current.checkpoint is not CloudJobCheckpoint.TTS_READY
+            or current.flow_workspace_retry_attempts
+            >= len(_FLOW_WORKSPACE_RETRY_DELAYS_SECONDS)
+        ):
+            if enter_inventory_recovery and current.flow_generation_unresolved:
+                self.store.patch_job(
+                    current.id,
+                    flow_generation_unresolved=False,
+                    flow_recovery_state=FlowRecoveryState.INVENTORY_PENDING,
+                )
+            raise error
+        next_attempt = current.flow_workspace_retry_attempts + 1
+        delay = _FLOW_WORKSPACE_RETRY_DELAYS_SECONDS[next_attempt - 1]
+        reserved = self.store.reserve_flow_workspace_retry(
+            current.id,
+            delay_seconds=delay,
+            worker_id=worker_id,
+            enter_inventory_recovery=enter_inventory_recovery,
+        )
+        if reserved is None:
+            latest = self._get_job(current.id)
+            if latest.worker_id != worker_id or latest.status in {
+                CloudJobStatus.COMPLETED,
+                CloudJobStatus.HUMAN_REQUIRED,
+                CloudJobStatus.FAILED,
+                CloudJobStatus.CANCELLED,
+                CloudJobStatus.PAUSED,
+            }:
+                return latest
+            raise error
+        attempt = reserved.flow_workspace_retry_attempts
+        self._report(reserved.id, f"flow.workspace.retry.{attempt}")
+        logger.warning(
+            "Flow workspace unavailable for cloud job {}; "
+            "reopening automatically attempt {}/{} after {} seconds",
+            reserved.id,
+            attempt,
+            len(_FLOW_WORKSPACE_RETRY_DELAYS_SECONDS),
+            delay,
+        )
+        self.flow_workspace_retry_sleeper(delay)
+        return reserved
 
     def _resolve_flow_workspace_output(
         self,
@@ -427,7 +490,10 @@ class CloudAgentWorkflow:
 
     def run(self, job_id: str, *, worker_id: str) -> CloudJobRecord:
         job = self._get_job(job_id)
-        if job.status is CloudJobStatus.COMPLETED or job.checkpoint is CloudJobCheckpoint.COMPLETED:
+        if (
+            job.status is CloudJobStatus.COMPLETED
+            or job.checkpoint is CloudJobCheckpoint.COMPLETED
+        ):
             return job
 
         stopped = self._control_boundary(job.id)
@@ -484,7 +550,9 @@ class CloudAgentWorkflow:
                     )
                     self.tts.generate(job, paths.voice_file)
                     if not paths.voice_file.is_file():
-                        raise MediaValidationError("TTS step did not produce the canonical audio artifact")
+                        raise MediaValidationError(
+                            "TTS step did not produce the canonical audio artifact"
+                        )
                 probe = validate_audio(
                     paths.voice_file,
                     min_duration=self.tts_min_duration,
@@ -559,39 +627,52 @@ class CloudAgentWorkflow:
                                 workspace,
                             )
                         break
-                    except FlowWorkspaceVerificationError:
+                    except FlowBrowserClosedError as exc:
+                        current = self._get_job(job.id)
+                        job = self._reserve_flow_workspace_reopen(
+                            current,
+                            worker_id=worker_id,
+                            error=exc,
+                            enter_inventory_recovery=True,
+                        )
+                        if job.worker_id != worker_id or job.status in {
+                            CloudJobStatus.COMPLETED,
+                            CloudJobStatus.HUMAN_REQUIRED,
+                            CloudJobStatus.FAILED,
+                            CloudJobStatus.CANCELLED,
+                            CloudJobStatus.PAUSED,
+                        }:
+                            return job
+                        stopped = self._control_boundary(job.id)
+                        if stopped is not None:
+                            return stopped
+                        job = self._get_job(job.id)
+                    except FlowWorkspaceVerificationError as exc:
                         current = self._get_job(job.id)
                         safe_to_reopen = (
                             current.checkpoint is CloudJobCheckpoint.TTS_READY
                             and not current.flow_generation_unresolved
-                            and current.flow_recovery_state is FlowRecoveryState.NONE
+                            and current.flow_recovery_state
+                            in {
+                                FlowRecoveryState.NONE,
+                                FlowRecoveryState.INVENTORY_PENDING,
+                            }
                         )
-                        if (
-                            not safe_to_reopen
-                            or current.flow_workspace_retry_attempts
-                            >= len(_FLOW_WORKSPACE_RETRY_DELAYS_SECONDS)
-                        ):
+                        if not safe_to_reopen:
                             raise
-                        next_attempt = current.flow_workspace_retry_attempts + 1
-                        delay = _FLOW_WORKSPACE_RETRY_DELAYS_SECONDS[next_attempt - 1]
-                        job = self.store.reserve_flow_workspace_retry(
-                            job.id,
-                            delay_seconds=delay,
+                        job = self._reserve_flow_workspace_reopen(
+                            current,
                             worker_id=worker_id,
+                            error=exc,
                         )
-                        if job is None:
-                            return self._get_job(current.id)
-                        attempt = job.flow_workspace_retry_attempts
-                        self._report(job.id, f"flow.workspace.retry.{attempt}")
-                        logger.warning(
-                            "Flow workspace unavailable for cloud job {}; "
-                            "reopening automatically attempt {}/{} after {} seconds",
-                            job.id,
-                            attempt,
-                            len(_FLOW_WORKSPACE_RETRY_DELAYS_SECONDS),
-                            delay,
-                        )
-                        self.flow_workspace_retry_sleeper(delay)
+                        if job.worker_id != worker_id or job.status in {
+                            CloudJobStatus.COMPLETED,
+                            CloudJobStatus.HUMAN_REQUIRED,
+                            CloudJobStatus.FAILED,
+                            CloudJobStatus.CANCELLED,
+                            CloudJobStatus.PAUSED,
+                        }:
+                            return job
                         stopped = self._control_boundary(job.id)
                         if stopped is not None:
                             return stopped
@@ -634,7 +715,9 @@ class CloudAgentWorkflow:
                         ),
                     )
                     if not paths.final_file.is_file():
-                        raise MediaValidationError("Canva step did not produce the canonical final artifact")
+                        raise MediaValidationError(
+                            "Canva step did not produce the canonical final artifact"
+                        )
                     self.store.patch_job(
                         job.id,
                         status=CloudJobStatus.VALIDATING,

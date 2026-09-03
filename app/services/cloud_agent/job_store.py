@@ -233,9 +233,7 @@ class CloudJobStore:
             stage_started_at=row["stage_started_at"],
             flow_recovery_attempts=row["flow_recovery_attempts"],
             flow_workspace_retry_attempts=row["flow_workspace_retry_attempts"],
-            flow_workspace_retry_not_before=row[
-                "flow_workspace_retry_not_before"
-            ],
+            flow_workspace_retry_not_before=row["flow_workspace_retry_not_before"],
             flow_missing_clip_index=row["flow_missing_clip_index"],
             flow_recovery_state=FlowRecoveryState(row["flow_recovery_state"]),
             flow_recovery_baseline=row["flow_recovery_baseline"],
@@ -595,7 +593,10 @@ class CloudJobStore:
             ).fetchone()
             if row is None:
                 raise KeyError(job_id)
-            if CloudJobCheckpoint(row["checkpoint"]) is not CloudJobCheckpoint.FLOW_READY:
+            if (
+                CloudJobCheckpoint(row["checkpoint"])
+                is not CloudJobCheckpoint.FLOW_READY
+            ):
                 raise ValueError("Canva restart requires FLOW_READY checkpoint")
             if row["canva_restart_attempts"] >= 4:
                 raise RecoveryBudgetExhausted("Canva restart budget exhausted")
@@ -626,8 +627,9 @@ class CloudJobStore:
         *,
         delay_seconds: float,
         worker_id: str,
+        enter_inventory_recovery: bool = False,
     ) -> CloudJobRecord | None:
-        """Reserve one safe pre-generation Flow workspace reopen."""
+        """Reserve one bounded Flow reopen, optionally fencing downloaded inventory."""
         delay = float(delay_seconds)
         if delay <= 0:
             raise ValueError("Flow workspace retry delay must be positive")
@@ -642,34 +644,48 @@ class CloudJobStore:
             now = _utc_now()
             status = CloudJobStatus(row["status"])
             active_step = row["current_step"]
-            safe_active_state = (
+            recovery_state = FlowRecoveryState(row["flow_recovery_state"])
+            unresolved = bool(row["flow_generation_unresolved"])
+            safe_ready_state = (
                 status is CloudJobStatus.TTS_READY
                 and active_step in {"tts_ready", "flow_workspace_retry_opening"}
-            ) or (
-                status is CloudJobStatus.QUEUED
-                and active_step == "queued"
+            ) or (status is CloudJobStatus.QUEUED and active_step == "queued")
+            safe_inventory_state = (
+                status is CloudJobStatus.FLOW_GENERATING
+                and active_step in {"flow_generating", "flow_reconciling"}
+                and (
+                    (
+                        recovery_state is FlowRecoveryState.INVENTORY_PENDING
+                        and not unresolved
+                    )
+                    or (
+                        enter_inventory_recovery
+                        and recovery_state
+                        in {
+                            FlowRecoveryState.NONE,
+                            FlowRecoveryState.INVENTORY_PENDING,
+                        }
+                    )
+                )
             )
             eligible = (
-                CloudJobCheckpoint(row["checkpoint"])
-                is CloudJobCheckpoint.TTS_READY
-                and safe_active_state
+                CloudJobCheckpoint(row["checkpoint"]) is CloudJobCheckpoint.TTS_READY
+                and (safe_ready_state or safe_inventory_state)
                 and CloudControlRequest(row["control_request"])
                 is CloudControlRequest.NONE
                 and row["worker_id"] == worker_id
                 and bool(row["worker_id"])
                 and bool(row["lease_until"])
                 and row["lease_until"] > now
-                and not bool(row["flow_generation_unresolved"])
-                and FlowRecoveryState(row["flow_recovery_state"])
-                is FlowRecoveryState.NONE
+                and (not unresolved or enter_inventory_recovery)
+                and recovery_state
+                in {FlowRecoveryState.NONE, FlowRecoveryState.INVENTORY_PENDING}
             )
             if not eligible:
                 connection.commit()
                 return None
             if row["flow_workspace_retry_attempts"] >= 2:
-                raise RecoveryBudgetExhausted(
-                    "Flow workspace retry budget exhausted"
-                )
+                raise RecoveryBudgetExhausted("Flow workspace retry budget exhausted")
             not_before = (
                 datetime.now(timezone.utc) + timedelta(seconds=delay)
             ).isoformat(timespec="microseconds")
@@ -679,6 +695,7 @@ class CloudJobStore:
                 SET flow_workspace_retry_attempts = flow_workspace_retry_attempts + 1,
                     flow_workspace_retry_not_before = ?,
                     status = ?, current_step = ?, progress = 30,
+                    flow_generation_unresolved = ?, flow_recovery_state = ?,
                     error_code = '', error_message = '', updated_at = ?
                 WHERE id = ?
                 """,
@@ -686,6 +703,12 @@ class CloudJobStore:
                     not_before,
                     CloudJobStatus.TTS_READY.value,
                     "flow_workspace_retrying",
+                    0 if enter_inventory_recovery else int(unresolved),
+                    (
+                        FlowRecoveryState.INVENTORY_PENDING.value
+                        if enter_inventory_recovery
+                        else recovery_state.value
+                    ),
                     now,
                     job_id,
                 ),
@@ -959,7 +982,9 @@ class CloudJobStore:
             )
         return result.rowcount == 1
 
-    def update_worker_heartbeat(self, worker_id: str, *, now: str | None = None) -> None:
+    def update_worker_heartbeat(
+        self, worker_id: str, *, now: str | None = None
+    ) -> None:
         last_seen = now or _utc_now()
         with self._connect() as connection:
             connection.execute(

@@ -67,7 +67,9 @@ class CloudAgentWorker:
             else lease_seconds / 3.0
         )
         if renew_interval <= 0 or renew_interval >= lease_seconds:
-            raise ValueError("lease renewal interval must be positive and shorter than lease")
+            raise ValueError(
+                "lease renewal interval must be positive and shorter than lease"
+            )
 
         self.store = store
         self.workflow = workflow
@@ -121,19 +123,15 @@ class CloudAgentWorker:
 
     @staticmethod
     def _is_canva_active(job: CloudJobRecord) -> bool:
-        return (
-            job.checkpoint is CloudJobCheckpoint.FLOW_READY
-            and job.status
-            in {
-                CloudJobStatus.FLOW_READY,
-                CloudJobStatus.CANVA_UPLOADING,
-                CloudJobStatus.CANVA_EDITING,
-                CloudJobStatus.CAPTIONING,
-                CloudJobStatus.EXPORTING,
-                CloudJobStatus.DOWNLOADING_FINAL,
-                CloudJobStatus.VALIDATING,
-            }
-        )
+        return job.checkpoint is CloudJobCheckpoint.FLOW_READY and job.status in {
+            CloudJobStatus.FLOW_READY,
+            CloudJobStatus.CANVA_UPLOADING,
+            CloudJobStatus.CANVA_EDITING,
+            CloudJobStatus.CAPTIONING,
+            CloudJobStatus.EXPORTING,
+            CloudJobStatus.DOWNLOADING_FINAL,
+            CloudJobStatus.VALIDATING,
+        }
 
     def _record_runtime_error(self, job_id: str, exc: Exception) -> None:
         if self.store.get_job(job_id) is None:
@@ -162,7 +160,8 @@ class CloudAgentWorker:
     def _delete_terminal_job(self, job: CloudJobRecord, *, reason: str) -> None:
         stage = (
             "canva"
-            if job.checkpoint in {
+            if job.checkpoint
+            in {
                 CloudJobCheckpoint.FLOW_READY,
                 CloudJobCheckpoint.FINAL_VALIDATED,
             }
@@ -203,7 +202,8 @@ class CloudAgentWorker:
             and persisted.current_step == "flow_workspace_retrying"
             and 0 < persisted.flow_workspace_retry_attempts <= 2
             and not persisted.flow_generation_unresolved
-            and persisted.flow_recovery_state is FlowRecoveryState.NONE
+            and persisted.flow_recovery_state
+            in {FlowRecoveryState.NONE, FlowRecoveryState.INVENTORY_PENDING}
         )
         if exit_code not in (0, None) and safe_reserved_flow_retry:
             return
@@ -276,9 +276,7 @@ class CloudAgentWorker:
                 canva_reference = max(
                     item for item in (last_progress, canva_started) if item is not None
                 )
-                if now >= canva_reference + timedelta(
-                    seconds=self.canva_stall_seconds
-                ):
+                if now >= canva_reference + timedelta(seconds=self.canva_stall_seconds):
                     if not self._stop_child(job.id, child):
                         return
                     try:
