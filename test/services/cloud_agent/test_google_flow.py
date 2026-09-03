@@ -899,9 +899,7 @@ class FakePage:
         self._content_index = 0
 
     def reload(self, **kwargs):
-        self.reload_calls.append(
-            {key: value for key, value in kwargs.items() if key != "timeout"}
-        )
+        self.reload_calls.append(kwargs)
         if self.reload_progress_html:
             self.progress_html = self.reload_progress_html.pop(0)
             self._content_index = 0
@@ -1259,7 +1257,15 @@ def _client(
     if settled_poll_count is not None:
         kwargs["settled_poll_count"] = settled_poll_count
     client = client_cls(FakeBrowserManager(page), sessions, **kwargs)
+    page.url = client.service_url
     return client, sessions
+
+
+def _navigation_options(client):
+    return {
+        "wait_until": "domcontentloaded",
+        "timeout": max(1, int(client.editor_ready_timeout_seconds * 1000)),
+    }
 
 
 def test_google_flow_popup_guard_dismisses_safe_announcement_before_editor_check():
@@ -1319,13 +1325,181 @@ def test_google_flow_workspace_context_uses_browser_configuration_and_holds_lock
     assert page.goto_calls == [
         (
             "https://labs.google/fx/tools/flow",
-            {"wait_until": "domcontentloaded"},
+            _navigation_options(client),
         ),
         (
             "https://labs.google/fx/tools/flow/project/demo",
-            {"wait_until": "domcontentloaded"},
+            _navigation_options(client),
         )
     ]
+
+
+@pytest.mark.parametrize(
+    "timed_out_target",
+    [
+        "https://labs.google/fx/tools/flow",
+        "https://labs.google/fx/tools/flow/project/demo",
+    ],
+)
+def test_google_flow_navigation_timeout_at_target_continues_to_project_verification(
+    monkeypatch,
+    timed_out_target,
+):
+    page = FakePage(progress_html=["<div>Ready</div>"])
+    client, _ = _client(page, editor_ready_timeout_seconds=5.0)
+    original_goto = page.goto
+
+    def slow_goto(url, **kwargs):
+        original_goto(url, **kwargs)
+        if url == timed_out_target:
+            raise PlaywrightTimeoutError("Timeout 5000ms exceeded")
+
+    monkeypatch.setattr(page, "goto", slow_goto)
+
+    with client.acquire_workspace(_job()) as workspace:
+        assert workspace.page is page
+
+    assert page.goto_calls == [
+        (
+            "https://labs.google/fx/tools/flow",
+            {"wait_until": "domcontentloaded", "timeout": 5_000},
+        ),
+        (
+            "https://labs.google/fx/tools/flow/project/demo",
+            {"wait_until": "domcontentloaded", "timeout": 5_000},
+        ),
+    ]
+
+
+def test_google_flow_navigation_timeout_preserves_login_classification(monkeypatch):
+    page = FakePage(progress_html=["<div>Ready</div>"], session_ready=False)
+    client, _ = _client(page, editor_ready_timeout_seconds=5.0)
+    original_goto = page.goto
+
+    def redirected_goto(url, **kwargs):
+        original_goto(url, **kwargs)
+        if url == client.service_url:
+            page.url = "https://accounts.google.com/v3/signin/identifier"
+            page.progress_html = ["<main>Sign in</main>"]
+            raise PlaywrightTimeoutError("Timeout 5000ms exceeded")
+
+    monkeypatch.setattr(page, "goto", redirected_goto)
+
+    with pytest.raises(HumanRequiredError, match="SESSION_EXPIRED"):
+        with client.acquire_workspace(_job()):
+            pass
+
+
+def test_google_flow_successful_home_redirect_preserves_login_classification(
+    monkeypatch,
+):
+    page = FakePage(progress_html=["<div>Ready</div>"], session_ready=False)
+    client, _ = _client(page, editor_ready_timeout_seconds=5.0)
+    original_goto = page.goto
+
+    def redirected_goto(url, **kwargs):
+        original_goto(url, **kwargs)
+        if url == client._flow_home_url():
+            page.url = "https://accounts.google.com/v3/signin/identifier"
+            page.progress_html = ["<main>Sign in</main>"]
+
+    monkeypatch.setattr(page, "goto", redirected_goto)
+
+    with pytest.raises(HumanRequiredError, match="SESSION_EXPIRED"):
+        with client.acquire_workspace(_job()):
+            pass
+
+
+def test_google_flow_navigation_timeout_at_target_preserves_captcha_classification(
+    monkeypatch,
+):
+    page = FakePage(
+        progress_html=["<div class='g-recaptcha'>Confirm you're not a robot</div>"],
+        session_ready=False,
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=5.0)
+    page.url = client.service_url
+
+    def slow_reload(**_kwargs):
+        raise PlaywrightTimeoutError("Timeout 5000ms exceeded")
+
+    monkeypatch.setattr(page, "reload", slow_reload)
+
+    with pytest.raises(HumanRequiredError, match="CAPTCHA_REQUIRED") as exc_info:
+        google_flow.FlowWorkspaceRun(client, page)._refresh_and_hydrate()
+
+    assert isinstance(exc_info.value.__cause__, PlaywrightTimeoutError)
+
+
+def test_google_flow_navigation_timeout_at_target_defers_transient_content_failure(
+    monkeypatch,
+):
+    page = FakePage(progress_html=["<div>Ready</div>"])
+    client, _ = _client(page, editor_ready_timeout_seconds=5.0)
+    original_reload = page.reload
+    original_content = page.content
+    content_calls = 0
+
+    def slow_reload(**kwargs):
+        original_reload(**kwargs)
+        raise PlaywrightTimeoutError("Timeout 5000ms exceeded")
+
+    def transient_content():
+        nonlocal content_calls
+        content_calls += 1
+        if content_calls == 1:
+            raise PlaywrightError("Execution context was destroyed")
+        return original_content()
+
+    monkeypatch.setattr(page, "reload", slow_reload)
+    monkeypatch.setattr(page, "content", transient_content)
+
+    google_flow.FlowWorkspaceRun(client, page)._refresh_and_hydrate()
+
+    assert content_calls >= 2
+
+
+def test_google_flow_navigation_timeout_at_unknown_redirect_fails_closed(monkeypatch):
+    page = FakePage(progress_html=["<div>Ready</div>"], session_ready=False)
+    client, _ = _client(page, editor_ready_timeout_seconds=5.0)
+    original_goto = page.goto
+
+    def redirected_goto(url, **kwargs):
+        original_goto(url, **kwargs)
+        if url == client.service_url:
+            page.url = "https://example.invalid/untrusted"
+            page.progress_html = ["<main>Unknown destination</main>"]
+            raise PlaywrightTimeoutError("Timeout 5000ms exceeded")
+
+    monkeypatch.setattr(page, "goto", redirected_goto)
+
+    with pytest.raises(
+        FlowWorkspaceVerificationError,
+        match="navigation did not reach the expected URL",
+    ) as exc_info:
+        with client.acquire_workspace(_job()):
+            pass
+
+    assert isinstance(exc_info.value.__cause__, PlaywrightTimeoutError)
+
+
+def test_google_flow_navigation_playwright_error_is_typed(monkeypatch):
+    page = FakePage(progress_html=["<main>Flow home</main>"], session_ready=False)
+    client, _ = _client(page, editor_ready_timeout_seconds=5.0)
+
+    def broken_goto(_url, **_kwargs):
+        raise PlaywrightError("Target page closed")
+
+    monkeypatch.setattr(page, "goto", broken_goto)
+
+    with pytest.raises(
+        FlowWorkspaceVerificationError,
+        match="navigation could not be verified",
+    ) as exc_info:
+        with client.acquire_workspace(_job()):
+            pass
+
+    assert isinstance(exc_info.value.__cause__, PlaywrightError)
 
 
 def test_google_flow_workspace_lock_timeout_can_differ_from_generation_timeout():
@@ -1370,7 +1544,7 @@ def test_google_flow_workspace_accepts_text_backed_agent_and_empty_media_state()
     with client.acquire_workspace(_job()) as workspace:
         workspace.preclean_and_verify_empty()
 
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert not any(action[0] == "click" for action in page.actions)
 
 
@@ -1491,9 +1665,37 @@ def test_google_flow_direct_fatal_recovers_with_one_same_page_reload():
     with client.acquire_workspace(_job()) as workspace:
         assert workspace.page is page
 
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert client.browser.open_calls == [("google_flow", None, 30.0)]
     assert page.actions == []
+
+
+def test_google_flow_direct_recovery_reload_timeout_at_project_url_continues(
+    monkeypatch,
+):
+    page = FakePage(
+        progress_html=[
+            "<main>Application error: a client-side exception has occurred</main>"
+        ],
+        reload_progress_html=[["<div>Ready</div>"]],
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=5.0)
+    original_reload = page.reload
+    reload_calls = []
+
+    def slow_reload(**kwargs):
+        reload_calls.append(kwargs)
+        original_reload(**kwargs)
+        raise PlaywrightTimeoutError("Timeout 5000ms exceeded")
+
+    monkeypatch.setattr(page, "reload", slow_reload)
+
+    with client.acquire_workspace(_job()) as workspace:
+        assert workspace.page is page
+
+    assert reload_calls == [
+        {"wait_until": "domcontentloaded", "timeout": 5_000}
+    ]
 
 
 def test_google_flow_direct_fatal_recovers_with_two_same_page_reloads():
@@ -1509,7 +1711,7 @@ def test_google_flow_direct_fatal_recovers_with_two_same_page_reloads():
     with client.acquire_workspace(_job()) as workspace:
         assert workspace.page is page
 
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}] * 2
+    assert page.reload_calls == [_navigation_options(client)] * 2
     assert client.browser.open_calls == [("google_flow", None, 30.0)]
 
 
@@ -1527,7 +1729,7 @@ def test_google_flow_persistent_direct_fatal_fails_after_two_reloads():
         with client.acquire_workspace(_job()):
             pass
 
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}] * 2
+    assert page.reload_calls == [_navigation_options(client)] * 2
     assert page.actions == []
 
 
@@ -1541,7 +1743,7 @@ def test_google_flow_reconciliation_persistent_fatal_fails_after_two_reloads():
         with client.acquire_workspace(_job(flow_generation_unresolved=True)):
             pass
 
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}] * 2
+    assert page.reload_calls == [_navigation_options(client)] * 2
     assert page.actions == []
 
 
@@ -1586,7 +1788,7 @@ def test_fenced_workspace_recovers_initial_empty_editor_with_same_page_reload():
     with client.acquire_workspace(_job(flow_generation_unresolved=True)):
         pass
 
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert ("click", "generate") not in page.actions
     assert not any(action[0] == "fill" for action in page.actions)
     assert not any(action[1] == "media_card" for action in page.actions)
@@ -1617,7 +1819,7 @@ def test_fenced_workspace_recovers_nonfatal_unclassified_project_after_reload():
     with client.acquire_workspace(_job(flow_generation_unresolved=True)):
         pass
 
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert page.actions == []
 
 
@@ -1634,7 +1836,7 @@ def test_fenced_workspace_recovers_transient_fatal_editor_with_same_page_reload(
     with client.acquire_workspace(_job(flow_generation_unresolved=True)):
         pass
 
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert page.actions == []
 
 
@@ -1661,7 +1863,7 @@ def test_fenced_workspace_recovers_after_second_same_page_reload():
     with client.acquire_workspace(_job(flow_generation_unresolved=True)):
         pass
 
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}] * 2
+    assert page.reload_calls == [_navigation_options(client)] * 2
     assert page.actions == []
 
 
@@ -1679,7 +1881,7 @@ def test_fenced_workspace_persistent_empty_fails_after_two_same_page_reloads():
         with client.acquire_workspace(_job(flow_generation_unresolved=True)):
             pass
 
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}] * 2
+    assert page.reload_calls == [_navigation_options(client)] * 2
     assert page.actions == []
 
 
@@ -1779,7 +1981,7 @@ def test_flow_workspace_stable_settled_empty_inventory_passes_generation_gate():
     with client.acquire_workspace(_job()) as workspace:
         workspace.prepare_for_generation()
 
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert ("click", "generate") not in page.actions
 
 
@@ -1806,7 +2008,7 @@ def test_flow_workspace_preclean_deletes_stale_clips_then_verifies_empty():
         ("click", "card_menu", 0),
         ("click", "card_menu_delete"),
     ]
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert page.clip_names == []
 
 
@@ -1823,7 +2025,7 @@ def test_flow_workspace_preclean_deletes_card_inventory_when_checkboxes_are_abse
 
     assert page.clip_names == []
     assert page.actions.count(("click", "card_menu_delete")) == 2
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
 
 
 def test_flow_workspace_deletes_from_the_hovered_card_overflow_menu():
@@ -1924,8 +2126,51 @@ def test_flow_workspace_preclean_refreshes_even_when_already_empty():
     with client.acquire_workspace(_job()) as workspace:
         workspace.preclean_and_verify_empty()
 
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert not any(action[0] == "click" for action in page.actions)
+
+
+def test_flow_workspace_preclean_reload_timeout_at_project_url_continues(
+    monkeypatch,
+):
+    page = FakePage(progress_html=["<div>Ready</div>"], clip_names=[])
+    client, _ = _client(page, editor_ready_timeout_seconds=5.0)
+
+    with client.acquire_workspace(_job()) as workspace:
+        original_reload = page.reload
+        reload_calls = []
+
+        def slow_reload(**kwargs):
+            reload_calls.append(kwargs)
+            original_reload(**kwargs)
+            raise PlaywrightTimeoutError("Timeout 5000ms exceeded")
+
+        monkeypatch.setattr(page, "reload", slow_reload)
+        workspace.preclean_and_verify_empty()
+
+    assert reload_calls == [
+        {"wait_until": "domcontentloaded", "timeout": 5_000}
+    ]
+
+
+def test_flow_workspace_preclean_successful_login_redirect_requires_human(
+    monkeypatch,
+):
+    page = FakePage(progress_html=["<div>Ready</div>"], clip_names=[])
+    client, _ = _client(page, editor_ready_timeout_seconds=5.0)
+
+    with client.acquire_workspace(_job()) as workspace:
+        original_reload = page.reload
+
+        def redirected_reload(**kwargs):
+            original_reload(**kwargs)
+            page.url = "https://accounts.google.com/v3/signin/identifier"
+            page.progress_html = ["<main>Sign in</main>"]
+            page.session_ready = False
+
+        monkeypatch.setattr(page, "reload", redirected_reload)
+        with pytest.raises(HumanRequiredError, match="SESSION_EXPIRED"):
+            workspace.preclean_and_verify_empty()
 
 
 def test_flow_workspace_preclean_rehydrates_after_the_post_delete_reload(
@@ -1936,11 +2181,17 @@ def test_flow_workspace_preclean_rehydrates_after_the_post_delete_reload(
     hydrate_calls = []
     original_hydrate = client._hydrate_project_workspace
 
-    def hydrate_after_reload(current_page, *, flow_generation_unresolved):
-        hydrate_calls.append((current_page, flow_generation_unresolved))
+    def hydrate_after_reload(
+        current_page,
+        *,
+        flow_generation_unresolved,
+        job_id="",
+    ):
+        hydrate_calls.append((current_page, flow_generation_unresolved, job_id))
         return original_hydrate(
             current_page,
             flow_generation_unresolved=flow_generation_unresolved,
+            job_id=job_id,
         )
 
     monkeypatch.setattr(client, "_hydrate_project_workspace", hydrate_after_reload)
@@ -1948,7 +2199,10 @@ def test_flow_workspace_preclean_rehydrates_after_the_post_delete_reload(
     with client.acquire_workspace(_job()) as workspace:
         workspace.preclean_and_verify_empty()
 
-    assert hydrate_calls == [(page, False), (page, False)]
+    assert hydrate_calls == [
+        (page, False, "job-123"),
+        (page, False, "job-123"),
+    ]
 
 
 def test_flow_workspace_preclean_confirms_observable_delete_dialog():
@@ -2196,7 +2450,7 @@ def test_flow_workspace_downloads_validated_archive_when_names_are_absent_after_
     assert page.actions.count(
         ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
     ) == 1
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert ("click", "project_menu") in page.actions
     assert ("click", "project_download") in page.actions
     assert ("click", "bulk_download") not in page.actions
@@ -2237,7 +2491,7 @@ def test_flow_workspace_reuses_existing_rename_confirmation_without_resubmitting
         action[:3] == ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
         for action in page.actions
     )
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert ("click", "project_download") in page.actions
 
 
@@ -2410,7 +2664,7 @@ def test_rename_response_reloads_once_then_requires_two_stable_semantic_observat
         )
 
     assert result == paths.flow_files
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert page.get_by_role("checkbox").count() == 0
     assert ("click", "project_download") in page.actions
 
@@ -2449,7 +2703,7 @@ def test_rename_downloads_validated_archive_when_semantic_names_stay_incomplete(
         )
 
     assert result == paths.flow_files
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert ("click", "project_menu") in page.actions
     assert ("click", "project_download") in page.actions
 
@@ -2493,7 +2747,7 @@ def test_partial_inventory_uses_validated_five_clip_archive_without_card_titles(
     )
 
     assert result is inventory
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert page.get_by_role("checkbox").count() == 0
     assert ("click", "project_download") in page.actions
 
@@ -2543,7 +2797,7 @@ def test_normal_rename_waits_full_grace_then_accepts_validated_six_archive(
 
     assert result == paths.flow_files
     assert clock[0] >= 2.0
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert page.actions.count(("click", "project_download")) == 1
 
 
@@ -2607,7 +2861,7 @@ def test_normal_rename_reload_timeout_at_project_url_hydrates_waits_grace_then_d
     assert page.actions.count(("click", "project_download")) == 1
 
 
-def test_post_rename_reload_timeout_after_redirect_fails_closed(monkeypatch):
+def test_post_rename_reload_timeout_after_login_redirect_requires_human(monkeypatch):
     page = FakePage(progress_html=["<div>Generation progress 6 / 6</div>"])
     client, _ = _client(page, editor_ready_timeout_seconds=5.0)
     page.url = client.service_url
@@ -2626,10 +2880,7 @@ def test_post_rename_reload_timeout_after_redirect_fails_closed(monkeypatch):
         lambda *_args, **_kwargs: hydrate_calls.append((_args, _kwargs)),
     )
 
-    with pytest.raises(
-        FlowWorkspaceVerificationError,
-        match="refresh did not reach the configured project URL",
-    ) as exc_info:
+    with pytest.raises(HumanRequiredError, match="SESSION_EXPIRED") as exc_info:
         google_flow.FlowWorkspaceRun(client, page)._refresh_and_hydrate()
 
     assert reload_calls == [
@@ -2762,7 +3013,7 @@ def test_partial_inventory_waits_grace_then_accepts_five_archive_with_retained_f
 
     assert result is inventory
     assert download_times and download_times[0] >= 2.0
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert ("click", "project_download") in page.actions
 
 
@@ -2797,7 +3048,7 @@ def test_partial_inventory_refresh_accepts_six_complete_semantic_names(
     )
 
     assert result is materialization
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert ("click", "project_download") in page.actions
 
 
@@ -2833,7 +3084,7 @@ def test_partial_inventory_uses_validated_archive_when_card_titles_are_hidden(
     )
 
     assert result is materialization
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert ("click", "project_download") in page.actions
 
 
@@ -2904,7 +3155,7 @@ def test_flow_workspace_uses_archive_when_only_agent_history_has_semantic_names(
         )
 
     assert result == paths.flow_files
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert ("click", "project_menu") in page.actions
     assert ("click", "project_download") in page.actions
 
@@ -2939,7 +3190,7 @@ def test_flow_workspace_rename_completes_from_semantic_names_when_send_stays_dis
     assert page.actions.count(
         ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
     ) == 1
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert ("click", "project_download") in page.actions
 
 
@@ -2971,7 +3222,7 @@ def test_flow_workspace_waits_for_agent_response_before_single_rename_refresh(
 
     assert result == paths.flow_files
     assert page.agent_response_reads >= 2
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
 
 
 def test_flow_workspace_rename_ignores_stale_submit_locator_after_click(
@@ -3043,7 +3294,7 @@ def test_flow_workspace_stale_submit_locator_falls_back_to_validated_archive(
         action[:3] == ("fill", "prompt", _job().master_prompt)
         for action in page.actions
     )
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert ("click", "project_menu") in page.actions
     assert ("click", "project_download") in page.actions
     assert ("click", "delete_selected") not in page.actions
@@ -3079,7 +3330,7 @@ def test_flow_workspace_rename_uses_archive_when_names_are_not_rendered_after_re
     assert page.actions.count(
         ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
     ) == 1
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert ("click", "project_menu") in page.actions
     assert ("click", "project_download") in page.actions
 
@@ -3125,7 +3376,7 @@ def test_flow_workspace_rename_uses_archive_when_semantic_names_stay_incomplete(
         action[:3] == ("fill", "prompt", _job().master_prompt)
         for action in page.actions
     )
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert ("click", "project_menu") in page.actions
     assert ("click", "project_download") in page.actions
     assert ("click", "delete_selected") not in page.actions
@@ -3168,7 +3419,7 @@ def test_flow_workspace_rename_recovers_hydration_in_one_context_after_reload(
     assert page.actions.count(
         ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
     ) == 1
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}] * 2
+    assert page.reload_calls == [_navigation_options(client)] * 2
 
 
 def test_flow_workspace_reconciles_completed_video_cards_without_progress_or_generate(
@@ -3342,7 +3593,7 @@ def test_flow_workspace_validates_archive_when_rendered_names_are_duplicate(
     assert page.actions.count(
         ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
     ) == 1
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
     assert materializer_calls == 1
     assert ("click", "project_menu") in page.actions
     assert ("click", "project_download") in page.actions
@@ -3698,7 +3949,7 @@ def test_flow_workspace_cleanup_reuses_delete_and_observable_empty_verification(
         cleanup()
 
     assert page.clip_names == []
-    assert page.reload_calls == [{"wait_until": "domcontentloaded"}]
+    assert page.reload_calls == [_navigation_options(client)]
 
 
 def test_flow_workspace_cleanup_raises_when_zero_state_cannot_be_verified(monkeypatch):
