@@ -429,13 +429,19 @@ def _prepared_voice_audio(fingerprint):
 
 
 def _cloud_agent_defaults_payload(
-    *, tts_provider, voice_id, voice_speed, custom_system_prompt
+    *,
+    tts_provider,
+    voice_id,
+    voice_speed,
+    custom_system_prompt,
+    create_canva_captions,
 ):
     return {
         "tts_provider": tts_provider,
         "voice_id": voice_id,
         "voice_speed": voice_speed,
         "custom_system_prompt": custom_system_prompt,
+        "create_canva_captions": bool(create_canva_captions),
     }
 
 
@@ -463,6 +469,7 @@ def _start_job(
     tts_provider,
     voice_id,
     voice_speed,
+    create_canva_captions=False,
     prepared_voice_fingerprint="",
     research_draft_id="",
 ):
@@ -476,6 +483,7 @@ def _start_job(
         "tts_provider": tts_provider,
         "voice_id": voice_id,
         "voice_speed": voice_speed,
+        "create_canva_captions": bool(create_canva_captions),
         "prepared_voice_fingerprint": prepared_voice_fingerprint,
     }
     payload.update(_research_job_fields(research_draft_id))
@@ -658,6 +666,7 @@ class _GenerationSelection:
     voice: str
     speed: float
     prepared_voice: dict | None
+    create_canva_captions: bool = False
 
 
 def _render_script_mode_control(options, default):
@@ -714,6 +723,9 @@ def _render_video_brief(
                             voice_id=defaults["voice_id"],
                             voice_speed=defaults["voice_speed"],
                             custom_system_prompt=custom_system_prompt,
+                            create_canva_captions=defaults[
+                                "create_canva_captions"
+                            ],
                         )
                     )
                     if verified:
@@ -1159,6 +1171,7 @@ def _render_advanced_settings(
                     voice_id=voice,
                     voice_speed=speed,
                     custom_system_prompt=defaults["custom_system_prompt"],
+                    create_canva_captions=defaults["create_canva_captions"],
                 )
             )
             if verified:
@@ -1179,6 +1192,9 @@ def _render_advanced_settings(
                     custom_system_prompt=str(
                         ui_state.get("cloud_agent_custom_system_prompt", "") or ""
                     ),
+                    create_canva_captions=bool(
+                        ui_state.get("cloud_agent_create_canva_captions", False)
+                    ),
                 )
             )
             if verified:
@@ -1196,6 +1212,7 @@ def _render_advanced_settings(
                 "cloud_agent_voice",
                 "cloud_agent_speed",
                 "cloud_agent_custom_system_prompt",
+                "cloud_agent_create_canva_captions",
             ):
                 ui_state.pop(key, None)
             st.rerun()
@@ -1268,6 +1285,21 @@ def _render_generation_setup(
             key="cloud_agent_speed",
             on_change=lambda: ui_state.pop("cloud_agent_defaults_feedback", None),
         )
+        checkbox = getattr(st, "checkbox", None)
+        if callable(checkbox):
+            create_canva_captions = bool(
+                checkbox(
+                    "สร้าง Caption ใน Canva",
+                    key="cloud_agent_create_canva_captions",
+                    on_change=lambda: ui_state.pop(
+                        "cloud_agent_defaults_feedback", None
+                    ),
+                )
+            )
+        else:
+            create_canva_captions = bool(
+                ui_state.get("cloud_agent_create_canva_captions", False)
+            )
         with _advanced_settings_container():
             _render_advanced_settings(
                 ui_state=ui_state,
@@ -1330,6 +1362,7 @@ def _render_generation_setup(
             voice=voice,
             speed=float(speed),
             prepared_voice=prepared_voice,
+            create_canva_captions=create_canva_captions,
         )
 
 
@@ -1512,6 +1545,7 @@ def _render_start_action(*, brief, script, master_prompt, generation, ui_state):
                         "tts_provider": provider,
                         "voice_id": voice,
                         "voice_speed": speed,
+                        "create_canva_captions": generation.create_canva_captions,
                         "research_draft_id": draft["research_draft_id"],
                         "prepared_voice_fingerprint": (
                             str(prepared_voice.get("fingerprint") or "")
@@ -1550,6 +1584,7 @@ def render_cloud_agent_panel():
         "voice_id": "",
         "voice_speed": 1.0,
         "custom_system_prompt": "",
+        "create_canva_captions": False,
     }
     if hasattr(st, "runtime"):
         try:
@@ -1577,6 +1612,10 @@ def render_cloud_agent_panel():
     ui_state.setdefault("cloud_agent_speed", defaults["voice_speed"])
     ui_state.setdefault(
         "cloud_agent_custom_system_prompt", defaults["custom_system_prompt"]
+    )
+    ui_state.setdefault(
+        "cloud_agent_create_canva_captions",
+        bool(defaults["create_canva_captions"]),
     )
     ui_state.setdefault("cloud_agent_script_mode", "Standard Script")
     prepared_voice = ui_state.get("cloud_agent_prepared_voice")

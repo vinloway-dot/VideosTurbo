@@ -78,6 +78,7 @@ class CloudJobCreate(BaseModel):
     tts_provider: str
     voice_id: str
     voice_speed: float = Field(default=1.0, gt=0)
+    create_canva_captions: bool = False
     prepared_voice_fingerprint: str = Field(default="", exclude=True, max_length=64)
 
     @field_validator("script", "master_prompt")
@@ -121,6 +122,7 @@ class CloudAgentDefaults(BaseModel):
     voice_id: str = ""
     voice_speed: float = Field(default=1.0, gt=0)
     custom_system_prompt: str = Field(default="", max_length=8000)
+    create_canva_captions: bool = False
 
 
 class CloudAgentDefaultsPatch(CloudAgentDefaults):

@@ -42,6 +42,7 @@ _COMPATIBLE_COLUMNS = {
     "flow_cleanup_unresolved": "INTEGER NOT NULL DEFAULT 0",
     "canva_design_url": "TEXT NOT NULL DEFAULT ''",
     "canva_audio_card_count": "INTEGER NOT NULL DEFAULT -1",
+    "create_canva_captions": "INTEGER NOT NULL DEFAULT 0",
     "last_progress_at": "TEXT NOT NULL DEFAULT ''",
     "last_progress_milestone": "TEXT NOT NULL DEFAULT ''",
     "stage_started_at": "TEXT NOT NULL DEFAULT ''",
@@ -136,6 +137,7 @@ class CloudJobStore:
                     tts_provider TEXT NOT NULL,
                     voice_id TEXT NOT NULL,
                     voice_speed REAL NOT NULL,
+                    create_canva_captions INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
                     checkpoint TEXT NOT NULL,
                     control_request TEXT NOT NULL,
@@ -180,11 +182,18 @@ class CloudJobStore:
                     "PRAGMA table_info(cloud_agent_jobs)"
                 ).fetchall()
             }
+            legacy_jobs_need_caption_backfill = (
+                "create_canva_captions" not in existing_columns
+            )
             for column, definition in _COMPATIBLE_COLUMNS.items():
                 if column not in existing_columns:
                     connection.execute(
                         f"ALTER TABLE cloud_agent_jobs ADD COLUMN {column} {definition}"
                     )
+            if legacy_jobs_need_caption_backfill:
+                connection.execute(
+                    "UPDATE cloud_agent_jobs SET create_canva_captions = 1"
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS cloud_agent_workers (
@@ -213,6 +222,7 @@ class CloudJobStore:
             tts_provider=row["tts_provider"],
             voice_id=row["voice_id"],
             voice_speed=row["voice_speed"],
+            create_canva_captions=bool(row["create_canva_captions"]),
             status=CloudJobStatus(row["status"]),
             checkpoint=CloudJobCheckpoint(row["checkpoint"]),
             control_request=CloudControlRequest(row["control_request"]),
@@ -284,7 +294,8 @@ class CloudJobStore:
                 """
                 INSERT INTO cloud_agent_jobs (
                     id, subject, script, master_prompt, clip_plan_json, language,
-                    target_words, tts_provider, voice_id, voice_speed, status,
+                    target_words, tts_provider, voice_id, voice_speed,
+                    create_canva_captions, status,
                     checkpoint, control_request, current_step, progress,
                     flow_status, canva_status, voice_file, audio_duration_seconds,
                     canva_playback_speed, target_final_duration_seconds,
@@ -302,7 +313,7 @@ class CloudJobStore:
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -316,6 +327,7 @@ class CloudJobStore:
                     record.tts_provider,
                     record.voice_id,
                     record.voice_speed,
+                    record.create_canva_captions,
                     record.status.value,
                     record.checkpoint.value,
                     record.control_request.value,

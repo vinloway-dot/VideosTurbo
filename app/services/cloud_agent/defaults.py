@@ -9,6 +9,7 @@ _DEFAULT_KEYS = {
     "voice_id": "cloud_agent_default_voice_id",
     "voice_speed": "cloud_agent_default_voice_speed",
     "custom_system_prompt": "cloud_agent_default_custom_system_prompt",
+    "create_canva_captions": "cloud_agent_default_create_canva_captions",
 }
 
 
@@ -26,6 +27,9 @@ class CloudAgentDefaultsService:
             voice_id=str(config.app.get(_DEFAULT_KEYS["voice_id"], "")),
             voice_speed=float(config.app.get(_DEFAULT_KEYS["voice_speed"], 1.0)),
             custom_system_prompt=str(config.app.get(_DEFAULT_KEYS["custom_system_prompt"], "")),
+            create_canva_captions=bool(
+                config.app.get(_DEFAULT_KEYS["create_canva_captions"], False)
+            ),
         )
 
     def update(self, patch: CloudAgentDefaultsPatch) -> CloudAgentDefaults:
