@@ -1334,6 +1334,41 @@ def test_google_flow_workspace_context_uses_browser_configuration_and_holds_lock
     ]
 
 
+def test_google_flow_expected_public_home_session_expiry_defers_to_ready_project():
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        home_progress_html=["<button>Continue with Google</button>"],
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=5.0)
+
+    with client.acquire_workspace(_job()) as workspace:
+        assert workspace.page is page
+
+    assert [url for url, _options in page.goto_calls] == [
+        "https://labs.google/fx/tools/flow",
+        "https://labs.google/fx/tools/flow/project/demo",
+    ]
+
+
+def test_google_flow_expected_home_security_challenge_still_requires_human():
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        home_progress_html=[
+            "<div class='g-recaptcha'>Confirm you're not a robot</div>"
+        ],
+        session_ready=False,
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=5.0)
+
+    with pytest.raises(HumanRequiredError, match="CAPTCHA_REQUIRED"):
+        with client.acquire_workspace(_job()):
+            pass
+
+    assert [url for url, _options in page.goto_calls] == [
+        "https://labs.google/fx/tools/flow",
+    ]
+
+
 @pytest.mark.parametrize(
     "timed_out_target",
     [
