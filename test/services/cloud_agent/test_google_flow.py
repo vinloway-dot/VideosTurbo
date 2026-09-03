@@ -6,9 +6,11 @@ from zipfile import ZipFile
 
 import pytest
 from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from app.models.cloud_agent import ServiceSessionStatus
 from app.services.cloud_agent.errors import (
+    FlowArchiveValidationError,
     FlowBatchIncompleteError,
     FlowGenerationTimeoutError,
     FlowWorkspaceVerificationError,
@@ -1041,7 +1043,8 @@ class FakePage:
             ),
         )
 
-    def expect_download(self):
+    def expect_download(self, *, timeout=None):
+        del timeout
         return FakeDownloadExpectation(self)
 
 
@@ -1227,6 +1230,7 @@ def _client(
     timeout_seconds=30.0,
     workspace_lock_timeout_seconds=None,
     editor_ready_timeout_seconds=None,
+    project_archive_download_timeout_seconds=None,
     post_refresh_grace_seconds=0.01,
     settled_poll_count=None,
 ):
@@ -1244,6 +1248,10 @@ def _client(
         kwargs["workspace_lock_timeout_seconds"] = workspace_lock_timeout_seconds
     if editor_ready_timeout_seconds is not None:
         kwargs["editor_ready_timeout_seconds"] = editor_ready_timeout_seconds
+    if project_archive_download_timeout_seconds is not None:
+        kwargs["project_archive_download_timeout_seconds"] = (
+            project_archive_download_timeout_seconds
+        )
     if post_refresh_grace_seconds is not None:
         kwargs["post_refresh_grace_seconds"] = post_refresh_grace_seconds
     if settled_poll_count is not None:
@@ -2275,6 +2283,57 @@ def test_project_archive_waits_for_download_menu_animation(tmp_path):
     assert destination.is_file()
     assert ("click", "project_menu") in page.actions
     assert ("click", "project_download") in page.actions
+
+
+def test_project_archive_uses_explicit_slow_preparation_download_timeout(tmp_path):
+    page = FakePage(progress_html=["<div>Generation progress 6 / 6</div>"])
+    original_expect_download = page.expect_download
+    observed_timeouts = []
+
+    def expect_download(*, timeout):
+        observed_timeouts.append(timeout)
+        return original_expect_download()
+
+    page.expect_download = expect_download
+    client, _ = _client(
+        page,
+        project_archive_download_timeout_seconds=300.0,
+    )
+    destination = tmp_path / "project.zip"
+
+    google_flow.FlowWorkspaceRun(client, page)._download_project_archive_to(destination)
+
+    assert destination.is_file()
+    assert observed_timeouts == [300_000]
+
+
+def test_project_archive_translates_playwright_download_timeout(tmp_path):
+    page = FakePage(progress_html=["<div>Generation progress 6 / 6</div>"])
+
+    class SlowDownloadExpectation(FakeDownloadExpectation):
+        def __exit__(self, exc_type, exc, tb):
+            super().__exit__(exc_type, exc, tb)
+            raise PlaywrightTimeoutError("Timeout 300000ms exceeded")
+
+    def expect_download(*, timeout):
+        assert timeout == 300_000
+        return SlowDownloadExpectation(page)
+
+    page.expect_download = expect_download
+    client, _ = _client(
+        page,
+        project_archive_download_timeout_seconds=300.0,
+    )
+
+    with pytest.raises(
+        FlowArchiveValidationError,
+        match="project archive download timed out",
+    ) as exc_info:
+        google_flow.FlowWorkspaceRun(client, page)._download_project_archive_to(
+            tmp_path / "project.zip"
+        )
+
+    assert isinstance(exc_info.value.__cause__, PlaywrightTimeoutError)
 
 
 def test_project_download_chooses_rightmost_more_control():
