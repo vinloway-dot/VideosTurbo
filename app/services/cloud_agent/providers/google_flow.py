@@ -372,7 +372,11 @@ class FlowWorkspaceRun:
         self.client._dismiss_safe_announcement_dialog(self.page)
         self.client._submit_generation(self.page, job.master_prompt)
         self.client._wait_for_generation(self.page, expected_count)
-        return self._rename_download_and_materialize(paths, expected_count)
+        return self._rename_download_and_materialize(
+            paths,
+            expected_count,
+            force_rename=True,
+        )
 
     def prepare_agent_prompt(self, master_prompt: str) -> AgentComposer:
         prepared = self.client._prepare_agent_prompt(self.page, master_prompt)
@@ -794,7 +798,11 @@ class FlowWorkspaceRun:
             self._prepared_generation_composer,
         )
         self.client._wait_for_generation(self.page, expected_count)
-        return self._rename_download_and_materialize(paths, expected_count)
+        return self._rename_download_and_materialize(
+            paths,
+            expected_count,
+            force_rename=True,
+        )
 
     def reconcile_and_download(
         self,
@@ -828,16 +836,31 @@ class FlowWorkspaceRun:
         self,
         paths: JobPaths,
         expected_count: int,
+        *,
+        force_rename: bool = False,
     ) -> tuple[Path, ...] | FlowPartialInventory:
-        if not self._semantic_names_are_complete(expected_count):
-            if self.client._has_completed_rename_response(self.page):
+        if force_rename or not self._semantic_names_are_complete(expected_count):
+            if (
+                not force_rename
+                and self.client._has_completed_rename_response(self.page)
+            ):
                 self._refresh_and_hydrate()
             else:
-                response_count = self.client._agent_response_count(self.page)
+                response_count: int | None = None
+
+                def capture_response_count() -> None:
+                    nonlocal response_count
+                    response_count = self.client._agent_response_count(self.page)
+
                 self.client._submit_agent_prompt(
                     self.page,
                     RENAME_CLIPS_INSTRUCTION,
+                    before_submit=capture_response_count,
                 )
+                if response_count is None:
+                    raise FlowWorkspaceVerificationError(
+                        "Google Flow Agent rename response baseline was not captured"
+                    )
                 self._wait_for_rename_response_then_refresh(response_count)
             self._wait_for_recovery_archive_grace()
             snapshot = paths.flow_snapshots_dir / "partial-0.zip"
@@ -1815,6 +1838,8 @@ class GoogleFlowClient:
         page: Any,
         prompt_text: str,
         composer: AgentComposer | None,
+        *,
+        before_submit: Callable[[], None] | None = None,
     ) -> Any:
         del page
         if composer is None:
@@ -1831,6 +1856,8 @@ class GoogleFlowClient:
                     "Google Flow active Agent submit control could not be verified"
                 ) from exc
             if submit_enabled:
+                if before_submit is not None:
+                    before_submit()
                 try:
                     verified.generate.click()
                 except PlaywrightError as exc:
@@ -1844,9 +1871,20 @@ class GoogleFlowClient:
                 )
             time.sleep(self.poll_seconds)
 
-    def _submit_agent_prompt(self, page: Any, prompt_text: str) -> Any:
+    def _submit_agent_prompt(
+        self,
+        page: Any,
+        prompt_text: str,
+        *,
+        before_submit: Callable[[], None] | None = None,
+    ) -> Any:
         prepared = self._prepare_agent_prompt(page, prompt_text)
-        return self._submit_prepared_agent_prompt(page, prompt_text, prepared)
+        return self._submit_prepared_agent_prompt(
+            page,
+            prompt_text,
+            prepared,
+            before_submit=before_submit,
+        )
 
     def _submit_recovery_agent_prompt(self, page: Any, prompt_text: str) -> Any:
         deadline = time.monotonic() + self.editor_ready_timeout_seconds

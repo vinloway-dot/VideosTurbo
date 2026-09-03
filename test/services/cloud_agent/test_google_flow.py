@@ -303,7 +303,12 @@ class FakeLocator:
                 google_flow.RENAME_SURVIVING_CLIPS_INSTRUCTION,
             }:
                 self.page.pending_clip_names = list(self.page.renamed_clip_names)
-                self.page.agent_response_count += 1
+                if self.page.rename_response_delay_reads:
+                    self.page.pending_rename_response_reads = (
+                        self.page.rename_response_delay_reads
+                    )
+                else:
+                    self.page.agent_response_count += 1
             elif self.page.generation_completion_names is not None:
                 self.page.clip_names = list(self.page.generation_completion_names)
             return
@@ -376,6 +381,12 @@ class FakeLocator:
             return int(self.page.project_menu_open)
         if self.kind == "agent_response_feedback":
             self.page.agent_response_reads += 1
+            if self.page.pending_rename_response_reads is not None:
+                if self.page.pending_rename_response_reads > 0:
+                    self.page.pending_rename_response_reads -= 1
+                else:
+                    self.page.agent_response_count += 1
+                    self.page.pending_rename_response_reads = None
             if self.index is None:
                 return self.page.agent_response_count
             return int(self.index < self.page.agent_response_count)
@@ -569,7 +580,14 @@ class FakeLocator:
         if self.kind == "generate" and self.page.send_stale_after_click:
             raise PlaywrightError("stale Flow rename submit locator")
         if self.kind == "generate" and self.page.agent_enabled_states:
-            return self.page.agent_enabled_states.pop(0)
+            enabled = self.page.agent_enabled_states.pop(0)
+            if (
+                not enabled
+                and self.page.prior_response_arrives_during_rename_submit
+            ):
+                self.page.agent_response_count += 1
+                self.page.prior_response_arrives_during_rename_submit = False
+            return enabled
         if self.kind == "generate" and self.page.generate_clicked:
             return self.page.send_enabled_after_click
         return self.page.agent_ready
@@ -829,6 +847,8 @@ class FakePage:
         generated_image_alts=None,
         completed_video_polls=None,
         agent_response_count=1,
+        prior_response_arrives_during_rename_submit=False,
+        rename_response_delay_reads=0,
         checkbox_count=None,
         card_delete_available=True,
         card_delete_removes=True,
@@ -925,6 +945,12 @@ class FakePage:
         self.completed_video_polls = list(completed_video_polls or [[]])
         self.agent_response_count = agent_response_count
         self.agent_response_reads = 0
+        self.prior_response_arrives_during_rename_submit = bool(
+            prior_response_arrives_during_rename_submit
+        )
+        self.rename_response_delay_reads = int(rename_response_delay_reads)
+        self.pending_rename_response_reads = None
+        self.agent_response_counts_at_reload = []
         self.active_completed_video_poll = list(self.completed_video_polls[0])
         self.context = FakeCdpContext(self)
         self.checkbox_count = checkbox_count
@@ -999,6 +1025,7 @@ class FakePage:
 
     def reload(self, **kwargs):
         self.reload_calls.append(kwargs)
+        self.agent_response_counts_at_reload.append(self.agent_response_count)
         if self.reload_progress_html:
             self.progress_html = self.reload_progress_html.pop(0)
             self._content_index = 0
@@ -2508,6 +2535,45 @@ def test_flow_workspace_renames_out_of_order_results_and_downloads_project_archi
     ]
 
 
+@pytest.mark.parametrize("use_prepared_composer", [False, True])
+def test_fresh_generation_submits_rename_before_trusting_existing_semantic_names(
+    monkeypatch, tmp_path, use_prepared_composer
+):
+    complete_names = [f"clip {number}" for number in range(1, 7)]
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        generation_completion_names=complete_names,
+        renamed_clip_names=complete_names,
+    )
+    client, _ = _client(page)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    job = _job()
+    with client.acquire_workspace(job) as workspace:
+        if use_prepared_composer:
+            workspace.prepare_agent_prompt(job.master_prompt)
+            result = workspace.submit_prepared_generation_and_download(job, paths)
+        else:
+            result = workspace.generate_and_download(job, paths)
+
+    assert result == paths.flow_files
+    rename_fill = (
+        "fill",
+        "prompt",
+        google_flow.RENAME_CLIPS_INSTRUCTION,
+    )
+    assert rename_fill in page.actions
+    assert page.reload_calls == [_navigation_options(client)]
+    assert page.actions.index(rename_fill) < page.actions.index(
+        ("click", "project_download")
+    )
+
+
 def test_flow_workspace_reconciles_existing_six_without_new_generation(
     monkeypatch, tmp_path
 ):
@@ -3679,6 +3745,36 @@ def test_flow_workspace_waits_for_agent_response_before_single_rename_refresh(
     assert result == paths.flow_files
     assert page.agent_response_reads >= 2
     assert page.reload_calls == [_navigation_options(client)]
+
+
+def test_fresh_rename_ignores_prior_response_arriving_while_submit_enables(
+    monkeypatch, tmp_path
+):
+    complete_names = [f"clip {number}" for number in range(1, 7)]
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        generation_completion_names=complete_names,
+        renamed_clip_names=complete_names,
+        agent_response_count=1,
+        prior_response_arrives_during_rename_submit=True,
+        rename_response_delay_reads=20,
+    )
+    client, _ = _client(page)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    monkeypatch.setattr(
+        google_flow,
+        "materialize_flow_archive",
+        lambda _archive, job_paths, **_kwargs: job_paths.flow_files,
+    )
+
+    job = _job()
+    with client.acquire_workspace(job) as workspace:
+        workspace.prepare_agent_prompt(job.master_prompt)
+        result = workspace.submit_prepared_generation_and_download(job, paths)
+
+    assert result == paths.flow_files
+    assert page.agent_response_count == 3
+    assert page.agent_response_counts_at_reload == [3]
 
 
 def test_flow_workspace_rename_ignores_stale_submit_locator_after_click(
