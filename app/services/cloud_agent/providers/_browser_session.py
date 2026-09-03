@@ -38,7 +38,7 @@ class BrowserSessionProvider:
         try:
             with self.browser.open(self.service, headed=headed) as context:
                 page = self._page(context)
-                page.goto(self.service_url, wait_until="domcontentloaded")
+                self._navigate_to_service(page)
                 return self.check_open_page(page, job_id=job_id)
         except TimeoutError:
             return self._result(
@@ -66,7 +66,7 @@ class BrowserSessionProvider:
         try:
             with self.browser.open(self.service, headed=headed) as context:
                 page = self._page(context)
-                page.goto(self.service_url, wait_until="domcontentloaded")
+                self._navigate_to_service(page)
                 return self.repair_open_page(page, job_id=job_id)
         except TimeoutError:
             return self._result(
@@ -108,6 +108,9 @@ class BrowserSessionProvider:
             ServiceSessionStatus.AUTO_RELOGIN,
             evidence_path=evidence_path,
         )
+
+    def _navigate_to_service(self, page: Any) -> None:
+        page.goto(self.service_url, wait_until="domcontentloaded")
 
     @staticmethod
     def _page(context: Any) -> Any:

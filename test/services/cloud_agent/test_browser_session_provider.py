@@ -1,6 +1,8 @@
 from contextlib import contextmanager
 from pathlib import Path
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
 from app.models.cloud_agent import ServiceSessionStatus
 from app.services.cloud_agent.providers._browser_session import BrowserSessionProvider
 from app.services.cloud_agent.providers import canva, google_flow
@@ -56,6 +58,12 @@ class DelayedCanvaPage(FakePage):
         if role == "menuitem":
             return DelayedCanvaShareLocator(self)
         return super().get_by_role(role, name=name)
+
+
+class TimedOutNavigationPage(FakePage):
+    def goto(self, url, **kwargs):
+        super().goto(url, **kwargs)
+        raise PlaywrightTimeoutError("Timeout 120000ms exceeded")
 
 
 class FakeContext:
@@ -133,10 +141,35 @@ def test_google_flow_provider_opens_real_target_and_captures_job_evidence(tmp_pa
     assert result.status is ServiceSessionStatus.READY
     assert browser.open_calls == [("google_flow", False)]
     assert page.goto_calls == [
-        ("https://labs.google/fx/tools/flow", {"wait_until": "domcontentloaded"})
+        (
+            "https://labs.google/fx/tools/flow",
+            {"wait_until": "domcontentloaded", "timeout": 120_000},
+        )
     ]
     assert browser.evidence_calls == [("job-1", "google_flow", "session-check")]
     assert Path(result.evidence_path).name == "google_flow-session-check.png"
+
+
+def test_google_flow_provider_classifies_target_after_navigation_timeout(tmp_path):
+    page = TimedOutNavigationPage(
+        url="https://labs.google/fx/tools/flow/project/demo",
+        html=_flow_ready_html(),
+    )
+    browser = FakeBrowserManager(page, tmp_path)
+    provider = google_flow.GoogleFlowSessionProvider(
+        browser,
+        service_url="https://labs.google/fx/tools/flow/project/demo",
+    )
+
+    result = provider.check_session(job_id="job-timeout", headed=False)
+
+    assert result.status is ServiceSessionStatus.READY
+    assert page.goto_calls == [
+        (
+            "https://labs.google/fx/tools/flow/project/demo",
+            {"wait_until": "domcontentloaded", "timeout": 120_000},
+        )
+    ]
 
 
 def test_canva_provider_opens_template_and_captures_job_evidence(tmp_path):
@@ -206,6 +239,12 @@ def test_provider_never_clicks_through_security_challenge(tmp_path):
 
     assert result.status is ServiceSessionStatus.TWO_FACTOR_REQUIRED
     assert page.clicks == 0
+    assert page.goto_calls == [
+        (
+            "https://labs.google/fx/tools/flow",
+            {"wait_until": "domcontentloaded", "timeout": 120_000},
+        )
+    ]
 
 
 def test_provider_missing_service_url_is_configuration_error(tmp_path):

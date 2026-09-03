@@ -215,19 +215,47 @@ def classify_google_flow_session(*, url: str, html: str) -> ServiceSessionStatus
 
 
 class GoogleFlowSessionProvider(BrowserSessionProvider):
-    def __init__(self, browser, *, service_url: str) -> None:
+    def __init__(
+        self,
+        browser,
+        *,
+        service_url: str,
+        editor_ready_timeout_seconds: float = 120.0,
+    ) -> None:
+        if editor_ready_timeout_seconds <= 0:
+            raise ValueError("editor_ready_timeout_seconds must be positive")
         super().__init__(
             browser,
             service="google_flow",
             service_url=service_url,
             classifier=classify_google_flow_session,
         )
+        self.editor_ready_timeout_seconds = float(editor_ready_timeout_seconds)
+
+    def _navigate_to_service(self, page: Any) -> None:
+        try:
+            page.goto(
+                self.service_url,
+                wait_until="domcontentloaded",
+                timeout=max(1, int(self.editor_ready_timeout_seconds * 1000)),
+            )
+        except PlaywrightTimeoutError:
+            # The base provider classifies the observable page immediately
+            # afterward, including login and security-challenge states.
+            return
 
 
 class FlowWorkspaceRun:
-    def __init__(self, client: GoogleFlowClient, page: Any) -> None:
+    def __init__(
+        self,
+        client: GoogleFlowClient,
+        page: Any,
+        *,
+        job_id: str = "",
+    ) -> None:
         self.client = client
         self.page = page
+        self.job_id = job_id
         self._prepared_master_prompt = ""
         self._prepared_recovery_prompt = ""
         self._prepared_missing_index = 0
@@ -239,11 +267,15 @@ class FlowWorkspaceRun:
         while self.client._media_card_count(self.page):
             self._delete_one_current_media_card()
 
-        self.page.reload(wait_until="domcontentloaded")
+        self.client._navigate_workspace_page(
+            self.page,
+            job_id=self.job_id,
+        )
         try:
             self.client._hydrate_project_workspace(
                 self.page,
                 flow_generation_unresolved=False,
+                job_id=self.job_id,
             )
         except FlowWorkspaceVerificationError as exc:
             raise FlowWorkspaceVerificationError(
@@ -892,25 +924,14 @@ class FlowWorkspaceRun:
         self._refresh_and_hydrate()
 
     def _refresh_and_hydrate(self) -> None:
-        try:
-            self.page.reload(
-                wait_until="domcontentloaded",
-                timeout=int(self.client.editor_ready_timeout_seconds * 1000),
-            )
-        except PlaywrightTimeoutError as exc:
-            try:
-                reached_project = self.client._is_configured_project_url(
-                    self.page.url
-                )
-            except PlaywrightError:
-                reached_project = False
-            if not reached_project:
-                raise FlowWorkspaceVerificationError(
-                    "Google Flow refresh did not reach the configured project URL"
-                ) from exc
+        self.client._navigate_workspace_page(
+            self.page,
+            job_id=self.job_id,
+        )
         self.client._hydrate_project_workspace(
             self.page,
             flow_generation_unresolved=True,
+            job_id=self.job_id,
         )
 
     def _wait_for_stable_semantic_names(
@@ -1021,14 +1042,23 @@ class GoogleFlowClient:
             lock_timeout_seconds=self.workspace_lock_timeout_seconds,
         ) as context:
             page = BrowserSessionProvider._page(context)
-            page.goto(self._flow_home_url(), wait_until="domcontentloaded")
-            page.goto(self.service_url, wait_until="domcontentloaded")
+            self._navigate_workspace_page(
+                page,
+                target_url=self._flow_home_url(),
+                job_id=job.id,
+            )
+            self._navigate_workspace_page(
+                page,
+                target_url=self.service_url,
+                job_id=job.id,
+            )
             self._verify_workspace_session(page, job.id)
             self._hydrate_project_workspace(
                 page,
                 flow_generation_unresolved=job.flow_generation_unresolved,
+                job_id=job.id,
             )
-            yield FlowWorkspaceRun(self, page)
+            yield FlowWorkspaceRun(self, page, job_id=job.id)
 
     def _flow_home_url(self) -> str:
         parsed = urlsplit(self.service_url)
@@ -1048,14 +1078,99 @@ class GoogleFlowClient:
             )
         return urlunsplit((parsed.scheme, parsed.netloc, home_path, "", ""))
 
-    def _is_configured_project_url(self, current_url: str) -> bool:
-        expected = urlsplit(self.service_url)
+    @staticmethod
+    def _is_navigation_target(current_url: str, expected_url: str) -> bool:
+        expected = urlsplit(str(expected_url or ""))
         current = urlsplit(str(current_url or ""))
         return (
             current.scheme.casefold() == expected.scheme.casefold()
             and current.netloc.casefold() == expected.netloc.casefold()
             and current.path.rstrip("/") == expected.path.rstrip("/")
         )
+
+    def _navigate_workspace_page(
+        self,
+        page: Any,
+        *,
+        target_url: str | None = None,
+        job_id: str = "",
+    ) -> None:
+        expected_url = self.service_url if target_url is None else target_url
+        navigation_options = {
+            "wait_until": "domcontentloaded",
+            "timeout": max(1, int(self.editor_ready_timeout_seconds * 1000)),
+        }
+        navigation_error: PlaywrightError | None = None
+        try:
+            if target_url is None:
+                page.reload(**navigation_options)
+            else:
+                page.goto(target_url, **navigation_options)
+        except PlaywrightError as exc:
+            navigation_error = exc
+
+        url_error: PlaywrightError | None = None
+        current_url = ""
+        try:
+            current_url = page.url
+            reached_target = self._is_navigation_target(
+                current_url,
+                expected_url,
+            )
+        except PlaywrightError as exc:
+            url_error = exc
+            reached_target = False
+
+        try:
+            self._verify_workspace_session(page, job_id)
+        except HumanRequiredError as human_required:
+            if navigation_error is not None:
+                raise human_required from navigation_error
+            raise
+        except FlowWorkspaceVerificationError as session_error:
+            url_only_status = classify_google_flow_session(
+                url=current_url,
+                html="",
+            )
+            if url_only_status not in {
+                ServiceSessionStatus.READY,
+                ServiceSessionStatus.ERROR,
+            }:
+                error = HumanRequiredError(
+                    "google_flow session requires human recovery for job "
+                    f"{job_id}: {url_only_status.value}"
+                )
+                raise error from (navigation_error or session_error)
+            if (
+                isinstance(navigation_error, PlaywrightTimeoutError)
+                and reached_target
+            ):
+                return
+            if navigation_error is None:
+                raise
+            raise FlowWorkspaceVerificationError(
+                "Google Flow navigation could not be verified"
+            ) from navigation_error
+
+        if url_error is not None:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow navigation could not be verified"
+            ) from (navigation_error or url_error)
+
+        if navigation_error is not None and not isinstance(
+            navigation_error,
+            PlaywrightTimeoutError,
+        ):
+            raise FlowWorkspaceVerificationError(
+                "Google Flow navigation could not be verified"
+            ) from navigation_error
+        if not reached_target:
+            error = FlowWorkspaceVerificationError(
+                "Google Flow navigation did not reach the expected URL"
+            )
+            if navigation_error is not None:
+                raise error from navigation_error
+            raise error
 
     @staticmethod
     def _verify_workspace_session(page: Any, job_id: str) -> None:
@@ -1086,6 +1201,7 @@ class GoogleFlowClient:
         page: Any,
         *,
         flow_generation_unresolved: bool,
+        job_id: str = "",
     ) -> None:
         """Prove the project editor in the one owned context, with safe reloads."""
         del flow_generation_unresolved
@@ -1099,7 +1215,7 @@ class GoogleFlowClient:
                 last_error = exc
                 if recovery_cycle >= _DIRECT_LINK_RECOVERY_CYCLES:
                     break
-                page.reload(wait_until="domcontentloaded")
+                self._navigate_workspace_page(page, job_id=job_id)
         raise FlowWorkspaceVerificationError(
             "Google Flow project editor could not be verified"
         ) from last_error
