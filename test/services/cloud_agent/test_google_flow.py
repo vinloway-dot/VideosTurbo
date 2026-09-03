@@ -2679,6 +2679,43 @@ def test_project_archive_uses_explicit_slow_preparation_download_timeout(tmp_pat
     assert observed_timeouts == [300_000]
 
 
+def test_individual_card_download_uses_explicit_slow_preparation_timeout(
+    monkeypatch,
+    tmp_path,
+):
+    page = FakePage(
+        progress_html=["<div>Ready</div>"],
+        clip_names=["clip 1"],
+        completed_video_polls=[_completed_video_cards(fingerprints=("one",))],
+    )
+    original_expect_download = page.expect_download
+    observed_timeouts = []
+
+    def expect_download(*, timeout):
+        observed_timeouts.append(timeout)
+        return original_expect_download()
+
+    page.expect_download = expect_download
+    client, _ = _client(
+        page,
+        project_archive_download_timeout_seconds=300.0,
+    )
+    monkeypatch.setattr(
+        google_flow, "validate_flow_source_video", lambda *_args, **_kwargs: None
+    )
+    card = client._media_cards(page).nth(0)
+    pinned_card = card.element_handle()
+
+    google_flow.FlowWorkspaceRun(client, page)._download_replacement_card_to(
+        card,
+        pinned_card,
+        tmp_path / "clip-1.zip",
+        missing_index=1,
+    )
+
+    assert observed_timeouts == [300_000]
+
+
 def test_project_archive_translates_playwright_download_timeout(tmp_path):
     page = FakePage(progress_html=["<div>Generation progress 6 / 6</div>"])
 
@@ -2887,11 +2924,11 @@ def test_corrupt_downloaded_project_archive_falls_back_to_named_cards(
         assert archive.read("clip 6.mp4") == b"video-5"
 
 
-def test_reopened_inventory_uses_named_cards_without_repeating_failed_batch(
+def test_reopened_inventory_retries_batch_before_named_card_fallback(
     monkeypatch,
     tmp_path,
 ):
-    """Catches a browser-crash reopen retrying the same crashing project ZIP."""
+    """A reopened job still prefers the batch path before individual cards."""
     cards = _completed_video_cards(
         fingerprints=tuple(f"asset-{index}" for index in range(5))
     )
@@ -2910,19 +2947,20 @@ def test_reopened_inventory_uses_named_cards_without_repeating_failed_batch(
     )
     destination = tmp_path / "partial-0.zip"
 
-    monkeypatch.setattr(
-        workspace,
-        "_download_project_archive_to",
-        lambda _destination: pytest.fail(
-            "Download Project must not repeat after crash"
-        ),
-    )
+    project_attempts = []
+
+    def fail_project_download(_destination):
+        project_attempts.append("download_project")
+        raise FlowArchiveValidationError("project archive failed")
+
+    monkeypatch.setattr(workspace, "_download_project_archive_to", fail_project_download)
     monkeypatch.setattr(
         google_flow, "validate_flow_source_video", lambda *_a, **_k: None
     )
 
     workspace._download_project_archive_with_fallback(destination)
 
+    assert project_attempts == ["download_project"]
     with ZipFile(destination) as archive:
         assert archive.namelist() == [f"clip {index}.mp4" for index in range(1, 6)]
 
