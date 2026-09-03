@@ -6,6 +6,7 @@ from typing import Protocol
 from app.models.cloud_agent import CloudJobRecord, FlowRecoveryState
 from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
+    FlowBrowserClosedError,
     FlowWorkspaceVerificationError,
     RecoveryBudgetExhausted,
 )
@@ -38,9 +39,7 @@ class FlowRecoveryWorkspace(Protocol):
         self, paths: JobPaths, *, attempt: int
     ) -> FlowRecoveryCapture: ...
 
-    def prepare_targeted_replacement(
-        self, prompt: str, *, missing_index: int
-    ): ...
+    def prepare_targeted_replacement(self, prompt: str, *, missing_index: int): ...
 
     def submit_targeted_replacement(
         self, prompt: str, *, missing_index: int
@@ -124,6 +123,8 @@ class FlowRecoveryCoordinator:
         )
         try:
             capture = workspace.capture_partial_inventory(paths, attempt=0)
+        except FlowBrowserClosedError:
+            raise
         except (FlowArchiveValidationError, FlowWorkspaceVerificationError) as exc:
             raise FlowRecoveryMappingError(
                 f"Flow partial inventory could not be mapped safely: {exc}"
@@ -203,6 +204,8 @@ class FlowRecoveryCoordinator:
         if current.flow_recovery_state is FlowRecoveryState.INVENTORY_PENDING:
             try:
                 capture = workspace.capture_partial_inventory(paths, attempt=0)
+            except FlowBrowserClosedError:
+                raise
             except (FlowArchiveValidationError, FlowWorkspaceVerificationError) as exc:
                 raise FlowRecoveryMappingError(
                     f"Flow partial inventory could not be mapped safely: {exc}"
@@ -260,7 +263,9 @@ class FlowRecoveryCoordinator:
             inventory.missing_index != job.flow_missing_clip_index
             or inventory.baseline_digest != job.flow_recovery_baseline
         ):
-            raise FlowRecoveryMappingError("partial Flow inventory changed after restart")
+            raise FlowRecoveryMappingError(
+                "partial Flow inventory changed after restart"
+            )
         return inventory
 
     def _submit_until_complete(
@@ -273,9 +278,7 @@ class FlowRecoveryCoordinator:
         current = job
         while True:
             if current.flow_recovery_attempts >= self.max_recovery_attempts:
-                raise FlowRecoveryExhausted(
-                    "Flow replacement retry budget exhausted"
-                )
+                raise FlowRecoveryExhausted("Flow replacement retry budget exhausted")
             prompt = build_targeted_replacement_prompt(
                 current,
                 inventory.missing_index,
@@ -359,10 +362,14 @@ class FlowRecoveryCoordinator:
         del workspace
         if observation.state is FlowRecoveryRemoteState.FAILED:
             raise FlowRecoveryExhausted("Flow replacement failed")
-        if observation.state not in {
-            FlowRecoveryRemoteState.COMPLETE_PROJECT,
-            FlowRecoveryRemoteState.REPLACEMENT_ONLY,
-        } or observation.snapshot_path is None:
+        if (
+            observation.state
+            not in {
+                FlowRecoveryRemoteState.COMPLETE_PROJECT,
+                FlowRecoveryRemoteState.REPLACEMENT_ONLY,
+            }
+            or observation.snapshot_path is None
+        ):
             raise FlowRecoveryMappingError(
                 "Flow replacement result could not be mapped safely"
             )

@@ -32,7 +32,11 @@ from app.services.cloud_agent.flow_archive import (
     validate_flow_source_video,
 )
 from app.services.cloud_agent.job_store import CloudJobStore
-from app.services.cloud_agent.media_probe import MediaProbe, validate_audio, validate_video
+from app.services.cloud_agent.media_probe import (
+    MediaProbe,
+    validate_audio,
+    validate_video,
+)
 from app.services.cloud_agent.providers.canva import (
     CanvaDownloadVerificationError,
     CanvaUIVerificationError,
@@ -80,9 +84,7 @@ class FlowWorkspace(Protocol):
 
     def capture_partial_inventory(self, paths: JobPaths, *, attempt: int): ...
 
-    def prepare_targeted_replacement(
-        self, prompt: str, *, missing_index: int
-    ): ...
+    def prepare_targeted_replacement(self, prompt: str, *, missing_index: int): ...
 
     def submit_targeted_replacement(
         self, prompt: str, *, missing_index: int
@@ -112,7 +114,9 @@ class CanvaClient(Protocol):
 
     def clean_workspace(self, job_id: str) -> None: ...
 
-    def open_job_session(self, job: CloudJobRecord) -> ContextManager["CanvaClient"]: ...
+    def open_job_session(
+        self, job: CloudJobRecord
+    ) -> ContextManager["CanvaClient"]: ...
 
 
 _CHECKPOINT_RANK = {
@@ -216,7 +220,9 @@ class CloudAgentWorkflow:
             target_final_duration_seconds=timing.target_final_duration_seconds,
         )
 
-    def _validate_audio_checkpoint(self, job: CloudJobRecord, paths: JobPaths) -> CloudJobRecord:
+    def _validate_audio_checkpoint(
+        self, job: CloudJobRecord, paths: JobPaths
+    ) -> CloudJobRecord:
         checkpoint = job.checkpoint
         if not paths.voice_file.is_file():
             raise MediaValidationError(
@@ -233,7 +239,9 @@ class CloudAgentWorkflow:
             ) from exc
         return self._timing_from_probe(job.id, probe)
 
-    def _validate_flow_checkpoint(self, checkpoint: CloudJobCheckpoint, paths: JobPaths) -> None:
+    def _validate_flow_checkpoint(
+        self, checkpoint: CloudJobCheckpoint, paths: JobPaths
+    ) -> None:
         missing = [path for path in paths.flow_files if not path.is_file()]
         if missing:
             raise MediaValidationError(
@@ -269,7 +277,9 @@ class CloudAgentWorkflow:
                 f"checkpoint {checkpoint.value} has invalid final artifact: {exc}"
             ) from exc
 
-    def _validate_checkpoint_artifacts(self, job: CloudJobRecord, paths: JobPaths) -> None:
+    def _validate_checkpoint_artifacts(
+        self, job: CloudJobRecord, paths: JobPaths
+    ) -> None:
         checkpoint = job.checkpoint
         if self._at_least(checkpoint, CloudJobCheckpoint.TTS_READY):
             job = self._validate_audio_checkpoint(job, paths)
@@ -427,7 +437,10 @@ class CloudAgentWorkflow:
 
     def run(self, job_id: str, *, worker_id: str) -> CloudJobRecord:
         job = self._get_job(job_id)
-        if job.status is CloudJobStatus.COMPLETED or job.checkpoint is CloudJobCheckpoint.COMPLETED:
+        if (
+            job.status is CloudJobStatus.COMPLETED
+            or job.checkpoint is CloudJobCheckpoint.COMPLETED
+        ):
             return job
 
         stopped = self._control_boundary(job.id)
@@ -484,7 +497,9 @@ class CloudAgentWorkflow:
                     )
                     self.tts.generate(job, paths.voice_file)
                     if not paths.voice_file.is_file():
-                        raise MediaValidationError("TTS step did not produce the canonical audio artifact")
+                        raise MediaValidationError(
+                            "TTS step did not produce the canonical audio artifact"
+                        )
                 probe = validate_audio(
                     paths.voice_file,
                     min_duration=self.tts_min_duration,
@@ -564,7 +579,11 @@ class CloudAgentWorkflow:
                         safe_to_reopen = (
                             current.checkpoint is CloudJobCheckpoint.TTS_READY
                             and not current.flow_generation_unresolved
-                            and current.flow_recovery_state is FlowRecoveryState.NONE
+                            and current.flow_recovery_state
+                            in {
+                                FlowRecoveryState.NONE,
+                                FlowRecoveryState.INVENTORY_PENDING,
+                            }
                         )
                         if (
                             not safe_to_reopen
@@ -634,7 +653,9 @@ class CloudAgentWorkflow:
                         ),
                     )
                     if not paths.final_file.is_file():
-                        raise MediaValidationError("Canva step did not produce the canonical final artifact")
+                        raise MediaValidationError(
+                            "Canva step did not produce the canonical final artifact"
+                        )
                     self.store.patch_job(
                         job.id,
                         status=CloudJobStatus.VALIDATING,

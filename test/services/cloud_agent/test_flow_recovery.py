@@ -2,6 +2,7 @@ import pytest
 
 from app.models.cloud_agent import FlowRecoveryState
 from app.models.six_clip import SixClipPlan, SixClipSegment
+from app.services.cloud_agent import errors as cloud_agent_errors
 from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
     FlowWorkspaceVerificationError,
@@ -243,11 +244,12 @@ def test_ambiguous_timeout_archive_stops_before_paid_replacement(
 @pytest.mark.parametrize(
     ("capture_error", "detail"),
     [
-        (FlowArchiveValidationError("project menu unavailable"), "project menu unavailable"),
         (
-            FlowWorkspaceVerificationError(
-                "renamed names not stable after refresh"
-            ),
+            FlowArchiveValidationError("project menu unavailable"),
+            "project menu unavailable",
+        ),
+        (
+            FlowWorkspaceVerificationError("renamed names not stable after refresh"),
             "renamed names not stable after refresh",
         ),
     ],
@@ -263,9 +265,9 @@ def test_partial_inventory_mapping_error_keeps_capture_failure_detail(
     workspace = CaptureErrorWorkspace(store, job.id, capture_error)
 
     with pytest.raises(FlowRecoveryMappingError) as raised:
-        _coordinator(store, _inventory(paths), paths.flow_files).recover_incomplete_batch(
-            job, workspace, paths
-        )
+        _coordinator(
+            store, _inventory(paths), paths.flow_files
+        ).recover_incomplete_batch(job, workspace, paths)
 
     assert detail in str(raised.value)
     assert raised.value.__cause__ is capture_error
@@ -274,11 +276,12 @@ def test_partial_inventory_mapping_error_keeps_capture_failure_detail(
 @pytest.mark.parametrize(
     ("capture_error", "detail"),
     [
-        (FlowArchiveValidationError("project menu unavailable"), "project menu unavailable"),
         (
-            FlowWorkspaceVerificationError(
-                "renamed names not stable after refresh"
-            ),
+            FlowArchiveValidationError("project menu unavailable"),
+            "project menu unavailable",
+        ),
+        (
+            FlowWorkspaceVerificationError("renamed names not stable after refresh"),
             "renamed names not stable after refresh",
         ),
     ],
@@ -295,12 +298,41 @@ def test_resume_inventory_pending_mapping_error_keeps_capture_failure_detail(
     workspace = CaptureErrorWorkspace(store, job.id, capture_error)
 
     with pytest.raises(FlowRecoveryMappingError) as raised:
-        _coordinator(store, _inventory(paths), paths.flow_files).resume_unresolved_recovery(
-            store.get_job(job.id), workspace, paths
-        )
+        _coordinator(
+            store, _inventory(paths), paths.flow_files
+        ).resume_unresolved_recovery(store.get_job(job.id), workspace, paths)
 
     assert detail in str(raised.value)
     assert raised.value.__cause__ is capture_error
+
+
+def test_resume_inventory_pending_propagates_browser_close_for_safe_reopen(tmp_path):
+    """Catches a browser crash being converted into an unrecoverable mapping error."""
+    browser_closed_error = getattr(
+        cloud_agent_errors,
+        "FlowBrowserClosedError",
+        None,
+    )
+    assert browser_closed_error is not None
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _job_with_prompts(store)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare(job.id)
+    store.patch_job(job.id, flow_recovery_state=FlowRecoveryState.INVENTORY_PENDING)
+    browser_error = browser_closed_error(
+        "Google Flow browser closed during project archive download"
+    )
+    workspace = CaptureErrorWorkspace(store, job.id, browser_error)
+
+    with pytest.raises(browser_closed_error) as raised:
+        _coordinator(
+            store, _inventory(paths), paths.flow_files
+        ).resume_unresolved_recovery(store.get_job(job.id), workspace, paths)
+
+    assert raised.value is browser_error
+    assert (
+        store.get_job(job.id).flow_recovery_state is FlowRecoveryState.INVENTORY_PENDING
+    )
+    assert workspace.submit_calls == 0
 
 
 def test_unresolved_attempt_reconciles_without_second_submit(tmp_path):

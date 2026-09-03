@@ -11,8 +11,10 @@ from app.models.cloud_agent import (
     CloudJobCheckpoint,
     CloudJobCreate,
     CloudJobStatus,
+    FlowRecoveryState,
 )
 from app.models.six_clip import empty_six_clip_plan
+from app.services.cloud_agent import errors as cloud_agent_errors
 from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
     FlowBatchIncompleteError,
@@ -569,7 +571,9 @@ def _accept_media(monkeypatch):
     )
 
 
-def _media_probe(path: Path, *, duration: float, has_audio: bool, has_video: bool) -> MediaProbe:
+def _media_probe(
+    path: Path, *, duration: float, has_audio: bool, has_video: bool
+) -> MediaProbe:
     return MediaProbe(
         path=Path(path),
         size_bytes=max(1, Path(path).stat().st_size if Path(path).exists() else 1),
@@ -619,7 +623,9 @@ def _patch_timed_media(
             duration=(
                 final_duration
                 if is_final and final_duration is not None
-                else audio_duration if is_final else 10.0
+                else audio_duration
+                if is_final
+                else 10.0
             ),
             has_audio=is_final,
             has_video=True,
@@ -639,7 +645,9 @@ def _patch_timed_media(
     )
 
 
-def test_workflow_progresses_from_queue_through_all_durable_checkpoints(monkeypatch, tmp_path):
+def test_workflow_progresses_from_queue_through_all_durable_checkpoints(
+    monkeypatch, tmp_path
+):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     job = _claimed_job(store)
     preflight = RecordingPreflight()
@@ -730,7 +738,9 @@ def test_workflow_uses_one_canva_job_session_and_defers_canva_preflight(
     assert canva.clean_calls == [job.id]
 
 
-def test_workflow_persists_resolved_canva_workspace_before_assembly(monkeypatch, tmp_path):
+def test_workflow_persists_resolved_canva_workspace_before_assembly(
+    monkeypatch, tmp_path
+):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     job = _claimed_job(store)
     canva = WorkspaceRecordingCanva()
@@ -941,6 +951,67 @@ def test_flow_workspace_error_before_paid_fence_reopens_session_and_continues(
     assert delays == [30.0]
 
 
+def test_inventory_pending_browser_crash_reopens_without_resubmitting_generation(
+    monkeypatch,
+    tmp_path,
+):
+    """Catches recovery download crashes forcing a manual resume or duplicate batch."""
+    browser_closed_error = getattr(
+        cloud_agent_errors,
+        "FlowBrowserClosedError",
+        None,
+    )
+    assert browser_closed_error is not None
+
+    class CrashThenCompleteRecovery:
+        def __init__(self):
+            self.resume_calls = []
+
+        def resume_unresolved_recovery(self, current_job, workspace, paths):
+            self.resume_calls.append(workspace)
+            if len(self.resume_calls) == 1:
+                raise browser_closed_error(
+                    "Google Flow browser closed during project archive download"
+                )
+            for path in paths.flow_files:
+                path.write_bytes(b"recovered")
+            return paths.flow_files
+
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    store.patch_job(
+        job.id,
+        flow_recovery_state=FlowRecoveryState.INVENTORY_PENDING,
+    )
+    events = []
+    workspaces = [
+        FenceWorkspace(store, events),
+        FenceWorkspace(store, events),
+    ]
+    flow = SequencedFenceFlow(workspaces, events)
+    recovery = CrashThenCompleteRecovery()
+    delays = []
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        flow=flow,
+        flow_recovery=recovery,
+        flow_workspace_retry_sleeper=delays.append,
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert result.status is CloudJobStatus.COMPLETED
+    assert flow.acquire_calls == 2
+    assert recovery.resume_calls == workspaces
+    assert all(workspace.generate_calls == 0 for workspace in workspaces)
+    assert all(workspace.reconcile_calls == 0 for workspace in workspaces)
+    assert result.flow_workspace_retry_attempts == 1
+    assert delays == [30.0]
+
+
 def test_flow_workspace_auto_retry_stops_after_two_safe_reopens(
     monkeypatch,
     tmp_path,
@@ -1129,9 +1200,9 @@ def test_reserved_flow_workspace_retry_resumes_remaining_delay_after_restart(
         job.id,
         current_step="flow_workspace_retrying",
         flow_workspace_retry_attempts=1,
-        flow_workspace_retry_not_before=(
-            now + timedelta(seconds=17)
-        ).isoformat(timespec="microseconds"),
+        flow_workspace_retry_not_before=(now + timedelta(seconds=17)).isoformat(
+            timespec="microseconds"
+        ),
     )
     delays = []
     flow = RecordingWorkspaceFlow(store)
@@ -1173,9 +1244,9 @@ def test_reserved_flow_workspace_retry_honors_control_after_resumed_delay(
         job.id,
         current_step="flow_workspace_retrying",
         flow_workspace_retry_attempts=1,
-        flow_workspace_retry_not_before=(
-            now + timedelta(seconds=17)
-        ).isoformat(timespec="microseconds"),
+        flow_workspace_retry_not_before=(now + timedelta(seconds=17)).isoformat(
+            timespec="microseconds"
+        ),
     )
     flow = RecordingWorkspaceFlow(store)
 
@@ -1434,16 +1505,16 @@ def test_validated_five_clip_output_hands_inventory_to_recovery_without_recaptur
         def __init__(self):
             self.captured = []
 
-        def recover_captured_inventory(
-            self, current_job, workspace, paths, inventory
-        ):
+        def recover_captured_inventory(self, current_job, workspace, paths, inventory):
             self.captured.append((current_job.id, workspace, inventory))
             for path in paths.flow_files:
                 path.write_bytes(b"recovered")
             return paths.flow_files
 
         def recover_incomplete_batch(self, current_job, workspace, paths):
-            raise AssertionError("validated inventory must not be captured a second time")
+            raise AssertionError(
+                "validated inventory must not be captured a second time"
+            )
 
         def resume_unresolved_recovery(self, current_job, workspace, paths):
             raise AssertionError("fresh validated inventory must not enter resume")
@@ -1457,8 +1528,7 @@ def test_validated_five_clip_output_hands_inventory_to_recovery_without_recaptur
         semantic_numbers=(1, 2, 4, 5, 6),
         missing_index=3,
         staged_files=tuple(
-            paths.flow_staging_dir / f"clip {number}.mp4"
-            for number in (1, 2, 4, 5, 6)
+            paths.flow_staging_dir / f"clip {number}.mp4" for number in (1, 2, 4, 5, 6)
         ),
         baseline_digest="a" * 64,
     )
@@ -1692,7 +1762,9 @@ def test_post_fence_flow_workspace_failure_is_contained_at_worker_boundary(
     assert worker.run_once() is False
 
 
-def test_tts_ready_valid_canonical_recovery_skips_flow_generation(monkeypatch, tmp_path):
+def test_tts_ready_valid_canonical_recovery_skips_flow_generation(
+    monkeypatch, tmp_path
+):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     job = _claimed_job(store)
     storage = CloudJobStorage(tmp_path / "jobs")
@@ -1739,9 +1811,7 @@ def test_tts_ready_partial_canonical_salvage_reconstructs_without_generation(
         staged = paths.flow_staging_dir / "validated-before-restart"
         staged.mkdir()
         for number in range(1, 7):
-            (staged / f"clip {number}.mp4").write_bytes(
-                f"staged-{number}".encode()
-            )
+            (staged / f"clip {number}.mp4").write_bytes(f"staged-{number}".encode())
     store.patch_job(
         job.id,
         status=CloudJobStatus.TTS_READY,
@@ -1788,7 +1858,9 @@ def test_post_flow_ready_cleanup_failure_keeps_checkpoint_and_continues_canva(
     assert result.error_message == ""
 
 
-def test_crash_after_flow_ready_never_reopens_or_regenerates_flow(monkeypatch, tmp_path):
+def test_crash_after_flow_ready_never_reopens_or_regenerates_flow(
+    monkeypatch, tmp_path
+):
     class SimulatedProcessCrash(BaseException):
         pass
 
@@ -1854,7 +1926,9 @@ def test_flow_boundary_honors_control_only_after_cleanup_attempt(
     assert canva.calls == []
 
 
-def test_flow_ready_checkpoint_skips_tts_and_flow_then_calls_canva(monkeypatch, tmp_path):
+def test_flow_ready_checkpoint_skips_tts_and_flow_then_calls_canva(
+    monkeypatch, tmp_path
+):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     job = _claimed_job(store)
     storage = CloudJobStorage(tmp_path / "jobs")
@@ -1957,7 +2031,9 @@ def test_workflow_post_cleans_canva_only_after_final_validated(monkeypatch, tmp_
     assert result.final_video == str(paths.final_file)
 
 
-def test_workflow_preserves_final_artifact_when_canva_post_clean_fails(monkeypatch, tmp_path):
+def test_workflow_preserves_final_artifact_when_canva_post_clean_fails(
+    monkeypatch, tmp_path
+):
     """Catches a post-validation cleanup error invalidating or regenerating the final job."""
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     job = _claimed_job(store)
@@ -1975,7 +2051,9 @@ def test_workflow_preserves_final_artifact_when_canva_post_clean_fails(monkeypat
     )
     tts = RecordingTTS()
     flow = RecordingFlow()
-    canva = PostCleanRecordingCanva(store, cleanup_error=RuntimeError("cleanup unavailable"))
+    canva = PostCleanRecordingCanva(
+        store, cleanup_error=RuntimeError("cleanup unavailable")
+    )
     _accept_media(monkeypatch)
 
     result = _workflow(tmp_path, store, tts=tts, flow=flow, canva=canva).run(
@@ -2081,7 +2159,9 @@ def test_checkpoint_with_missing_artifacts_never_repeats_paid_steps(tmp_path):
     assert canva.calls == []
 
 
-def test_63_second_narration_persists_adaptive_timing_before_flow(monkeypatch, tmp_path):
+def test_63_second_narration_persists_adaptive_timing_before_flow(
+    monkeypatch, tmp_path
+):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     job = _claimed_job(store)
     tts = RecordingTTS()
@@ -2097,9 +2177,7 @@ def test_63_second_narration_persists_adaptive_timing_before_flow(monkeypatch, t
     assert result.audio_duration_seconds == pytest.approx(63.25)
     assert result.canva_playback_speed == pytest.approx(60.0 / 63.25)
     assert result.target_final_duration_seconds == pytest.approx(63.25)
-    assert canva.job_timings == [
-        pytest.approx((63.25, 60.0 / 63.25, 63.25))
-    ]
+    assert canva.job_timings == [pytest.approx((63.25, 60.0 / 63.25, 63.25))]
 
 
 def test_narration_longer_than_sixty_seconds_continues_through_canva(
@@ -2122,7 +2200,9 @@ def test_narration_longer_than_sixty_seconds_continues_through_canva(
     assert len(canva.calls) == 1
 
 
-def test_tts_ready_resume_reuses_audio_and_reconciles_exact_timing(monkeypatch, tmp_path):
+def test_tts_ready_resume_reuses_audio_and_reconciles_exact_timing(
+    monkeypatch, tmp_path
+):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     job = _claimed_job(store)
     storage = CloudJobStorage(tmp_path / "jobs")
@@ -2178,9 +2258,7 @@ def test_flow_ready_resume_reuses_paid_work_and_reconciles_timing_before_canva(
     assert tts.calls == []
     assert flow.calls == []
     assert len(canva.calls) == 1
-    assert canva.job_timings == [
-        pytest.approx((63.25, 60.0 / 63.25, 63.25))
-    ]
+    assert canva.job_timings == [pytest.approx((63.25, 60.0 / 63.25, 63.25))]
     assert result.status is CloudJobStatus.COMPLETED
 
 
@@ -2196,7 +2274,9 @@ def test_final_duration_near_adaptive_target_passes(monkeypatch, tmp_path):
     assert result.target_final_duration_seconds == pytest.approx(63.25)
 
 
-def test_final_duration_is_not_compared_with_audio_derived_target(monkeypatch, tmp_path):
+def test_final_duration_is_not_compared_with_audio_derived_target(
+    monkeypatch, tmp_path
+):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     job = _claimed_job(store)
     storage = CloudJobStorage(tmp_path / "jobs")
@@ -2210,7 +2290,9 @@ def test_final_duration_is_not_compared_with_audio_derived_target(monkeypatch, t
     assert all(path.is_file() for path in paths.flow_files)
 
 
-def test_factory_builds_worker_and_workflow_from_existing_app_config(monkeypatch, tmp_path):
+def test_factory_builds_worker_and_workflow_from_existing_app_config(
+    monkeypatch, tmp_path
+):
     """The production factory must use the existing app config, not a second loader."""
     factory = importlib.import_module("app.services.cloud_agent.factory")
     app_config = {

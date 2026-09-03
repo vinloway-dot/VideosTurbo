@@ -8,7 +8,8 @@ import pytest
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from app.models.cloud_agent import ServiceSessionStatus
+from app.models.cloud_agent import FlowRecoveryState, ServiceSessionStatus
+from app.services.cloud_agent import errors as cloud_agent_errors
 from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
     FlowBatchIncompleteError,
@@ -23,20 +24,54 @@ from app.services.cloud_agent.providers import google_flow
 from app.services.cloud_agent.providers.google_flow import classify_google_flow_session
 
 
-FIXTURE_DIR = Path(__file__).resolve().parents[2] / "resources" / "cloud_agent" / "google_flow"
+FIXTURE_DIR = (
+    Path(__file__).resolve().parents[2] / "resources" / "cloud_agent" / "google_flow"
+)
 
 
 @pytest.mark.parametrize(
     ("fixture_name", "url", "expected"),
     [
-        ("ready.html", "https://labs.google/fx/tools/flow/project/demo", ServiceSessionStatus.READY),
-        ("login.html", "https://accounts.google.com/v3/signin/identifier", ServiceSessionStatus.SESSION_EXPIRED),
-        ("continue_google.html", "https://labs.google/fx/tools/flow", ServiceSessionStatus.SESSION_EXPIRED),
-        ("password.html", "https://accounts.google.com/v3/signin/challenge/pwd", ServiceSessionStatus.LOGIN_REQUIRED),
-        ("captcha.html", "https://accounts.google.com/v3/signin/challenge", ServiceSessionStatus.CAPTCHA_REQUIRED),
-        ("two_factor.html", "https://accounts.google.com/v3/signin/challenge/totp", ServiceSessionStatus.TWO_FACTOR_REQUIRED),
-        ("verification.html", "https://accounts.google.com/v3/signin/challenge/ipp", ServiceSessionStatus.VERIFICATION_REQUIRED),
-        ("unknown.html", "https://labs.google/fx/tools/flow", ServiceSessionStatus.ERROR),
+        (
+            "ready.html",
+            "https://labs.google/fx/tools/flow/project/demo",
+            ServiceSessionStatus.READY,
+        ),
+        (
+            "login.html",
+            "https://accounts.google.com/v3/signin/identifier",
+            ServiceSessionStatus.SESSION_EXPIRED,
+        ),
+        (
+            "continue_google.html",
+            "https://labs.google/fx/tools/flow",
+            ServiceSessionStatus.SESSION_EXPIRED,
+        ),
+        (
+            "password.html",
+            "https://accounts.google.com/v3/signin/challenge/pwd",
+            ServiceSessionStatus.LOGIN_REQUIRED,
+        ),
+        (
+            "captcha.html",
+            "https://accounts.google.com/v3/signin/challenge",
+            ServiceSessionStatus.CAPTCHA_REQUIRED,
+        ),
+        (
+            "two_factor.html",
+            "https://accounts.google.com/v3/signin/challenge/totp",
+            ServiceSessionStatus.TWO_FACTOR_REQUIRED,
+        ),
+        (
+            "verification.html",
+            "https://accounts.google.com/v3/signin/challenge/ipp",
+            ServiceSessionStatus.VERIFICATION_REQUIRED,
+        ),
+        (
+            "unknown.html",
+            "https://labs.google/fx/tools/flow",
+            ServiceSessionStatus.ERROR,
+        ),
     ],
 )
 def test_google_flow_session_fixture_classification(fixture_name, url, expected):
@@ -206,7 +241,11 @@ class FakeLocator:
             self.page.active_download.index = 0
             self.page.card_download_format_open = False
             self.page.actions.append(
-                ("click", "card_video_format", self.page.card_video_format_names[self.index])
+                (
+                    "click",
+                    "card_video_format",
+                    self.page.card_video_format_names[self.index],
+                )
             )
             return
         if self.kind == "back_to_project":
@@ -384,7 +423,9 @@ class FakeLocator:
         if self.kind == "ambiguous":
             return int(self.index or 0)
         if self.kind == "card_video":
-            if self.index is None or self.index >= len(self.page.active_completed_video_poll):
+            if self.index is None or self.index >= len(
+                self.page.active_completed_video_poll
+            ):
                 return 0
             return int(
                 self.page.active_completed_video_poll[self.index].get(
@@ -440,7 +481,9 @@ class FakeLocator:
             if self.page.in_clip_editor:
                 return 0
             if self.page.media_list_sequence:
-                self.page.last_media_list_available = self.page.media_list_sequence.pop(0)
+                self.page.last_media_list_available = self.page.media_list_sequence.pop(
+                    0
+                )
             return int(self.page.last_media_list_available)
         if self.kind == "inventory_cards":
             if self.page.inventory_sequence:
@@ -611,9 +654,7 @@ class FakeLocator:
             return FakeLocator(self.page, "agent")
         if self.kind == "composer" and "textarea" in str(selector):
             prompt_kind = (
-                "multiple_prompt"
-                if self.page.agent_prompt_count != 1
-                else "prompt"
+                "multiple_prompt" if self.page.agent_prompt_count != 1 else "prompt"
             )
             return FakeLocator(self.page, prompt_kind)
         if self.kind == "fallback_prompt" and str(selector).startswith("xpath="):
@@ -623,7 +664,7 @@ class FakeLocator:
                 index=self.index,
                 pinned=self.pinned,
             )
-        if self.kind == "media_list" and "role=\"button\"" in str(selector):
+        if self.kind == "media_list" and 'role="button"' in str(selector):
             return FakeLocator(self.page, "inventory_cards")
         if self.kind == "media_card" and str(selector) == "video":
             return FakeLocator(self.page, "card_video", index=self.index)
@@ -634,8 +675,10 @@ class FakeLocator:
         pattern = getattr(name, "pattern", str(name)).lower()
         if self.kind == "composer" and role == "button" and "generate" in pattern:
             return FakeLocator(self.page, "generate")
-        if self.kind == "fallback_container" and role == "button" and (
-            "generate" in pattern or "สร้าง" in pattern
+        if (
+            self.kind == "fallback_container"
+            and role == "button"
+            and ("generate" in pattern or "สร้าง" in pattern)
         ):
             return FakeLocator(
                 self.page,
@@ -645,11 +688,15 @@ class FakeLocator:
             )
         if self.kind == "media_card" and role == "button" and "more" in pattern:
             return FakeLocator(self.page, "card_menu", index=self.index)
-        if self.kind == "dialog" and role == "button" and (
-            "delete" in pattern or "ลบ" in pattern
+        if (
+            self.kind == "dialog"
+            and role == "button"
+            and ("delete" in pattern or "ลบ" in pattern)
         ):
             return FakeLocator(self.page, "confirm_delete")
-        raise AssertionError(f"unexpected nested role lookup: {self.kind} {role} {pattern}")
+        raise AssertionError(
+            f"unexpected nested role lookup: {self.kind} {role} {pattern}"
+        )
 
     def get_by_text(self, text, *, exact=None):
         del exact
@@ -769,9 +816,7 @@ class FakePage:
         self.landing = landing
         self.agent_available = agent_available
         self.agent_text_available = (
-            agent_available
-            if agent_text_available is None
-            else agent_text_available
+            agent_available if agent_text_available is None else agent_text_available
         )
         self.clip_names = list(clip_names or [])
         self.page_semantic_names = (
@@ -787,8 +832,7 @@ class FakePage:
         self.prompt_label_available = prompt_label_available
         self.generation_completion_names = generation_completion_names
         self.renamed_clip_names = list(
-            renamed_clip_names
-            or [f"clip {number}" for number in range(1, 7)]
+            renamed_clip_names or [f"clip {number}" for number in range(1, 7)]
         )
         self.pending_clip_names = None
         self.last_filled = ""
@@ -807,7 +851,9 @@ class FakePage:
         self.media_list_sequence = list(media_list_sequence or [])
         self.last_media_list_available = media_list_available
         self.inventory_sequence = list(
-            inventory_sequence if inventory_sequence is not None else [len(self.clip_names)]
+            inventory_sequence
+            if inventory_sequence is not None
+            else [len(self.clip_names)]
         )
         self.card_count_sequence = list(card_count_sequence or [])
         self.last_card_count = len(self.clip_names)
@@ -932,8 +978,7 @@ class FakePage:
     def locator(self, selector):
         if (
             selector
-            == '[data-testid="virtuoso-item-list"]:visible '
-            '[role="button"][tabindex="0"]'
+            == '[data-testid="virtuoso-item-list"]:visible [role="button"][tabindex="0"]'
         ):
             return FakeLocator(self, "media_cards")
         if selector == '[data-testid="virtuoso-item-list"]:visible':
@@ -989,8 +1034,10 @@ class FakePage:
             return FakeLocator(self, "downloads")
         if role == "menuitem" and ("delete" in pattern or "ลบ" in pattern):
             return FakeLocator(self, "card_menu_delete")
-        if role == "menuitem" and self.card_download_name and name.search(
-            self.card_download_name
+        if (
+            role == "menuitem"
+            and self.card_download_name
+            and name.search(self.card_download_name)
         ):
             return FakeLocator(self, "card_menu_download")
         if role == "menuitem" and self.card_download_format_open:
@@ -1162,7 +1209,10 @@ class FakeCdpSession:
                     "name": {"value": name},
                     "description": {"value": description},
                     "properties": [
-                        {"name": "disabled", "value": {"value": not card.get("playable", True)}},
+                        {
+                            "name": "disabled",
+                            "value": {"value": not card.get("playable", True)},
+                        },
                         {"name": "busy", "value": {"value": card.get("busy", False)}},
                     ],
                 }
@@ -1235,7 +1285,9 @@ def _client(
     settled_poll_count=None,
 ):
     client_cls = getattr(google_flow, "GoogleFlowClient", None)
-    assert client_cls is not None, "Task 8 Google Flow production client is not implemented"
+    assert client_cls is not None, (
+        "Task 8 Google Flow production client is not implemented"
+    )
     sessions = FakeSessionManager()
     kwargs = {
         "service_url": "https://labs.google/fx/tools/flow/project/demo",
@@ -1330,7 +1382,7 @@ def test_google_flow_workspace_context_uses_browser_configuration_and_holds_lock
         (
             "https://labs.google/fx/tools/flow/project/demo",
             _navigation_options(client),
-        )
+        ),
     ]
 
 
@@ -1670,8 +1722,7 @@ def test_google_flow_editor_requires_consecutive_healthy_observations(monkeypatc
 def test_google_flow_fatal_application_error_is_not_actionable():
     page = FakePage(
         progress_html=[
-            "<main>Application error: a client-side exception has occurred "
-            "(reading 'service')</main>"
+            "<main>Application error: a client-side exception has occurred (reading 'service')</main>"
         ]
     )
     client, _ = _client(page, editor_ready_timeout_seconds=1.0)
@@ -1692,7 +1743,9 @@ def test_google_flow_healthy_direct_project_does_not_reload():
 
 def test_google_flow_direct_fatal_recovers_with_one_same_page_reload():
     page = FakePage(
-        progress_html=["<main>Application error: a client-side exception has occurred</main>"],
+        progress_html=[
+            "<main>Application error: a client-side exception has occurred</main>"
+        ],
         reload_progress_html=[["<div>Ready</div>"]],
     )
     client, _ = _client(page, editor_ready_timeout_seconds=0.02)
@@ -1728,14 +1781,14 @@ def test_google_flow_direct_recovery_reload_timeout_at_project_url_continues(
     with client.acquire_workspace(_job()) as workspace:
         assert workspace.page is page
 
-    assert reload_calls == [
-        {"wait_until": "domcontentloaded", "timeout": 5_000}
-    ]
+    assert reload_calls == [{"wait_until": "domcontentloaded", "timeout": 5_000}]
 
 
 def test_google_flow_direct_fatal_recovers_with_two_same_page_reloads():
     page = FakePage(
-        progress_html=["<main>Application error: a client-side exception has occurred</main>"],
+        progress_html=[
+            "<main>Application error: a client-side exception has occurred</main>"
+        ],
         reload_progress_html=[
             ["<main>Application error: a client-side exception has occurred</main>"],
             ["<div>Ready</div>"],
@@ -1752,7 +1805,9 @@ def test_google_flow_direct_fatal_recovers_with_two_same_page_reloads():
 
 def test_google_flow_persistent_direct_fatal_fails_after_two_reloads():
     page = FakePage(
-        progress_html=["<main>Application error: a client-side exception has occurred</main>"],
+        progress_html=[
+            "<main>Application error: a client-side exception has occurred</main>"
+        ],
         reload_progress_html=[
             ["<main>Application error: a client-side exception has occurred</main>"],
             ["<main>Application error: a client-side exception has occurred</main>"],
@@ -1770,7 +1825,9 @@ def test_google_flow_persistent_direct_fatal_fails_after_two_reloads():
 
 def test_google_flow_reconciliation_persistent_fatal_fails_after_two_reloads():
     page = FakePage(
-        progress_html=["<main>Application error: a client-side exception has occurred</main>"],
+        progress_html=[
+            "<main>Application error: a client-side exception has occurred</main>"
+        ],
     )
     client, _ = _client(page, editor_ready_timeout_seconds=0.02)
 
@@ -1861,8 +1918,7 @@ def test_fenced_workspace_recovers_nonfatal_unclassified_project_after_reload():
 def test_fenced_workspace_recovers_transient_fatal_editor_with_same_page_reload():
     page = FakePage(
         progress_html=[
-            "<main>Application error: a client-side exception has occurred "
-            "(reading 'service')</main>"
+            "<main>Application error: a client-side exception has occurred (reading 'service')</main>"
         ],
         reload_progress_html=[["<div>Ready</div>"]],
     )
@@ -1927,7 +1983,9 @@ def test_google_flow_workspace_detects_session_expiry_on_its_owned_project_page(
     )
     client, sessions = _client(page)
 
-    with pytest.raises(HumanRequiredError, match="google_flow session requires human recovery"):
+    with pytest.raises(
+        HumanRequiredError, match="google_flow session requires human recovery"
+    ):
         with client.acquire_workspace(_job()):
             pass
 
@@ -1943,7 +2001,9 @@ def test_google_flow_workspace_detects_security_challenge_on_its_owned_project_p
     )
     client, sessions = _client(page)
 
-    with pytest.raises(HumanRequiredError, match="google_flow session requires human recovery"):
+    with pytest.raises(
+        HumanRequiredError, match="google_flow session requires human recovery"
+    ):
         with client.acquire_workspace(_job()):
             pass
 
@@ -2000,7 +2060,9 @@ def test_flow_workspace_transient_empty_inventory_cannot_pass_generation_gate(
     monkeypatch.setattr(client, "_wait_for_settled_editor", lambda _page: None)
 
     with client.acquire_workspace(_job()) as workspace:
-        with pytest.raises(FlowWorkspaceVerificationError, match="empty product workspace"):
+        with pytest.raises(
+            FlowWorkspaceVerificationError, match="empty product workspace"
+        ):
             workspace.prepare_for_generation()
 
     assert ("click", "generate") not in page.actions
@@ -2093,7 +2155,9 @@ def test_flow_workspace_preclean_fails_closed_when_card_delete_is_unavailable():
     client, _ = _client(page, editor_ready_timeout_seconds=0.1)
 
     with client.acquire_workspace(_job()) as workspace:
-        with pytest.raises(FlowWorkspaceVerificationError, match="could not be deleted"):
+        with pytest.raises(
+            FlowWorkspaceVerificationError, match="could not be deleted"
+        ):
             workspace.preclean_and_verify_empty()
 
     assert page.clip_names == ["generated-image-a"]
@@ -2183,9 +2247,7 @@ def test_flow_workspace_preclean_reload_timeout_at_project_url_continues(
         monkeypatch.setattr(page, "reload", slow_reload)
         workspace.preclean_and_verify_empty()
 
-    assert reload_calls == [
-        {"wait_until": "domcontentloaded", "timeout": 5_000}
-    ]
+    assert reload_calls == [{"wait_until": "domcontentloaded", "timeout": 5_000}]
 
 
 def test_flow_workspace_preclean_successful_login_redirect_requires_human(
@@ -2352,7 +2414,9 @@ def test_flow_workspace_renames_out_of_order_results_and_downloads_project_archi
         materializer_calls.append((Path(archive_path), job_paths, kwargs))
         return job_paths.flow_files
 
-    monkeypatch.setattr(google_flow, "materialize_flow_archive", materialize, raising=False)
+    monkeypatch.setattr(
+        google_flow, "materialize_flow_archive", materialize, raising=False
+    )
 
     with client.acquire_workspace(_job()) as workspace:
         generate = getattr(workspace, "generate_and_download", None)
@@ -2482,9 +2546,10 @@ def test_flow_workspace_downloads_validated_archive_when_names_are_absent_after_
         )
 
     assert result == paths.flow_files
-    assert page.actions.count(
-        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
-    ) == 1
+    assert (
+        page.actions.count(("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION))
+        == 1
+    )
     assert page.reload_calls == [_navigation_options(client)]
     assert ("click", "project_menu") in page.actions
     assert ("click", "project_download") in page.actions
@@ -2502,8 +2567,7 @@ def test_flow_workspace_reuses_existing_rename_confirmation_without_resubmitting
         reload_state_updates=[{"clip_names": complete_names}],
         inventory_sequence=[6, 6, 6],
         rename_response_text=(
-            "ผมได้เปลี่ยนชื่อคลิปทั้ง 6 เป็น CLIP 1 ถึง CLIP 6 "
-            "ตามชื่อที่คุณระบุไว้เรียบร้อยแล้วครับ"
+            "ผมได้เปลี่ยนชื่อคลิปทั้ง 6 เป็น CLIP 1 ถึง CLIP 6 ตามชื่อที่คุณระบุไว้เรียบร้อยแล้วครับ"
         ),
     )
     client, _ = _client(page)
@@ -2531,9 +2595,7 @@ def test_flow_workspace_reuses_existing_rename_confirmation_without_resubmitting
 
 
 def test_project_download_selector_accepts_observed_icon_prefixed_thai_name():
-    assert google_flow._PROJECT_DOWNLOAD_NAME_RE.fullmatch(
-        "download ดาวน์โหลดโปรเจ็กต์"
-    )
+    assert google_flow._PROJECT_DOWNLOAD_NAME_RE.fullmatch("download ดาวน์โหลดโปรเจ็กต์")
 
 
 @pytest.mark.parametrize(
@@ -2625,6 +2687,154 @@ def test_project_archive_translates_playwright_download_timeout(tmp_path):
         )
 
     assert isinstance(exc_info.value.__cause__, PlaywrightTimeoutError)
+
+
+def test_project_archive_translates_browser_close_during_save(tmp_path):
+    """Catches a Chrome crash escaping as an untyped worker RuntimeError."""
+    browser_closed_error = getattr(
+        cloud_agent_errors,
+        "FlowBrowserClosedError",
+        None,
+    )
+    assert browser_closed_error is not None
+    page = FakePage(progress_html=["<div>Generation progress 6 / 6</div>"])
+
+    class BrowserClosedDownload(FakeDownload):
+        def save_as(self, path):
+            del path
+            raise PlaywrightError(
+                "Download.save_as: Target page, context or browser has been closed"
+            )
+
+    class BrowserClosedDownloadExpectation(FakeDownloadExpectation):
+        @property
+        def value(self):
+            assert self.index is not None
+            return BrowserClosedDownload(self.page, self.index)
+
+    def expect_download(*, timeout):
+        assert timeout == 300_000
+        return BrowserClosedDownloadExpectation(page)
+
+    page.expect_download = expect_download
+    client, _ = _client(
+        page,
+        project_archive_download_timeout_seconds=300.0,
+    )
+
+    with pytest.raises(
+        browser_closed_error,
+        match="browser closed during project archive download",
+    ) as exc_info:
+        google_flow.FlowWorkspaceRun(client, page)._download_project_archive_to(
+            tmp_path / "project.zip"
+        )
+
+    assert isinstance(exc_info.value.__cause__, PlaywrightError)
+
+
+def test_project_archive_uses_named_card_fallback_only_after_batch_failure(
+    monkeypatch,
+    tmp_path,
+):
+    """Catches individual downloads running before Download Project is attempted."""
+    titles = [
+        "CLIP 5 — Traditional Remedy Preparation",
+        "CLIP 3 — Flowers and Seed Pods",
+        "CLIP 1 — Thai Licorice Herb",
+        "CLIP 4 — Medicinal Root and Wood",
+        "CLIP 6 — Morning and Evening Use",
+        "CLIP 2 — Thorny Vine and Leaves",
+    ]
+    cards = _completed_video_cards(
+        fingerprints=tuple(f"asset-{index}" for index in range(6))
+    )
+    for card, title in zip(cards, titles, strict=True):
+        card["description"] = title
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"asset {index}" for index in range(6)],
+        completed_video_polls=[cards],
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=1.0)
+    workspace = google_flow.FlowWorkspaceRun(client, page)
+    destination = tmp_path / "project.zip"
+    project_attempts = []
+
+    def fail_project_download(_destination):
+        project_attempts.append("download_project")
+        raise FlowArchiveValidationError("project archive timed out")
+
+    monkeypatch.setattr(
+        workspace, "_download_project_archive_to", fail_project_download
+    )
+    monkeypatch.setattr(
+        google_flow, "validate_flow_source_video", lambda *_a, **_k: None
+    )
+
+    workspace._download_project_archive_with_fallback(destination)
+
+    assert project_attempts == ["download_project"]
+    assert [action for action in page.actions if action[0] == "hover"] == [
+        ("hover", "media_card", index) for index in range(6) for _ in range(2)
+    ]
+    with ZipFile(destination) as archive:
+        assert archive.namelist() == [f"clip {index}.mp4" for index in range(1, 7)]
+
+
+def test_reopened_inventory_uses_named_cards_without_repeating_failed_batch(
+    monkeypatch,
+    tmp_path,
+):
+    """Catches a browser-crash reopen retrying the same crashing project ZIP."""
+    cards = _completed_video_cards(
+        fingerprints=tuple(f"asset-{index}" for index in range(5))
+    )
+    for index, card in enumerate(cards, start=1):
+        card["description"] = f"CLIP {index} — recovered"
+    page = FakePage(
+        progress_html=["<div>Generation progress 5 / 6</div>"],
+        clip_names=[f"asset {index}" for index in range(5)],
+        completed_video_polls=[cards],
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=1.0)
+    workspace = google_flow.FlowWorkspaceRun(
+        client,
+        page,
+        prefer_individual_download=True,
+    )
+    destination = tmp_path / "partial-0.zip"
+
+    monkeypatch.setattr(
+        workspace,
+        "_download_project_archive_to",
+        lambda _destination: pytest.fail(
+            "Download Project must not repeat after crash"
+        ),
+    )
+    monkeypatch.setattr(
+        google_flow, "validate_flow_source_video", lambda *_a, **_k: None
+    )
+
+    workspace._download_project_archive_with_fallback(destination)
+
+    with ZipFile(destination) as archive:
+        assert archive.namelist() == [f"clip {index}.mp4" for index in range(1, 6)]
+
+
+def test_inventory_pending_reopen_enables_individual_download_fallback():
+    page = FakePage(progress_html=["<div>Ready</div>"])
+    client, _ = _client(page, editor_ready_timeout_seconds=1.0)
+    job = SimpleNamespace(
+        id="job-123",
+        master_prompt="Create six chronological videos.",
+        flow_generation_unresolved=False,
+        flow_recovery_state=FlowRecoveryState.INVENTORY_PENDING,
+        flow_workspace_retry_attempts=1,
+    )
+
+    with client.acquire_workspace(job) as workspace:
+        assert workspace.prefer_individual_download is True
 
 
 def test_project_download_chooses_rightmost_more_control():
@@ -2764,8 +2974,7 @@ def test_partial_inventory_uses_validated_five_clip_archive_without_card_titles(
         semantic_numbers=(1, 2, 4, 5, 6),
         missing_index=3,
         staged_files=tuple(
-            paths.flow_staging_dir / f"clip {number}.mp4"
-            for number in (1, 2, 4, 5, 6)
+            paths.flow_staging_dir / f"clip {number}.mp4" for number in (1, 2, 4, 5, 6)
         ),
         baseline_digest="a" * 64,
     )
@@ -2889,9 +3098,7 @@ def test_normal_rename_reload_timeout_at_project_url_hydrates_waits_grace_then_d
         )
 
     assert result == paths.flow_files
-    assert reload_calls == [
-        {"wait_until": "domcontentloaded", "timeout": 5_000}
-    ]
+    assert reload_calls == [{"wait_until": "domcontentloaded", "timeout": 5_000}]
     assert clock[0] >= 2.0
     assert page.actions.count(("click", "project_download")) == 1
 
@@ -2918,9 +3125,7 @@ def test_post_rename_reload_timeout_after_login_redirect_requires_human(monkeypa
     with pytest.raises(HumanRequiredError, match="SESSION_EXPIRED") as exc_info:
         google_flow.FlowWorkspaceRun(client, page)._refresh_and_hydrate()
 
-    assert reload_calls == [
-        {"wait_until": "domcontentloaded", "timeout": 5_000}
-    ]
+    assert reload_calls == [{"wait_until": "domcontentloaded", "timeout": 5_000}]
     assert hydrate_calls == []
     assert isinstance(exc_info.value.__cause__, PlaywrightTimeoutError)
 
@@ -2950,8 +3155,7 @@ def test_normal_rename_caches_validated_five_archive_for_recovery_coordinator(
         semantic_numbers=(1, 2, 4, 5, 6),
         missing_index=3,
         staged_files=tuple(
-            paths.flow_staging_dir / f"clip {number}.mp4"
-            for number in (1, 2, 4, 5, 6)
+            paths.flow_staging_dir / f"clip {number}.mp4" for number in (1, 2, 4, 5, 6)
         ),
         baseline_digest="c" * 64,
     )
@@ -2970,12 +3174,12 @@ def test_normal_rename_caches_validated_five_archive_for_recovery_coordinator(
 
     assert result is inventory
     assert page.actions.count(("click", "project_download")) == 1
-    assert page.actions.count(
-        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
-    ) == 1
+    assert (
+        page.actions.count(("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION))
+        == 1
+    )
     assert not any(
-        action[:3]
-        == ("fill", "prompt", google_flow.RENAME_SURVIVING_CLIPS_INSTRUCTION)
+        action[:3] == ("fill", "prompt", google_flow.RENAME_SURVIVING_CLIPS_INSTRUCTION)
         for action in page.actions
     )
 
@@ -3016,8 +3220,7 @@ def test_partial_inventory_waits_grace_then_accepts_five_archive_with_retained_f
         semantic_numbers=(1, 2, 4, 5, 6),
         missing_index=3,
         staged_files=tuple(
-            paths.flow_staging_dir / f"clip {number}.mp4"
-            for number in (1, 2, 4, 5, 6)
+            paths.flow_staging_dir / f"clip {number}.mp4" for number in (1, 2, 4, 5, 6)
         ),
         baseline_digest="b" * 64,
     )
@@ -3222,9 +3425,10 @@ def test_flow_workspace_rename_completes_from_semantic_names_when_send_stays_dis
         )
 
     assert result == paths.flow_files
-    assert page.actions.count(
-        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
-    ) == 1
+    assert (
+        page.actions.count(("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION))
+        == 1
+    )
     assert page.reload_calls == [_navigation_options(client)]
     assert ("click", "project_download") in page.actions
 
@@ -3285,9 +3489,10 @@ def test_flow_workspace_rename_ignores_stale_submit_locator_after_click(
         )
 
     assert result == paths.flow_files
-    assert page.actions.count(
-        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
-    ) == 1
+    assert (
+        page.actions.count(("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION))
+        == 1
+    )
     assert not any(
         action[:3] == ("fill", "prompt", _job().master_prompt)
         for action in page.actions
@@ -3302,7 +3507,14 @@ def test_flow_workspace_stale_submit_locator_falls_back_to_validated_archive(
     page = FakePage(
         progress_html=["<div>Generation progress 6 / 6</div>"],
         clip_names=[f"draft-{number}" for number in range(1, 7)],
-        renamed_clip_names=["clip 1", "clip 2", "clip 3", "clip 4", "clip 5", "draft-6"],
+        renamed_clip_names=[
+            "clip 1",
+            "clip 2",
+            "clip 3",
+            "clip 4",
+            "clip 5",
+            "draft-6",
+        ],
         inventory_sequence=[6, 6, 6],
         send_stale_after_click=True,
     )
@@ -3322,9 +3534,10 @@ def test_flow_workspace_stale_submit_locator_falls_back_to_validated_archive(
         )
 
     assert result == paths.flow_files
-    assert page.actions.count(
-        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
-    ) == 1
+    assert (
+        page.actions.count(("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION))
+        == 1
+    )
     assert not any(
         action[:3] == ("fill", "prompt", _job().master_prompt)
         for action in page.actions
@@ -3362,9 +3575,10 @@ def test_flow_workspace_rename_uses_archive_when_names_are_not_rendered_after_re
         )
 
     assert result == paths.flow_files
-    assert page.actions.count(
-        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
-    ) == 1
+    assert (
+        page.actions.count(("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION))
+        == 1
+    )
     assert page.reload_calls == [_navigation_options(client)]
     assert ("click", "project_menu") in page.actions
     assert ("click", "project_download") in page.actions
@@ -3404,9 +3618,10 @@ def test_flow_workspace_rename_uses_archive_when_semantic_names_stay_incomplete(
         )
 
     assert result == paths.flow_files
-    assert page.actions.count(
-        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
-    ) == 1
+    assert (
+        page.actions.count(("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION))
+        == 1
+    )
     assert not any(
         action[:3] == ("fill", "prompt", _job().master_prompt)
         for action in page.actions
@@ -3429,7 +3644,14 @@ def test_flow_workspace_rename_recovers_hydration_in_one_context_after_reload(
         ],
         reload_state_updates=[{}, {"clip_names": complete_names}],
         clip_names=[f"draft-{number}" for number in range(1, 7)],
-        renamed_clip_names=["clip 1", "clip 2", "clip 3", "clip 4", "clip 5", "draft-6"],
+        renamed_clip_names=[
+            "clip 1",
+            "clip 2",
+            "clip 3",
+            "clip 4",
+            "clip 5",
+            "draft-6",
+        ],
         inventory_sequence=[6, 6, 6],
         agent_enabled_states=[False],
         send_enabled_after_click=False,
@@ -3451,9 +3673,10 @@ def test_flow_workspace_rename_recovers_hydration_in_one_context_after_reload(
 
     assert result == paths.flow_files
     assert client.browser.open_calls == [("google_flow", None, 1.0)]
-    assert page.actions.count(
-        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
-    ) == 1
+    assert (
+        page.actions.count(("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION))
+        == 1
+    )
     assert page.reload_calls == [_navigation_options(client)] * 2
 
 
@@ -3625,9 +3848,10 @@ def test_flow_workspace_validates_archive_when_rendered_names_are_duplicate(
         result = workspace.generate_and_download(_job(), paths)
 
     assert result == paths.flow_files
-    assert page.actions.count(
-        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
-    ) == 1
+    assert (
+        page.actions.count(("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION))
+        == 1
+    )
     assert page.reload_calls == [_navigation_options(client)]
     assert materializer_calls == 1
     assert ("click", "project_menu") in page.actions
@@ -3747,7 +3971,9 @@ def test_google_flow_submits_rename_from_fallback_when_agent_panel_composer_is_m
         google_flow.RENAME_CLIPS_INSTRUCTION,
     ) in page.actions
     assert ("click", "fallback_generate") in page.actions
-    assert not any(action[0] == "fill" and action[1] == "prompt" for action in page.actions)
+    assert not any(
+        action[0] == "fill" and action[1] == "prompt" for action in page.actions
+    )
     assert page.actions.count(("click", "fallback_generate")) == 1
 
 
@@ -3757,9 +3983,10 @@ def test_google_flow_rename_uses_primary_bottom_composer_when_it_is_usable():
 
     client._submit_agent_prompt(page, google_flow.RENAME_CLIPS_INSTRUCTION)
 
-    assert page.actions.count(
-        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
-    ) == 1
+    assert (
+        page.actions.count(("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION))
+        == 1
+    )
     assert page.actions.count(("click", "generate")) == 1
     assert not any(
         action[1] == "side_panel_prompt"
@@ -3811,9 +4038,12 @@ def test_google_flow_rename_uses_bottom_composer_when_right_panel_has_two_rows()
 
     client._submit_agent_prompt(page, google_flow.RENAME_CLIPS_INSTRUCTION)
 
-    assert page.actions.count(
-        ("fill", "side_panel_prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
-    ) == 1
+    assert (
+        page.actions.count(
+            ("fill", "side_panel_prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
+        )
+        == 1
+    )
     assert page.actions.count(("click", "side_panel_generate")) == 1
     assert not any(
         action[1] == "upper_panel_prompt"
@@ -3848,9 +4078,10 @@ def test_google_flow_rename_prefers_primary_bottom_composer_when_both_are_usable
 
     client._submit_agent_prompt(page, google_flow.RENAME_CLIPS_INSTRUCTION)
 
-    assert page.actions.count(
-        ("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION)
-    ) == 1
+    assert (
+        page.actions.count(("fill", "prompt", google_flow.RENAME_CLIPS_INSTRUCTION))
+        == 1
+    )
     assert page.actions.count(("click", "generate")) == 1
     assert not any(
         action[1] in {"fallback_prompt", "side_panel_prompt"}
@@ -4276,7 +4507,9 @@ def test_reconcile_targeted_replacement_downloads_only_exact_named_card(
     download_name,
     format_name,
 ):
-    baseline = _completed_video_cards(fingerprints=("one", "two", "four", "five", "six"))
+    baseline = _completed_video_cards(
+        fingerprints=("one", "two", "four", "five", "six")
+    )
     baseline.append(
         {
             "fingerprint": "stale-failed",
@@ -4329,7 +4562,9 @@ def test_reconcile_targeted_replacement_downloads_only_exact_named_card(
 def test_reconcile_targeted_replacement_rejects_partial_dom_rerender_as_new_clip(
     tmp_path,
 ):
-    baseline = _completed_video_cards(fingerprints=("one", "two", "four", "five", "six"))
+    baseline = _completed_video_cards(
+        fingerprints=("one", "two", "four", "five", "six")
+    )
     baseline.append(
         {
             "fingerprint": "stale-failed",
@@ -4365,7 +4600,8 @@ def test_reconcile_targeted_replacement_rejects_partial_dom_rerender_as_new_clip
 
 
 def test_reconcile_targeted_replacement_rejects_gif_and_270p_without_download(
-    monkeypatch, tmp_path,
+    monkeypatch,
+    tmp_path,
 ):
     page = FakePage(
         progress_html=["<div>Ready</div>"],
@@ -4388,7 +4624,9 @@ def test_reconcile_targeted_replacement_rejects_gif_and_270p_without_download(
         )
 
     assert not any(action[0] == "expect_download" for action in page.actions)
-    assert not any(action[:2] == ("click", "card_video_format") for action in page.actions)
+    assert not any(
+        action[:2] == ("click", "card_video_format") for action in page.actions
+    )
 
 
 def test_google_flow_completed_video_cards_preserve_generated_image_failure_gate(
@@ -4524,9 +4762,7 @@ def test_google_flow_reconciliation_preserves_typed_generation_timeout(
     paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
 
     def timeout(_page, _expected_count):
-        raise FlowGenerationTimeoutError(
-            "Google Flow generation timed out before 6/6"
-        )
+        raise FlowGenerationTimeoutError("Google Flow generation timed out before 6/6")
 
     monkeypatch.setattr(client, "_wait_for_generation", timeout)
 

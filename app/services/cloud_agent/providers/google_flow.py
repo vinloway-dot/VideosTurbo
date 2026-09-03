@@ -13,10 +13,15 @@ from zipfile import ZipFile
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from app.models.cloud_agent import CloudJobRecord, ServiceSessionStatus
+from app.models.cloud_agent import (
+    CloudJobRecord,
+    FlowRecoveryState,
+    ServiceSessionStatus,
+)
 from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
     FlowBatchIncompleteError,
+    FlowBrowserClosedError,
     FlowGenerationTimeoutError,
     FlowWorkspaceVerificationError,
     HumanRequiredError,
@@ -55,9 +60,9 @@ _CARD_FAILURE_RE = re.compile(
     r"(?:failed|failure|error|ล้มเหลว|ไม่สำเร็จ|ข้อผิดพลาด)",
     re.IGNORECASE,
 )
+_CARD_CLIP_TITLE_RE = re.compile(r"\bclip\s*([1-6])\b", re.IGNORECASE)
 _MEDIA_CARD_SELECTOR = (
-    '[data-testid="virtuoso-item-list"]:visible '
-    '[role="button"][tabindex="0"]'
+    '[data-testid="virtuoso-item-list"]:visible [role="button"][tabindex="0"]'
 )
 _CARD_DELETE_NAME_RE = re.compile(
     r"(?:delete\s+)?(?:move to trash|ย้ายลงถังขยะ)",
@@ -131,8 +136,7 @@ _SAFE_ANNOUNCEMENT_BUTTON_NAMES = (
     "ภายหลัง",
 )
 _DIALOG_INPUT_SELECTOR = (
-    'input:visible, textarea:visible, [contenteditable="true"]:visible, '
-    'select:visible'
+    'input:visible, textarea:visible, [contenteditable="true"]:visible, select:visible'
 )
 _BLOCKING_DIALOG_RE = re.compile(
     r"(?:sign\s*in|log\s*in|password|passkey|verify|verification|"
@@ -150,10 +154,7 @@ _ANNOUNCEMENT_DIALOG_RE = re.compile(
     re.IGNORECASE,
 )
 RENAME_CLIPS_INSTRUCTION = "เปลี่ยนชื่อคลิปตามลำดับ ของวีดีโอ"
-RENAME_SURVIVING_CLIPS_INSTRUCTION = (
-    "เปลี่ยนชื่อวิดีโอที่สร้างสำเร็จแต่ละรายการตามหมายเลข CLIP เดิม "
-    "ห้ามเลื่อนหมายเลขเพื่อปิดช่องว่าง ห้ามตั้งชื่อซ้ำ และห้ามเปลี่ยนลำดับ"
-)
+RENAME_SURVIVING_CLIPS_INSTRUCTION = "เปลี่ยนชื่อวิดีโอที่สร้างสำเร็จแต่ละรายการตามหมายเลข CLIP เดิม ห้ามเลื่อนหมายเลขเพื่อปิดช่องว่าง ห้ามตั้งชื่อซ้ำ และห้ามเปลี่ยนลำดับ"
 _DIRECT_LINK_RECOVERY_CYCLES = 2
 
 
@@ -252,10 +253,12 @@ class FlowWorkspaceRun:
         page: Any,
         *,
         job_id: str = "",
+        prefer_individual_download: bool = False,
     ) -> None:
         self.client = client
         self.page = page
         self.job_id = job_id
+        self.prefer_individual_download = bool(prefer_individual_download)
         self._prepared_master_prompt = ""
         self._prepared_recovery_prompt = ""
         self._prepared_missing_index = 0
@@ -452,7 +455,7 @@ class FlowWorkspaceRun:
         snapshot: Path,
         paths: JobPaths,
     ) -> FlowRecoveryCapture:
-        self._download_project_archive_to(snapshot)
+        self._download_project_archive_with_fallback(snapshot)
         try:
             materialized = materialize_flow_archive(
                 snapshot,
@@ -485,7 +488,7 @@ class FlowWorkspaceRun:
         if attempt < 1 or attempt > 2:
             raise ValueError("attempt must be between 1 and 2")
         snapshot = paths.flow_snapshots_dir / f"replacement-{attempt}.zip"
-        self._download_project_archive_to(snapshot)
+        self._download_project_archive_with_fallback(snapshot)
         return snapshot
 
     def _pin_current_media_cards(self) -> tuple[Any, ...] | None:
@@ -580,10 +583,12 @@ class FlowWorkspaceRun:
         titled = [
             item
             for item in current
-            if item[0].get_by_text(
+            if item[0]
+            .get_by_text(
                 f"clip {missing_index}",
                 exact=True,
-            ).count()
+            )
+            .count()
             == 1
             and self._card_is_completed_video(item[0])
         ]
@@ -594,7 +599,9 @@ class FlowWorkspaceRun:
         added = self._added_cards_with_preserved_baseline(current)
         if added is None:
             return None
-        completed_added = [item for item in added if self._card_is_completed_video(item[0])]
+        completed_added = [
+            item for item in added if self._card_is_completed_video(item[0])
+        ]
         return completed_added[0] if len(completed_added) == 1 else None
 
     def _new_failed_card_observed(self) -> bool:
@@ -629,7 +636,9 @@ class FlowWorkspaceRun:
         *,
         missing_index: int,
     ) -> None:
-        temporary_video = destination.parent / f".{destination.stem}.clip-{missing_index}.mp4"
+        temporary_video = (
+            destination.parent / f".{destination.stem}.clip-{missing_index}.mp4"
+        )
         temporary_archive = destination.parent / f".{destination.name}.tmp"
         temporary_video.unlink(missing_ok=True)
         temporary_archive.unlink(missing_ok=True)
@@ -663,7 +672,9 @@ class FlowWorkspaceRun:
                     "Google Flow replacement card Download action could not be verified"
                 )
             download.click()
-            format_deadline = time.monotonic() + self.client.editor_ready_timeout_seconds
+            format_deadline = (
+                time.monotonic() + self.client.editor_ready_timeout_seconds
+            )
             while True:
                 video_format = self.page.get_by_role(
                     "menuitem",
@@ -834,7 +845,97 @@ class FlowWorkspaceRun:
         )
 
     def _download_project_archive(self, paths: JobPaths) -> None:
-        self._download_project_archive_to(paths.flow_archive_file)
+        self._download_project_archive_with_fallback(paths.flow_archive_file)
+
+    def _download_project_archive_with_fallback(self, destination: Path) -> None:
+        if self.prefer_individual_download:
+            self._download_individual_cards_archive_to(destination)
+            return
+        try:
+            self._download_project_archive_to(destination)
+        except FlowBrowserClosedError:
+            raise
+        except FlowArchiveValidationError:
+            self._download_individual_cards_archive_to(destination)
+
+    def _semantic_number_after_hover(self, card: Any) -> int:
+        card.hover()
+        deadline = time.monotonic() + self.client.editor_ready_timeout_seconds
+        while True:
+            numbers = {
+                int(match.group(1))
+                for match in _CARD_CLIP_TITLE_RE.finditer(str(card.inner_text() or ""))
+            }
+            if len(numbers) == 1:
+                return numbers.pop()
+            if len(numbers) > 1:
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow card title contained ambiguous clip numbers"
+                )
+            if time.monotonic() >= deadline:
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow card clip title could not be verified after hover"
+                )
+            time.sleep(self.client.poll_seconds)
+
+    def _download_individual_cards_archive_to(self, destination: Path) -> None:
+        cards = self.client._media_cards(self.page)
+        part_archives: dict[int, Path] = {}
+        temporary_archive = destination.parent / f".{destination.name}.individual.tmp"
+        temporary_archive.unlink(missing_ok=True)
+        try:
+            for index in range(cards.count()):
+                card = cards.nth(index)
+                if not self._card_is_completed_video(card):
+                    continue
+                clip_number = self._semantic_number_after_hover(card)
+                if clip_number in part_archives:
+                    raise FlowWorkspaceVerificationError(
+                        f"Google Flow card title duplicated clip {clip_number}"
+                    )
+                pinned_card = card.element_handle()
+                if pinned_card is None:
+                    raise FlowWorkspaceVerificationError(
+                        "Google Flow card identity could not be verified for fallback download"
+                    )
+                part_archive = (
+                    destination.parent
+                    / f".{destination.name}.individual-clip-{clip_number}.zip"
+                )
+                part_archive.unlink(missing_ok=True)
+                self._download_replacement_card_to(
+                    card,
+                    pinned_card,
+                    part_archive,
+                    missing_index=clip_number,
+                )
+                part_archives[clip_number] = part_archive
+
+            if len(part_archives) not in {5, 6}:
+                raise FlowArchiveValidationError(
+                    "Google Flow individual fallback must map exactly five or six clips"
+                )
+
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with ZipFile(temporary_archive, "w") as combined:
+                for clip_number in sorted(part_archives):
+                    member = f"clip {clip_number}.mp4"
+                    with ZipFile(part_archives[clip_number]) as source:
+                        if source.namelist() != [member]:
+                            raise FlowArchiveValidationError(
+                                "Google Flow individual fallback archive was ambiguous"
+                            )
+                        combined.writestr(member, source.read(member))
+            temporary_archive.replace(destination)
+        finally:
+            temporary_archive.unlink(missing_ok=True)
+            for part_archive in part_archives.values():
+                part_archive.unlink(missing_ok=True)
+
+        if not destination.is_file():
+            raise FlowArchiveValidationError(
+                "Google Flow individual fallback did not produce an archive"
+            )
 
     def _project_download_menu_control(self) -> Any:
         controls = self.page.get_by_role(
@@ -891,9 +992,7 @@ class FlowWorkspaceRun:
             time.sleep(self.client.poll_seconds)
         try:
             with self.page.expect_download(
-                timeout=int(
-                    self.client.project_archive_download_timeout_seconds * 1000
-                )
+                timeout=int(self.client.project_archive_download_timeout_seconds * 1000)
             ) as download_info:
                 download_project.click()
             download = download_info.value
@@ -902,7 +1001,16 @@ class FlowWorkspaceRun:
                 "Google Flow project archive download timed out"
             ) from exc
         destination.parent.mkdir(parents=True, exist_ok=True)
-        download.save_as(str(destination))
+        try:
+            download.save_as(str(destination))
+        except PlaywrightError as exc:
+            if "target page, context or browser has been closed" in str(exc).casefold():
+                raise FlowBrowserClosedError(
+                    "Google Flow browser closed during project archive download"
+                ) from exc
+            raise FlowArchiveValidationError(
+                "Google Flow project archive could not be saved"
+            ) from exc
         if not destination.is_file():
             raise FlowArchiveValidationError(
                 "Google Flow project download did not produce an archive"
@@ -1059,7 +1167,16 @@ class GoogleFlowClient:
                 flow_generation_unresolved=job.flow_generation_unresolved,
                 job_id=job.id,
             )
-            yield FlowWorkspaceRun(self, page, job_id=job.id)
+            yield FlowWorkspaceRun(
+                self,
+                page,
+                job_id=job.id,
+                prefer_individual_download=(
+                    getattr(job, "flow_recovery_state", FlowRecoveryState.NONE)
+                    is FlowRecoveryState.INVENTORY_PENDING
+                    and getattr(job, "flow_workspace_retry_attempts", 0) > 0
+                ),
+            )
 
     def _flow_home_url(self) -> str:
         parsed = urlsplit(self.service_url)
@@ -1145,14 +1262,10 @@ class GoogleFlowClient:
                 ServiceSessionStatus.ERROR,
             }:
                 error = HumanRequiredError(
-                    "google_flow session requires human recovery for job "
-                    f"{job_id}: {url_only_status.value}"
+                    f"google_flow session requires human recovery for job {job_id}: {url_only_status.value}"
                 )
                 raise error from (navigation_error or session_error)
-            if (
-                isinstance(navigation_error, PlaywrightTimeoutError)
-                and reached_target
-            ):
+            if isinstance(navigation_error, PlaywrightTimeoutError) and reached_target:
                 return
             if navigation_error is None:
                 raise
@@ -1207,8 +1320,7 @@ class GoogleFlowClient:
         if allow_session_expired and status is ServiceSessionStatus.SESSION_EXPIRED:
             return
         raise HumanRequiredError(
-            f"google_flow session requires human recovery for job {job_id}: "
-            f"{status.value}"
+            f"google_flow session requires human recovery for job {job_id}: {status.value}"
         )
 
     def _hydrate_project_workspace(
@@ -1260,14 +1372,8 @@ class GoogleFlowClient:
                 )
 
             for button_name in _SAFE_ANNOUNCEMENT_BUTTON_NAMES:
-                button = dialog.get_by_role(
-                    "button", name=button_name, exact=True
-                )
-                if (
-                    button.count() == 1
-                    and button.is_visible()
-                    and button.is_enabled()
-                ):
+                button = dialog.get_by_role("button", name=button_name, exact=True)
+                if button.count() == 1 and button.is_visible() and button.is_enabled():
                     button.click()
                     wait_for = getattr(dialog, "wait_for", None)
                     if callable(wait_for):
@@ -1305,11 +1411,7 @@ class GoogleFlowClient:
     @staticmethod
     def _agent_control(page: Any) -> Any:
         agent = page.get_by_role("button", name="Agent", exact=True)
-        if (
-            agent.count() == 1
-            and agent.is_visible()
-            and agent.is_enabled()
-        ):
+        if agent.count() == 1 and agent.is_visible() and agent.is_enabled():
             return agent
 
         agent_text = page.get_by_text("Agent", exact=True)
@@ -1328,12 +1430,8 @@ class GoogleFlowClient:
     def _media_inventory_is_observable(page: Any) -> bool:
         media_list = page.locator('[data-testid="virtuoso-item-list"]:visible')
         empty_state = page.get_by_text(_EMPTY_MEDIA_NAME_RE)
-        return (
-            media_list.count() == 1
-            and media_list.is_visible()
-        ) or (
-            empty_state.count() == 1
-            and empty_state.is_visible()
+        return (media_list.count() == 1 and media_list.is_visible()) or (
+            empty_state.count() == 1 and empty_state.is_visible()
         )
 
     @classmethod
@@ -1345,8 +1443,7 @@ class GoogleFlowClient:
                     "Google Flow Agent state is not active"
                 )
             container = agent.locator(
-                "xpath=ancestor::div[.//textarea or "
-                ".//*[@contenteditable='true']][1]"
+                "xpath=ancestor::div[.//textarea or .//*[@contenteditable='true']][1]"
             )
             if not (container.count() == 1 and container.is_visible()):
                 raise FlowWorkspaceVerificationError(
@@ -1412,7 +1509,9 @@ class GoogleFlowClient:
                 raise FlowWorkspaceVerificationError(
                     "Google Flow fallback command composer could not be verified"
                 )
-            ranked = sorted(valid, key=lambda candidate: (candidate[0], candidate[1]), reverse=True)
+            ranked = sorted(
+                valid, key=lambda candidate: (candidate[0], candidate[1]), reverse=True
+            )
             if len(ranked) > 1 and ranked[0][:2] == ranked[1][:2]:
                 raise FlowWorkspaceVerificationError(
                     "Google Flow fallback command composer could not be verified"
@@ -1497,9 +1596,10 @@ class GoogleFlowClient:
                 raise FlowWorkspaceVerificationError(
                     "Google Flow command composer could not be verified"
                 )
-            if prompt_text is not None and GoogleFlowClient._prompt_value(
-                composer.prompt
-            ) != prompt_text:
+            if (
+                prompt_text is not None
+                and GoogleFlowClient._prompt_value(composer.prompt) != prompt_text
+            ):
                 raise FlowWorkspaceVerificationError(
                     "Google Flow active Agent prompt value could not be verified"
                 )
@@ -1535,9 +1635,7 @@ class GoogleFlowClient:
         if state == "true":
             return self._active_or_fallback_command_composer(page)
         if state != "false":
-            raise FlowWorkspaceVerificationError(
-                "Google Flow Agent state is unknown"
-            )
+            raise FlowWorkspaceVerificationError("Google Flow Agent state is unknown")
 
         agent.click()
         deadline = time.monotonic() + self.editor_ready_timeout_seconds
@@ -1703,10 +1801,7 @@ class GoogleFlowClient:
                     "Google Flow generated image output detected before six videos"
                 )
             completed_count, failed_count = self._terminal_output_card_counts(page)
-            if (
-                failed_count
-                and completed_count + failed_count == expected_count
-            ):
+            if failed_count and completed_count + failed_count == expected_count:
                 raise FlowBatchIncompleteError(
                     completed_count=completed_count,
                     failed_count=failed_count,
@@ -1791,7 +1886,11 @@ class GoogleFlowClient:
                     continue
                 description = cls._ax_value(node, "description")
                 properties = cls._ax_properties(node)
-                if not description or properties.get("disabled") or properties.get("busy"):
+                if (
+                    not description
+                    or properties.get("disabled")
+                    or properties.get("busy")
+                ):
                     return None
                 if _CARD_PROCESSING_RE.search(f"{name} {description}"):
                     return None
@@ -1866,7 +1965,11 @@ class GoogleFlowClient:
         try:
             images = page.locator("img[alt]")
             return sum(
-                bool(_GENERATED_IMAGE_ALT_RE.fullmatch(images.nth(index).get_attribute("alt") or ""))
+                bool(
+                    _GENERATED_IMAGE_ALT_RE.fullmatch(
+                        images.nth(index).get_attribute("alt") or ""
+                    )
+                )
                 for index in range(images.count())
             )
         except PlaywrightError:
@@ -1880,8 +1983,7 @@ class GoogleFlowClient:
                 name=_AGENT_RESPONSE_FEEDBACK_NAME_RE,
             )
             return sum(
-                feedback.nth(index).is_visible()
-                for index in range(feedback.count())
+                feedback.nth(index).is_visible() for index in range(feedback.count())
             )
         except PlaywrightError as exc:
             raise FlowWorkspaceVerificationError(
