@@ -62,7 +62,7 @@ def classify_canva_session(*, url: str, html: str) -> ServiceSessionStatus:
 
 
 class CanvaSessionProvider(BrowserSessionProvider):
-    _READY_TIMEOUT_MS = 30_000
+    _READY_TIMEOUT_MS = 180_000
 
     def __init__(self, browser, *, service_url: str) -> None:
         super().__init__(
@@ -73,11 +73,28 @@ class CanvaSessionProvider(BrowserSessionProvider):
         )
 
     def _wait_for_observable_state(self, page: Any) -> None:
-        try:
+        initial_status = self.classifier(url=page.url, html=page.content())
+        if initial_status not in {
+            ServiceSessionStatus.ERROR,
+            ServiceSessionStatus.READY,
+        }:
+            return
+
+        share_name = re.compile(r"^\s*share\s*$", re.IGNORECASE)
+        share_control = page.get_by_role(
+            "button",
+            name=share_name,
+        ).or_(
             page.get_by_role(
                 "menuitem",
-                name=re.compile(r"^\s*share\s*$", re.IGNORECASE),
-            ).wait_for(state="visible", timeout=self._READY_TIMEOUT_MS)
+                name=share_name,
+            )
+        )
+        try:
+            share_control.first.wait_for(
+                state="visible",
+                timeout=self._READY_TIMEOUT_MS,
+            )
         except PlaywrightTimeoutError:
             # Classification below still distinguishes login/challenge/error states.
             pass
