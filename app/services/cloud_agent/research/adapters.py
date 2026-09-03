@@ -474,7 +474,6 @@ class OpenAICompatibleToolCallingAdapter:
         return ResearchError(
             "RESEARCH_RESPONSE_INVALID",
             f"{operation} failed before a valid provider response was produced",
-            retryable=True,
         )
 
     def _first_value(self, holder: Any, *names: str) -> Any:

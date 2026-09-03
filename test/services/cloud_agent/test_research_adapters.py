@@ -352,6 +352,19 @@ def test_bad_request_failure_is_not_retryable():
     assert captured.value.retryable is False
 
 
+def test_unknown_provider_failure_is_not_retryable():
+    from app.services.cloud_agent.research.adapters import OpenRouterToolCallingAdapter
+
+    client = _FakeClient(completion_error=ValueError("invalid client configuration"))
+    adapter = OpenRouterToolCallingAdapter(client_factory=_RecordingFactory(client))
+
+    with pytest.raises(ResearchError) as captured:
+        adapter.complete(_provider_request())
+
+    assert captured.value.code == "RESEARCH_RESPONSE_INVALID"
+    assert captured.value.retryable is False
+
+
 def test_non_finite_provider_usage_and_cost_are_ignored_safely():
     from app.services.cloud_agent.research.adapters import OpenRouterToolCallingAdapter
 
