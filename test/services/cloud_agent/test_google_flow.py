@@ -455,6 +455,8 @@ class FakeLocator:
             return int(not self.page.clip_names and self.page.last_empty_state)
         if self.kind == "fallback_prompts":
             return len(self.page.fallback_composer_x_positions)
+        if self.kind == "primary_stop":
+            return 1
         if self.kind in {
             "fallback_prompt",
             "fallback_container",
@@ -686,8 +688,20 @@ class FakeLocator:
     def get_by_role(self, role, *, name=None, exact=None):
         del exact
         pattern = getattr(name, "pattern", str(name)).lower()
+        if (
+            self.kind == "composer"
+            and role == "button"
+            and ("stop" in pattern or "หยุด" in pattern)
+        ):
+            return FakeLocator(
+                self.page,
+                "primary_stop" if self.page.primary_composer_busy else "missing",
+            )
         if self.kind == "composer" and role == "button" and "generate" in pattern:
-            return FakeLocator(self.page, "generate")
+            return FakeLocator(
+                self.page,
+                "missing" if self.page.primary_composer_busy else "generate",
+            )
         if (
             self.kind == "fallback_container"
             and role == "button"
@@ -810,6 +824,7 @@ class FakePage:
         agent_prompt_count=1,
         default_prompt_visible=False,
         agent_deactivates_on_prompt_fill=False,
+        primary_composer_busy=False,
         generate_available=True,
         generated_image_alts=None,
         completed_video_polls=None,
@@ -903,6 +918,7 @@ class FakePage:
         self.agent_prompt_count = agent_prompt_count
         self.default_prompt_visible = default_prompt_visible
         self.agent_deactivates_on_prompt_fill = agent_deactivates_on_prompt_fill
+        self.primary_composer_busy = primary_composer_busy
         self.generate_available = generate_available
         self.generated_image_alts = list(generated_image_alts or [])
         self.has_completed_video_polls = completed_video_polls is not None
@@ -3157,6 +3173,46 @@ def test_partial_inventory_uses_validated_five_clip_archive_without_card_titles(
     assert ("click", "project_download") in page.actions
 
 
+def test_partial_inventory_does_not_resubmit_completed_survivor_rename(
+    monkeypatch, tmp_path
+):
+    page = FakePage(
+        progress_html=["<div>Generation progress 5 / 6</div>"],
+        clip_names=[f"draft-{number}" for number in range(1, 6)],
+        renamed_clip_names=["clip 1", "clip 2", "clip 4", "clip 5", "clip 6"],
+        inventory_sequence=[5, 5, 5],
+        rename_response_text=google_flow.RENAME_SURVIVING_CLIPS_INSTRUCTION,
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=5.0)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+    inventory = FlowPartialInventory(
+        snapshot_path=paths.flow_snapshots_dir / "partial-0.zip",
+        semantic_numbers=(1, 2, 4, 5, 6),
+        missing_index=3,
+        staged_files=tuple(
+            paths.flow_staging_dir / f"clip {number}.mp4"
+            for number in (1, 2, 4, 5, 6)
+        ),
+        baseline_digest="d" * 64,
+    )
+    monkeypatch.setattr(
+        google_flow,
+        "inspect_recovery_flow_archive",
+        lambda *_args, **_kwargs: inventory,
+    )
+    _timeout_clock(monkeypatch)
+
+    result = google_flow.FlowWorkspaceRun(client, page).capture_partial_inventory(
+        paths,
+        attempt=0,
+    )
+
+    assert result is inventory
+    assert page.reload_calls == [_navigation_options(client)]
+    assert not any(action[0] == "fill" for action in page.actions)
+    assert ("click", "generate") not in page.actions
+
+
 def test_normal_rename_waits_full_grace_then_accepts_validated_six_archive(
     monkeypatch, tmp_path
 ):
@@ -4139,6 +4195,35 @@ def test_google_flow_recovery_waits_for_busy_fallback_composer_before_rename(
     ) in page.actions
     assert page.actions.count(("click", "fallback_generate")) == 1
     assert ("click", "fallback_stop") not in page.actions
+
+
+def test_google_flow_recovery_waits_for_busy_primary_composer_before_rename(
+    monkeypatch,
+):
+    page = FakePage(
+        progress_html=["<div>Generation in progress</div>"],
+        agent_pressed=True,
+        primary_composer_busy=True,
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=1.0)
+
+    def finish_generation(_seconds):
+        page.primary_composer_busy = False
+
+    monkeypatch.setattr(google_flow.time, "sleep", finish_generation)
+
+    client._submit_recovery_agent_prompt(
+        page,
+        google_flow.RENAME_SURVIVING_CLIPS_INSTRUCTION,
+    )
+
+    assert (
+        "fill",
+        "prompt",
+        google_flow.RENAME_SURVIVING_CLIPS_INSTRUCTION,
+    ) in page.actions
+    assert page.actions.count(("click", "generate")) == 1
+    assert ("click", "primary_stop") not in page.actions
 
 
 def test_google_flow_submits_rename_from_fallback_when_agent_panel_composer_is_missing():
