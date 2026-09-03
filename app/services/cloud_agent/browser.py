@@ -69,7 +69,6 @@ class PersistentBrowserManager:
                 browser_context = playwright.chromium.launch_persistent_context(
                     user_data_dir=str(profile_dir),
                     headless=headless,
-                    channel="chrome",
                     chromium_sandbox=True,
                     args=["--hide-crash-restore-bubble"],
                 )
