@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit, urlunsplit
 from zipfile import ZipFile
 
@@ -455,29 +455,29 @@ class FlowWorkspaceRun:
         snapshot: Path,
         paths: JobPaths,
     ) -> FlowRecoveryCapture:
-        self._download_project_archive_with_fallback(snapshot)
-        try:
-            materialized = materialize_flow_archive(
-                snapshot,
-                paths,
-                min_size_bytes=1,
-                expected_width=self.client.expected_width,
-                expected_height=self.client.expected_height,
-            )
-        except FlowArchiveValidationError:
-            pass
-        else:
+        def inspect(downloaded: Path) -> FlowRecoveryCapture:
+            try:
+                materialized = materialize_flow_archive(
+                    downloaded,
+                    paths,
+                    min_size_bytes=1,
+                    expected_width=self.client.expected_width,
+                    expected_height=self.client.expected_height,
+                )
+            except FlowArchiveValidationError:
+                return inspect_recovery_flow_archive(
+                    downloaded,
+                    paths,
+                    min_size_bytes=1,
+                    expected_width=self.client.expected_width,
+                    expected_height=self.client.expected_height,
+                )
             return FlowRecoveryMaterialization(
                 paths=materialized,
                 source="latest_complete_archive",
             )
-        return inspect_recovery_flow_archive(
-            snapshot,
-            paths,
-            min_size_bytes=1,
-            expected_width=self.client.expected_width,
-            expected_height=self.client.expected_height,
-        )
+
+        return self._download_project_archive_with_fallback(snapshot, validate=inspect)
 
     def download_recovery_snapshot(
         self,
@@ -835,38 +835,69 @@ class FlowWorkspaceRun:
                 return capture.paths
             return capture
 
-        self._download_project_archive(paths)
-        return materialize_flow_archive(
+        def materialize(downloaded: Path) -> tuple[Path, ...]:
+            return materialize_flow_archive(
+                downloaded,
+                paths,
+                min_size_bytes=1,
+                expected_width=self.client.expected_width,
+                expected_height=self.client.expected_height,
+            )
+
+        return self._download_project_archive_with_fallback(
             paths.flow_archive_file,
-            paths,
-            min_size_bytes=1,
-            expected_width=self.client.expected_width,
-            expected_height=self.client.expected_height,
+            validate=materialize,
         )
 
     def _download_project_archive(self, paths: JobPaths) -> None:
         self._download_project_archive_with_fallback(paths.flow_archive_file)
 
-    def _download_project_archive_with_fallback(self, destination: Path) -> None:
+    def _download_project_archive_with_fallback(
+        self,
+        destination: Path,
+        *,
+        validate: Callable[[Path], Any] | None = None,
+    ) -> Any:
+        def validated_result() -> Any:
+            return None if validate is None else validate(destination)
+
         if self.prefer_individual_download:
             self._download_individual_cards_archive_to(destination)
-            return
+            return validated_result()
         try:
             self._download_project_archive_to(destination)
+            return validated_result()
         except FlowBrowserClosedError:
             raise
         except FlowArchiveValidationError:
             self._download_individual_cards_archive_to(destination)
+            return validated_result()
 
-    def _semantic_number_after_hover(self, card: Any) -> int:
-        card.hover()
+    def _semantic_number_after_hover(self, card: Any, pinned_card: Any) -> int:
+        current = card.element_handle()
+        if current is None or not self._same_element(current, pinned_card):
+            raise FlowWorkspaceVerificationError(
+                "Google Flow fallback card identity changed before title verification"
+            )
+        pinned_card.hover()
         deadline = time.monotonic() + self.client.editor_ready_timeout_seconds
         while True:
-            numbers = {
-                int(match.group(1))
-                for match in _CARD_CLIP_TITLE_RE.finditer(str(card.inner_text() or ""))
-            }
+            numbers = set()
+            for number in range(1, 7):
+                title = card.get_by_text(
+                    re.compile(
+                        rf"^\s*clip\s*{number}(?:\s*(?:[-:—–]|\|).*)?\s*$",
+                        re.IGNORECASE,
+                    )
+                )
+                if title.count() == 1 and title.is_visible():
+                    numbers.add(number)
             if len(numbers) == 1:
+                current = card.element_handle()
+                if current is None or not self._same_element(current, pinned_card):
+                    raise FlowWorkspaceVerificationError(
+                        "Google Flow fallback card identity changed during title verification"
+                    )
                 return numbers.pop()
             if len(numbers) > 1:
                 raise FlowWorkspaceVerificationError(
@@ -888,15 +919,15 @@ class FlowWorkspaceRun:
                 card = cards.nth(index)
                 if not self._card_is_completed_video(card):
                     continue
-                clip_number = self._semantic_number_after_hover(card)
-                if clip_number in part_archives:
-                    raise FlowWorkspaceVerificationError(
-                        f"Google Flow card title duplicated clip {clip_number}"
-                    )
                 pinned_card = card.element_handle()
                 if pinned_card is None:
                     raise FlowWorkspaceVerificationError(
                         "Google Flow card identity could not be verified for fallback download"
+                    )
+                clip_number = self._semantic_number_after_hover(card, pinned_card)
+                if clip_number in part_archives:
+                    raise FlowWorkspaceVerificationError(
+                        f"Google Flow card title duplicated clip {clip_number}"
                     )
                 part_archive = (
                     destination.parent
@@ -1001,9 +1032,12 @@ class FlowWorkspaceRun:
                 "Google Flow project archive download timed out"
             ) from exc
         destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary_archive = destination.parent / f".{destination.name}.project.tmp"
+        temporary_archive.unlink(missing_ok=True)
         try:
-            download.save_as(str(destination))
+            download.save_as(str(temporary_archive))
         except PlaywrightError as exc:
+            temporary_archive.unlink(missing_ok=True)
             if "target page, context or browser has been closed" in str(exc).casefold():
                 raise FlowBrowserClosedError(
                     "Google Flow browser closed during project archive download"
@@ -1011,6 +1045,14 @@ class FlowWorkspaceRun:
             raise FlowArchiveValidationError(
                 "Google Flow project archive could not be saved"
             ) from exc
+        try:
+            if not temporary_archive.is_file():
+                raise FlowArchiveValidationError(
+                    "Google Flow project download did not produce an archive"
+                )
+            temporary_archive.replace(destination)
+        finally:
+            temporary_archive.unlink(missing_ok=True)
         if not destination.is_file():
             raise FlowArchiveValidationError(
                 "Google Flow project download did not produce an archive"

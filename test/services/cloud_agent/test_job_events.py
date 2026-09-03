@@ -5,6 +5,7 @@ from app.models.cloud_agent import (
     CloudJobCreate,
     CloudJobRecord,
     CloudJobStatus,
+    FlowRecoveryState,
 )
 from app.models.six_clip import empty_six_clip_plan
 from app.services.cloud_agent.job_events import (
@@ -42,9 +43,7 @@ class RecordingSink:
 
 def test_status_patch_emits_safe_projection_after_commit(tmp_path):
     sink = RecordingSink()
-    store = EventPublishingCloudJobStore(
-        str(tmp_path / "agent.sqlite3"), sink=sink
-    )
+    store = EventPublishingCloudJobStore(str(tmp_path / "agent.sqlite3"), sink=sink)
     job = store.create_job(_request())
 
     changed = store.patch_job(
@@ -73,9 +72,7 @@ def test_status_patch_emits_safe_projection_after_commit(tmp_path):
 def test_flow_workspace_retry_reservation_emits_committed_job_update(tmp_path):
     """Catches durable retry progress being invisible to the event-driven UI."""
     sink = RecordingSink()
-    store = EventPublishingCloudJobStore(
-        str(tmp_path / "agent.sqlite3"), sink=sink
-    )
+    store = EventPublishingCloudJobStore(str(tmp_path / "agent.sqlite3"), sink=sink)
     job = store.create_job(_request())
     claimed = store.claim_next_job("worker-a", lease_seconds=60)
     assert claimed is not None
@@ -111,6 +108,39 @@ def test_flow_workspace_retry_reservation_emits_committed_job_update(tmp_path):
     assert len(sink.events) == 2
     assert sink.events[1].type is CloudJobEventType.JOB_UPDATED
     assert sink.events[1].current_step == "flow_workspace_retry_opening"
+
+
+def test_inventory_retry_reservation_is_atomic_and_emits_committed_state(tmp_path):
+    sink = RecordingSink()
+    store = EventPublishingCloudJobStore(str(tmp_path / "agent.sqlite3"), sink=sink)
+    job = store.create_job(_request())
+    claimed = store.claim_next_job("worker-a", lease_seconds=60)
+    assert claimed is not None
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.FLOW_GENERATING,
+        checkpoint=CloudJobCheckpoint.TTS_READY,
+        current_step="flow_generating",
+        progress=35,
+        flow_generation_unresolved=True,
+    )
+    sink.events.clear()
+
+    reserved = store.reserve_flow_workspace_retry(
+        job.id,
+        delay_seconds=30.0,
+        worker_id="worker-a",
+        enter_inventory_recovery=True,
+    )
+
+    assert reserved is not None
+    assert reserved.status is CloudJobStatus.TTS_READY
+    assert reserved.current_step == "flow_workspace_retrying"
+    assert reserved.flow_generation_unresolved is False
+    assert reserved.flow_recovery_state is FlowRecoveryState.INVENTORY_PENDING
+    assert reserved.flow_workspace_retry_attempts == 1
+    assert len(sink.events) == 1
+    assert sink.events[0].current_step == "flow_workspace_retrying"
 
 
 def test_non_progress_and_duplicate_patches_do_not_emit(tmp_path):
@@ -219,9 +249,7 @@ def test_incident_event_contains_no_subject_message_or_paths():
 
 def test_parent_can_republish_one_durable_snapshot_after_child_exit(tmp_path):
     sink = RecordingSink()
-    store = EventPublishingCloudJobStore(
-        str(tmp_path / "agent.sqlite3"), sink=sink
-    )
+    store = EventPublishingCloudJobStore(str(tmp_path / "agent.sqlite3"), sink=sink)
     job = store.create_job(_request())
     completed = CloudJobRecord.model_validate(
         {

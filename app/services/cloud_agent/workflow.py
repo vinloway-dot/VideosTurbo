@@ -16,6 +16,7 @@ from app.models.cloud_agent import (
 from app.services.cloud_agent.errors import (
     FlowArchiveValidationError,
     FlowBatchIncompleteError,
+    FlowBrowserClosedError,
     FlowGenerationTimeoutError,
     FlowWorkspaceVerificationError,
     HumanRequiredError,
@@ -312,6 +313,58 @@ class CloudAgentWorkflow:
         if remaining > 0:
             self.flow_workspace_retry_sleeper(remaining)
 
+    def _reserve_flow_workspace_reopen(
+        self,
+        current: CloudJobRecord,
+        *,
+        worker_id: str,
+        error: FlowWorkspaceVerificationError,
+        enter_inventory_recovery: bool = False,
+    ) -> CloudJobRecord:
+        if (
+            current.checkpoint is not CloudJobCheckpoint.TTS_READY
+            or current.flow_workspace_retry_attempts
+            >= len(_FLOW_WORKSPACE_RETRY_DELAYS_SECONDS)
+        ):
+            if enter_inventory_recovery and current.flow_generation_unresolved:
+                self.store.patch_job(
+                    current.id,
+                    flow_generation_unresolved=False,
+                    flow_recovery_state=FlowRecoveryState.INVENTORY_PENDING,
+                )
+            raise error
+        next_attempt = current.flow_workspace_retry_attempts + 1
+        delay = _FLOW_WORKSPACE_RETRY_DELAYS_SECONDS[next_attempt - 1]
+        reserved = self.store.reserve_flow_workspace_retry(
+            current.id,
+            delay_seconds=delay,
+            worker_id=worker_id,
+            enter_inventory_recovery=enter_inventory_recovery,
+        )
+        if reserved is None:
+            latest = self._get_job(current.id)
+            if latest.worker_id != worker_id or latest.status in {
+                CloudJobStatus.COMPLETED,
+                CloudJobStatus.HUMAN_REQUIRED,
+                CloudJobStatus.FAILED,
+                CloudJobStatus.CANCELLED,
+                CloudJobStatus.PAUSED,
+            }:
+                return latest
+            raise error
+        attempt = reserved.flow_workspace_retry_attempts
+        self._report(reserved.id, f"flow.workspace.retry.{attempt}")
+        logger.warning(
+            "Flow workspace unavailable for cloud job {}; "
+            "reopening automatically attempt {}/{} after {} seconds",
+            reserved.id,
+            attempt,
+            len(_FLOW_WORKSPACE_RETRY_DELAYS_SECONDS),
+            delay,
+        )
+        self.flow_workspace_retry_sleeper(delay)
+        return reserved
+
     def _resolve_flow_workspace_output(
         self,
         job: CloudJobRecord,
@@ -574,7 +627,27 @@ class CloudAgentWorkflow:
                                 workspace,
                             )
                         break
-                    except FlowWorkspaceVerificationError:
+                    except FlowBrowserClosedError as exc:
+                        current = self._get_job(job.id)
+                        job = self._reserve_flow_workspace_reopen(
+                            current,
+                            worker_id=worker_id,
+                            error=exc,
+                            enter_inventory_recovery=True,
+                        )
+                        if job.worker_id != worker_id or job.status in {
+                            CloudJobStatus.COMPLETED,
+                            CloudJobStatus.HUMAN_REQUIRED,
+                            CloudJobStatus.FAILED,
+                            CloudJobStatus.CANCELLED,
+                            CloudJobStatus.PAUSED,
+                        }:
+                            return job
+                        stopped = self._control_boundary(job.id)
+                        if stopped is not None:
+                            return stopped
+                        job = self._get_job(job.id)
+                    except FlowWorkspaceVerificationError as exc:
                         current = self._get_job(job.id)
                         safe_to_reopen = (
                             current.checkpoint is CloudJobCheckpoint.TTS_READY
@@ -585,32 +658,21 @@ class CloudAgentWorkflow:
                                 FlowRecoveryState.INVENTORY_PENDING,
                             }
                         )
-                        if (
-                            not safe_to_reopen
-                            or current.flow_workspace_retry_attempts
-                            >= len(_FLOW_WORKSPACE_RETRY_DELAYS_SECONDS)
-                        ):
+                        if not safe_to_reopen:
                             raise
-                        next_attempt = current.flow_workspace_retry_attempts + 1
-                        delay = _FLOW_WORKSPACE_RETRY_DELAYS_SECONDS[next_attempt - 1]
-                        job = self.store.reserve_flow_workspace_retry(
-                            job.id,
-                            delay_seconds=delay,
+                        job = self._reserve_flow_workspace_reopen(
+                            current,
                             worker_id=worker_id,
+                            error=exc,
                         )
-                        if job is None:
-                            return self._get_job(current.id)
-                        attempt = job.flow_workspace_retry_attempts
-                        self._report(job.id, f"flow.workspace.retry.{attempt}")
-                        logger.warning(
-                            "Flow workspace unavailable for cloud job {}; "
-                            "reopening automatically attempt {}/{} after {} seconds",
-                            job.id,
-                            attempt,
-                            len(_FLOW_WORKSPACE_RETRY_DELAYS_SECONDS),
-                            delay,
-                        )
-                        self.flow_workspace_retry_sleeper(delay)
+                        if job.worker_id != worker_id or job.status in {
+                            CloudJobStatus.COMPLETED,
+                            CloudJobStatus.HUMAN_REQUIRED,
+                            CloudJobStatus.FAILED,
+                            CloudJobStatus.CANCELLED,
+                            CloudJobStatus.PAUSED,
+                        }:
+                            return job
                         stopped = self._control_boundary(job.id)
                         if stopped is not None:
                             return stopped

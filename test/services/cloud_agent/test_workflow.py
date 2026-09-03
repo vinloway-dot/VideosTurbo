@@ -23,7 +23,10 @@ from app.services.cloud_agent.errors import (
     HumanRequiredError,
     MediaValidationError,
 )
-from app.services.cloud_agent.flow_archive import FlowPartialInventory
+from app.services.cloud_agent.flow_archive import (
+    FlowPartialInventory,
+    FlowRecoveryMaterialization,
+)
 from app.services.cloud_agent.job_store import CloudJobStore
 from app.services.cloud_agent.media_probe import MediaProbe
 from app.services.cloud_agent.providers.canva import (
@@ -1009,6 +1012,121 @@ def test_inventory_pending_browser_crash_reopens_without_resubmitting_generation
     assert all(workspace.generate_calls == 0 for workspace in workspaces)
     assert all(workspace.reconcile_calls == 0 for workspace in workspaces)
     assert result.flow_workspace_retry_attempts == 1
+    assert delays == [30.0]
+
+
+def test_completed_batch_download_crash_enters_inventory_recovery_without_resubmit(
+    monkeypatch,
+    tmp_path,
+):
+    """A 6/6 Download Project crash must reopen without another paid generation."""
+    browser_closed_error = cloud_agent_errors.FlowBrowserClosedError
+
+    class CompletingInventoryRecovery:
+        def __init__(self):
+            self.resume_calls = []
+
+        def resume_unresolved_recovery(self, current_job, workspace, paths):
+            self.resume_calls.append((current_job, workspace))
+            for path in paths.flow_files:
+                path.write_bytes(b"recovered")
+            return paths.flow_files
+
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    events = []
+    first = FenceWorkspace(
+        store,
+        events,
+        generate_error=browser_closed_error(
+            "Google Flow browser closed during project archive download"
+        ),
+    )
+    second = FenceWorkspace(store, events)
+    flow = SequencedFenceFlow([first, second], events)
+    recovery = CompletingInventoryRecovery()
+    delays = []
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        flow=flow,
+        flow_recovery=recovery,
+        flow_workspace_retry_sleeper=delays.append,
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert result.status is CloudJobStatus.COMPLETED
+    assert first.generate_calls == 1
+    assert second.generate_calls == 0
+    assert second.reconcile_calls == 0
+    assert len(recovery.resume_calls) == 1
+    assert recovery.resume_calls[0][1] is second
+    assert result.flow_workspace_retry_attempts == 1
+    assert result.flow_generation_unresolved is False
+    assert delays == [30.0]
+
+
+def test_incomplete_batch_capture_crash_reopens_from_real_flow_generating_state(
+    monkeypatch,
+    tmp_path,
+):
+    """Timeout/incomplete capture crashes must consume the bounded reopen budget."""
+    browser_closed_error = cloud_agent_errors.FlowBrowserClosedError
+
+    class CaptureWorkspace(FenceWorkspace):
+        def __init__(self, *args, capture_error=None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.capture_error = capture_error
+            self.capture_calls = 0
+
+        def capture_partial_inventory(self, paths, *, attempt):
+            assert attempt == 0
+            self.capture_calls += 1
+            if self.capture_error is not None:
+                raise self.capture_error
+            for path in paths.flow_files:
+                path.write_bytes(b"recovered")
+            return FlowRecoveryMaterialization(
+                paths=paths.flow_files,
+                source="latest_complete_archive",
+            )
+
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = _claimed_job(store)
+    storage = CloudJobStorage(tmp_path / "jobs")
+    _make_tts_ready_job(store, storage, job.id)
+    events = []
+    first = CaptureWorkspace(
+        store,
+        events,
+        generate_error=FlowBatchIncompleteError(completed_count=5, failed_count=1),
+        capture_error=browser_closed_error(
+            "Google Flow browser closed during project archive download"
+        ),
+    )
+    second = CaptureWorkspace(store, events)
+    flow = SequencedFenceFlow([first, second], events)
+    delays = []
+    _accept_media(monkeypatch)
+
+    result = _workflow(
+        tmp_path,
+        store,
+        flow=flow,
+        flow_workspace_retry_sleeper=delays.append,
+    ).run(job.id, worker_id=WORKER_ID)
+
+    assert result.status is CloudJobStatus.COMPLETED
+    assert first.generate_calls == 1
+    assert first.capture_calls == 1
+    assert second.generate_calls == 0
+    assert second.reconcile_calls == 0
+    assert second.capture_calls == 1
+    assert result.flow_workspace_retry_attempts == 1
+    assert result.flow_generation_unresolved is False
     assert delays == [30.0]
 
 

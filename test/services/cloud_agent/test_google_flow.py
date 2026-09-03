@@ -238,7 +238,10 @@ class FakeLocator:
         if self.kind == "card_video_format":
             assert self.page.active_download is not None
             assert self.page.card_download_format_open
-            self.page.active_download.index = 0
+            card_index = self.page.active_card_index or 0
+            self.page.active_download.index = (
+                card_index if card_index < len(self.page.download_attempts) else 0
+            )
             self.page.card_download_format_open = False
             self.page.actions.append(
                 (
@@ -533,6 +536,15 @@ class FakeLocator:
                 and self.index < len(names)
                 and names[self.index] == f"clip {self.semantic_number}"
             )
+        if self.kind == "card_title":
+            if self.index is None or self.index >= len(
+                self.page.active_completed_video_poll
+            ):
+                return 0
+            title = str(
+                self.page.active_completed_video_poll[self.index].get("title", "")
+            )
+            return int(bool(self.identity_token.fullmatch(title)))
         if self.kind in {"dialog", "confirm_delete"}:
             return int(self.page.confirmation_pending)
         raise AssertionError(f"count is unavailable for {self.kind}")
@@ -702,6 +714,13 @@ class FakeLocator:
         del exact
         pattern = getattr(text, "pattern", str(text)).lower()
         semantic = re.fullmatch(r"clip\s+([1-6])", pattern)
+        if self.kind == "media_card" and hasattr(text, "fullmatch"):
+            return FakeLocator(
+                self.page,
+                "card_title",
+                index=self.index,
+                identity_token=text,
+            )
         if self.kind == "media_card" and semantic is not None:
             return FakeLocator(
                 self.page,
@@ -2733,6 +2752,37 @@ def test_project_archive_translates_browser_close_during_save(tmp_path):
     assert isinstance(exc_info.value.__cause__, PlaywrightError)
 
 
+def test_project_archive_partial_write_crash_preserves_existing_destination(tmp_path):
+    """A crashing save must not replace a previously valid archive with partial bytes."""
+    page = FakePage(progress_html=["<div>Generation progress 6 / 6</div>"])
+
+    class PartialThenClosedDownload(FakeDownload):
+        def save_as(self, path):
+            Path(path).write_bytes(b"partial-new-download")
+            raise PlaywrightError(
+                "Download.save_as: Target page, context or browser has been closed"
+            )
+
+    class PartialThenClosedExpectation(FakeDownloadExpectation):
+        @property
+        def value(self):
+            assert self.index is not None
+            return PartialThenClosedDownload(self.page, self.index)
+
+    page.expect_download = lambda **_kwargs: PartialThenClosedExpectation(page)
+    client, _ = _client(page)
+    destination = tmp_path / "project.zip"
+    destination.write_bytes(b"existing-valid-archive")
+
+    with pytest.raises(cloud_agent_errors.FlowBrowserClosedError):
+        google_flow.FlowWorkspaceRun(client, page)._download_project_archive_to(
+            destination
+        )
+
+    assert destination.read_bytes() == b"existing-valid-archive"
+    assert not (tmp_path / ".project.zip.project.tmp").exists()
+
+
 def test_project_archive_uses_named_card_fallback_only_after_batch_failure(
     monkeypatch,
     tmp_path,
@@ -2750,7 +2800,7 @@ def test_project_archive_uses_named_card_fallback_only_after_batch_failure(
         fingerprints=tuple(f"asset-{index}" for index in range(6))
     )
     for card, title in zip(cards, titles, strict=True):
-        card["description"] = title
+        card["title"] = title
     page = FakePage(
         progress_html=["<div>Generation progress 6 / 6</div>"],
         clip_names=[f"asset {index}" for index in range(6)],
@@ -2782,6 +2832,61 @@ def test_project_archive_uses_named_card_fallback_only_after_batch_failure(
         assert archive.namelist() == [f"clip {index}.mp4" for index in range(1, 7)]
 
 
+def test_corrupt_downloaded_project_archive_falls_back_to_named_cards(
+    monkeypatch,
+    tmp_path,
+):
+    """Post-download ZIP validation failures must trigger the per-card fallback."""
+    titles = [
+        "CLIP 5 — fifth",
+        "CLIP 3 — third",
+        "CLIP 1 — first",
+        "CLIP 4 — fourth",
+        "CLIP 6 — sixth",
+        "CLIP 2 — second",
+    ]
+    cards = _completed_video_cards(
+        fingerprints=tuple(f"asset-{index}" for index in range(6))
+    )
+    for card, title in zip(cards, titles, strict=True):
+        card["title"] = title
+    page = FakePage(
+        progress_html=["<div>Generation progress 6 / 6</div>"],
+        clip_names=[f"asset {index}" for index in range(6)],
+        card_semantic_names=[f"clip {index}" for index in range(1, 7)],
+        completed_video_polls=[cards],
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=1.0)
+    workspace = google_flow.FlowWorkspaceRun(client, page)
+    paths = CloudJobStorage(tmp_path / "jobs").prepare("job-123")
+
+    def corrupt_project_download(destination):
+        destination.write_bytes(b"not-a-zip")
+
+    monkeypatch.setattr(
+        workspace, "_download_project_archive_to", corrupt_project_download
+    )
+    monkeypatch.setattr(
+        "app.services.cloud_agent.flow_archive.validate_flow_source_video",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        google_flow, "validate_flow_source_video", lambda *_a, **_k: None
+    )
+
+    result = workspace._rename_download_and_materialize(paths, expected_count=6)
+
+    assert result == paths.flow_files
+    with ZipFile(paths.flow_archive_file) as archive:
+        assert archive.namelist() == [f"clip {index}.mp4" for index in range(1, 7)]
+        assert archive.read("clip 1.mp4") == b"video-3"
+        assert archive.read("clip 2.mp4") == b"video-6"
+        assert archive.read("clip 3.mp4") == b"video-2"
+        assert archive.read("clip 4.mp4") == b"video-4"
+        assert archive.read("clip 5.mp4") == b"video-1"
+        assert archive.read("clip 6.mp4") == b"video-5"
+
+
 def test_reopened_inventory_uses_named_cards_without_repeating_failed_batch(
     monkeypatch,
     tmp_path,
@@ -2791,7 +2896,7 @@ def test_reopened_inventory_uses_named_cards_without_repeating_failed_batch(
         fingerprints=tuple(f"asset-{index}" for index in range(5))
     )
     for index, card in enumerate(cards, start=1):
-        card["description"] = f"CLIP {index} — recovered"
+        card["title"] = f"CLIP {index} — recovered"
     page = FakePage(
         progress_html=["<div>Generation progress 5 / 6</div>"],
         clip_names=[f"asset {index}" for index in range(5)],

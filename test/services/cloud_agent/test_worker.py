@@ -2,7 +2,12 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from app.models.cloud_agent import CloudJobCheckpoint, CloudJobCreate, CloudJobStatus
+from app.models.cloud_agent import (
+    CloudJobCheckpoint,
+    CloudJobCreate,
+    CloudJobStatus,
+    FlowRecoveryState,
+)
 from app.models.six_clip import empty_six_clip_plan
 from app.services.cloud_agent import factory, worker as worker_module
 from app.services.cloud_agent.job_store import CloudJobStore
@@ -158,9 +163,7 @@ class FakeTerminationService:
     def delete_stopped_job(
         self, job_id: str, *, child_stopped: bool, reason_code: str, stage: str
     ):
-        self.calls.append(
-            TerminationCall(job_id, child_stopped, reason_code, stage)
-        )
+        self.calls.append(TerminationCall(job_id, child_stopped, reason_code, stage))
         return None
 
 
@@ -393,6 +396,34 @@ def test_supervisor_requeues_safe_reserved_flow_retry_after_child_crash(tmp_path
     ]
 
 
+def test_supervisor_preserves_inventory_pending_retry_after_child_crash(tmp_path):
+    """A reserved recovery reopen must not be overwritten as WORKER_RUNTIME_ERROR."""
+    store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
+    job = store.create_job(_request())
+    claimed = store.claim_next_job("worker-child", lease_seconds=60)
+    assert claimed is not None
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.TTS_READY,
+        checkpoint=CloudJobCheckpoint.TTS_READY,
+        current_step="flow_workspace_retrying",
+        flow_generation_unresolved=False,
+        flow_recovery_state=FlowRecoveryState.INVENTORY_PENDING,
+        flow_workspace_retry_attempts=1,
+    )
+    worker = CloudAgentWorker(
+        store, CompletingWorkflow(store), worker_id="worker-child"
+    )
+
+    worker._handle_child_exit(job.id, 1)
+
+    persisted = store.get_job(job.id)
+    assert persisted is not None
+    assert persisted.status is CloudJobStatus.TTS_READY
+    assert persisted.current_step == "flow_workspace_retrying"
+    assert persisted.error_code == ""
+
+
 def test_supervisor_does_not_requeue_crash_after_retry_workspace_opening(tmp_path):
     """A crash after backoff cannot reuse one reservation without a bound."""
 
@@ -469,7 +500,9 @@ def test_canva_twenty_minute_idle_stops_old_child_before_restart(tmp_path):
     store = CloudJobStore(str(tmp_path / "agent.sqlite3"))
     job = store.create_job(_request())
     clock = FakeClock()
-    stalled_at = (clock.now() - timedelta(minutes=20)).isoformat(timespec="microseconds")
+    stalled_at = (clock.now() - timedelta(minutes=20)).isoformat(
+        timespec="microseconds"
+    )
     store.patch_job(
         job.id,
         status=CloudJobStatus.CANVA_EDITING,
@@ -561,9 +594,9 @@ def test_canva_restart_budget_exhaustion_deletes_without_sixth_attempt(tmp_path)
         status=CloudJobStatus.CANVA_EDITING,
         checkpoint=CloudJobCheckpoint.FLOW_READY,
         current_step="canva_editing",
-        last_progress_at=(
-            clock.now() - timedelta(minutes=20)
-        ).isoformat(timespec="microseconds"),
+        last_progress_at=(clock.now() - timedelta(minutes=20)).isoformat(
+            timespec="microseconds"
+        ),
         canva_restart_attempts=4,
     )
     launcher = FakeLauncher(store, clock)
