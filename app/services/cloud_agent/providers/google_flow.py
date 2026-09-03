@@ -817,18 +817,23 @@ class FlowWorkspaceRun:
                 "Google Flow project menu could not be verified"
             )
         project_menu.click()
-        download_project = self.page.get_by_role(
-            "menuitem",
-            name=_PROJECT_DOWNLOAD_NAME_RE,
-        )
-        if not (
-            download_project.count() == 1
-            and download_project.is_visible()
-            and download_project.is_enabled()
-        ):
-            raise FlowArchiveValidationError(
-                "Google Flow Download Project action could not be verified"
+        deadline = time.monotonic() + self.client.editor_ready_timeout_seconds
+        while True:
+            download_project = self.page.get_by_role(
+                "menuitem",
+                name=_PROJECT_DOWNLOAD_NAME_RE,
             )
+            if (
+                download_project.count() == 1
+                and download_project.is_visible()
+                and download_project.is_enabled()
+            ):
+                break
+            if time.monotonic() >= deadline:
+                raise FlowArchiveValidationError(
+                    "Google Flow Download Project action could not be verified"
+                )
+            time.sleep(self.client.poll_seconds)
         with self.page.expect_download() as download_info:
             download_project.click()
         destination.parent.mkdir(parents=True, exist_ok=True)
