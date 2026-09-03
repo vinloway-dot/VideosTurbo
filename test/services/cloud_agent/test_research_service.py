@@ -344,6 +344,115 @@ def test_accounting_sums_provider_round_usage_and_cost(service, adapter):
     assert result.accounting.cost == pytest.approx(0.03)
 
 
+def test_generation_retries_twice_then_returns_the_successful_draft(
+    service,
+    adapter,
+    monkeypatch,
+):
+    responses = iter(
+        [
+            ResearchError("PROVIDER_TIMEOUT", "first attempt timed out"),
+            ResearchError("RESEARCH_RESPONSE_INVALID", "second attempt was malformed"),
+            ProviderResult(
+                tool_calls=(
+                    RequestedToolCall(
+                        "call-1",
+                        "fetch_url",
+                        {"url": "https://example.com/article"},
+                    ),
+                ),
+                usage={"prompt_tokens": 10, "completion_tokens": 2},
+                cost=0.001,
+            ),
+            ProviderResult(
+                final_payload=_final_payload(),
+                usage={"prompt_tokens": 20, "completion_tokens": 4},
+                cost=0.002,
+            ),
+        ]
+    )
+
+    def complete(request):
+        adapter.calls.append(request)
+        response = next(responses)
+        if isinstance(response, ResearchError):
+            raise response
+        return response
+
+    monkeypatch.setattr(adapter, "complete", complete)
+
+    result = service.create_draft(request_with_one_url())
+
+    assert result.script == "Narration from research."
+    assert len(adapter.calls) == 4
+    assert all(
+        [message["role"] for message in request.messages] == ["system", "user"]
+        for request in adapter.calls[:3]
+    )
+
+
+def test_generation_stops_after_three_retryable_failures(
+    service,
+    adapter,
+    monkeypatch,
+):
+    def fail(request):
+        adapter.calls.append(request)
+        raise ResearchError("PROVIDER_TIMEOUT", "provider timed out")
+
+    monkeypatch.setattr(adapter, "complete", fail)
+
+    with pytest.raises(ResearchError) as captured:
+        service.create_draft(request_with_one_url())
+
+    assert captured.value.code == "PROVIDER_TIMEOUT"
+    assert len(adapter.calls) == 3
+
+
+def test_generation_retries_provider_capability_timeout(
+    service,
+    adapter,
+    monkeypatch,
+):
+    resolve_capability = adapter.resolve_capability
+    attempts = 0
+
+    def resolve(model_id, api_key):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise ResearchError("PROVIDER_TIMEOUT", "capability lookup timed out")
+        return resolve_capability(model_id, api_key)
+
+    monkeypatch.setattr(adapter, "resolve_capability", resolve)
+
+    result = service.create_draft(request_with_one_url())
+
+    assert result.script == "Narration from research."
+    assert attempts == 3
+
+
+def test_generation_does_not_retry_permanent_provider_failure(
+    service,
+    adapter,
+    monkeypatch,
+):
+    def fail(request):
+        adapter.calls.append(request)
+        raise ResearchError(
+            "PROVIDER_AUTHENTICATION_FAILED",
+            "provider rejected credentials",
+        )
+
+    monkeypatch.setattr(adapter, "complete", fail)
+
+    with pytest.raises(ResearchError) as captured:
+        service.create_draft(request_with_one_url())
+
+    assert captured.value.code == "PROVIDER_AUTHENTICATION_FAILED"
+    assert len(adapter.calls) == 1
+
+
 def test_missing_cost_in_any_provider_round_remains_unavailable(service, adapter):
     adapter.rounds = [
         ProviderResult(
