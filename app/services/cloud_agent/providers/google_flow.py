@@ -422,11 +422,14 @@ class FlowWorkspaceRun:
         attempt: int,
     ) -> FlowRecoveryCapture:
         response_count = self.client._agent_response_count(self.page)
-        self.client._submit_recovery_agent_prompt(
+        submitted = self.client._submit_recovery_agent_prompt(
             self.page,
             RENAME_SURVIVING_CLIPS_INSTRUCTION,
         )
-        self._wait_for_rename_response_then_refresh(response_count)
+        if submitted is None:
+            self._refresh_and_hydrate()
+        else:
+            self._wait_for_rename_response_then_refresh(response_count)
         self._wait_for_recovery_archive_grace()
         snapshot = paths.flow_snapshots_dir / f"partial-{attempt}.zip"
         capture = self._download_and_inspect_recovery_archive(snapshot, paths)
@@ -1853,11 +1856,25 @@ class GoogleFlowClient:
                     "Google Flow Agent command composer remained busy during recovery"
                 )
             time.sleep(self.poll_seconds)
+        if self._has_submitted_recovery_rename(page):
+            return None
         return self._submit_agent_prompt(page, prompt_text)
 
     @classmethod
     def _command_composer_is_busy(cls, page: Any) -> bool:
         try:
+            try:
+                agent = cls._agent_control(page)
+            except FlowWorkspaceVerificationError:
+                agent = None
+            if agent is not None:
+                container = agent.locator(
+                    "xpath=ancestor::div[.//textarea or .//*[@contenteditable='true']][1]"
+                )
+                stop = container.get_by_role("button", name=_COMMAND_STOP_NAME_RE)
+                if stop.count() == 1 and stop.is_visible():
+                    return True
+
             prompts = page.locator(_COMMAND_COMPOSER_SELECTOR)
             prompt_count = prompts.count()
             for index in range(prompt_count):
@@ -1871,6 +1888,19 @@ class GoogleFlowClient:
         except PlaywrightError:
             return False
         return False
+
+    @staticmethod
+    def _has_submitted_recovery_rename(page: Any) -> bool:
+        try:
+            html = page.content()
+        except PlaywrightError as exc:
+            raise FlowWorkspaceVerificationError(
+                "Google Flow recovery rename history could not be observed"
+            ) from exc
+        return (
+            RENAME_SURVIVING_CLIPS_INSTRUCTION in html
+            or GoogleFlowClient._has_completed_rename_response(page)
+        )
 
     def _wait_for_generation(self, page: Any, expected_count: int) -> None:
         deadline = time.monotonic() + self.generation_timeout_seconds
