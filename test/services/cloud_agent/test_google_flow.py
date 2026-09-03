@@ -459,6 +459,7 @@ class FakeLocator:
             "fallback_prompt",
             "fallback_container",
             "fallback_generate",
+            "fallback_stop",
         }:
             return int(
                 self.index is not None
@@ -690,11 +691,26 @@ class FakeLocator:
         if (
             self.kind == "fallback_container"
             and role == "button"
+            and ("stop" in pattern or "หยุด" in pattern)
+        ):
+            return FakeLocator(
+                self.page,
+                "fallback_stop" if self.page.fallback_composer_busy else "missing",
+                index=self.index,
+                pinned=self.pinned,
+            )
+        if (
+            self.kind == "fallback_container"
+            and role == "button"
             and ("generate" in pattern or "สร้าง" in pattern)
         ):
             return FakeLocator(
                 self.page,
-                "fallback_generate",
+                (
+                    "missing"
+                    if self.page.fallback_composer_busy
+                    else "fallback_generate"
+                ),
                 index=self.index,
                 pinned=self.pinned,
             )
@@ -809,6 +825,7 @@ class FakePage:
         fallback_composer_available=False,
         fallback_composer_x_positions=None,
         fallback_composer_y_positions=None,
+        fallback_composer_busy=False,
         require_pinned_fallback_identity=False,
         project_menu_available=True,
         project_download_delay_reads=0,
@@ -921,6 +938,7 @@ class FakePage:
         assert len(self.fallback_composer_y_positions) == len(
             self.fallback_composer_x_positions
         )
+        self.fallback_composer_busy = fallback_composer_busy
         self.require_pinned_fallback_identity = require_pinned_fallback_identity
         self.fallback_prompt_was_filled = False
         self.command_prompt_values = {}
@@ -4090,6 +4108,37 @@ def test_google_flow_submits_rename_from_fallback_composer_without_agent_button(
         google_flow.RENAME_CLIPS_INSTRUCTION,
     ) in page.actions
     assert ("click", "fallback_generate") in page.actions
+
+
+def test_google_flow_recovery_waits_for_busy_fallback_composer_before_rename(
+    monkeypatch,
+):
+    page = FakePage(
+        progress_html=["<div>Generation in progress</div>"],
+        agent_available=False,
+        agent_text_available=False,
+        fallback_composer_available=True,
+        fallback_composer_busy=True,
+    )
+    client, _ = _client(page, editor_ready_timeout_seconds=1.0)
+
+    def finish_generation(_seconds):
+        page.fallback_composer_busy = False
+
+    monkeypatch.setattr(google_flow.time, "sleep", finish_generation)
+
+    client._submit_recovery_agent_prompt(
+        page,
+        google_flow.RENAME_SURVIVING_CLIPS_INSTRUCTION,
+    )
+
+    assert (
+        "fill",
+        "fallback_prompt",
+        google_flow.RENAME_SURVIVING_CLIPS_INSTRUCTION,
+    ) in page.actions
+    assert page.actions.count(("click", "fallback_generate")) == 1
+    assert ("click", "fallback_stop") not in page.actions
 
 
 def test_google_flow_submits_rename_from_fallback_when_agent_panel_composer_is_missing():

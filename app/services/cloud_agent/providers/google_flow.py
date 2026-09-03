@@ -95,6 +95,11 @@ _COMMAND_SUBMIT_NAME_RE = re.compile(
     r"^(?:generate|arrow_forward\s+(?:generate|create|สร้าง))$",
     re.IGNORECASE,
 )
+_COMMAND_STOP_NAME_RE = re.compile(
+    r"^(?:(?:stop|cancel)(?:[_ ](?:circle|generation|generating))?"
+    r"|(?:หยุด|ยกเลิก)(?:การสร้าง)?)$",
+    re.IGNORECASE,
+)
 _AGENT_RESPONSE_FEEDBACK_NAME_RE = re.compile(
     r"^thumb_up\s+(?:good response|คำตอบดี)$",
     re.IGNORECASE,
@@ -417,7 +422,7 @@ class FlowWorkspaceRun:
         attempt: int,
     ) -> FlowRecoveryCapture:
         response_count = self.client._agent_response_count(self.page)
-        self.client._submit_agent_prompt(
+        self.client._submit_recovery_agent_prompt(
             self.page,
             RENAME_SURVIVING_CLIPS_INSTRUCTION,
         )
@@ -1839,6 +1844,33 @@ class GoogleFlowClient:
     def _submit_agent_prompt(self, page: Any, prompt_text: str) -> Any:
         prepared = self._prepare_agent_prompt(page, prompt_text)
         return self._submit_prepared_agent_prompt(page, prompt_text, prepared)
+
+    def _submit_recovery_agent_prompt(self, page: Any, prompt_text: str) -> Any:
+        deadline = time.monotonic() + self.editor_ready_timeout_seconds
+        while self._command_composer_is_busy(page):
+            if time.monotonic() >= deadline:
+                raise FlowWorkspaceVerificationError(
+                    "Google Flow Agent command composer remained busy during recovery"
+                )
+            time.sleep(self.poll_seconds)
+        return self._submit_agent_prompt(page, prompt_text)
+
+    @classmethod
+    def _command_composer_is_busy(cls, page: Any) -> bool:
+        try:
+            prompts = page.locator(_COMMAND_COMPOSER_SELECTOR)
+            prompt_count = prompts.count()
+            for index in range(prompt_count):
+                prompt = prompts if prompt_count == 1 else prompts.nth(index)
+                if not prompt.is_visible():
+                    continue
+                container = prompt.locator("xpath=ancestor::div[.//button][1]")
+                stop = container.get_by_role("button", name=_COMMAND_STOP_NAME_RE)
+                if stop.count() == 1 and stop.is_visible():
+                    return True
+        except PlaywrightError:
+            return False
+        return False
 
     def _wait_for_generation(self, page: Any, expected_count: int) -> None:
         deadline = time.monotonic() + self.generation_timeout_seconds
