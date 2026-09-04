@@ -56,6 +56,95 @@ process.stdout.write(JSON.stringify(triggers));
     ]
 
 
+def test_event_renderer_emits_periodic_status_probe_and_cleans_up_timer():
+    renderer = cloud_agent_events._EVENT_RENDERER.replace(
+        "export default function(component)", "const render = function(component)"
+    )
+    harness = """
+class FakeEventSource {
+  constructor(url) { this.url = url; }
+  addEventListener() {}
+  close() {}
+}
+globalThis.EventSource = FakeEventSource;
+const intervals = [];
+const cleared = [];
+globalThis.setInterval = (callback, delay) => {
+  intervals.push({callback, delay});
+  return 7;
+};
+globalThis.clearInterval = (timer) => cleared.push(timer);
+Date.now = () => 12345;
+const triggers = [];
+const component = {
+  parentElement: {},
+  data: {
+    streamUrl: '/api/v1/cloud-agent/events/stream',
+    pollingEnabled: true,
+    pollIntervalMs: 15000,
+  },
+  setTriggerValue: (...args) => triggers.push(args),
+};
+const cleanup = render(component);
+intervals[0].callback();
+cleanup();
+process.stdout.write(JSON.stringify({
+  delays: intervals.map((entry) => entry.delay),
+  triggers,
+  cleared,
+}));
+"""
+
+    completed = subprocess.run(
+        ["node", "-e", f"{renderer}\n{harness}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "delays": [15000],
+        "triggers": [
+            [
+                "event",
+                {"event_id": "status-probe-12345", "type": "status_probe"},
+            ]
+        ],
+        "cleared": [7],
+    }
+
+
+def test_event_listener_passes_fallback_polling_configuration(monkeypatch):
+    mounted = {}
+
+    class FakeV2:
+        @staticmethod
+        def component(*_args, **_kwargs):
+            def renderer(**kwargs):
+                mounted.update(kwargs)
+                return {}
+
+            return renderer
+
+    class FakeComponents:
+        v2 = FakeV2()
+
+    monkeypatch.setattr(cloud_agent_events.st, "components", FakeComponents())
+
+    cloud_agent_events.render_cloud_job_event_listener(
+        "/api/v1/cloud-agent/events/stream",
+        key="cloud-agent-events",
+        polling_enabled=True,
+        poll_interval_seconds=15,
+    )
+
+    assert mounted["data"] == {
+        "streamUrl": "/api/v1/cloud-agent/events/stream",
+        "pollingEnabled": True,
+        "pollIntervalMs": 15000,
+    }
+
+
 def test_event_listener_returns_named_event_payload(monkeypatch):
     payload = {"event_id": "event-1", "type": "job.updated", "job_id": "job-1"}
     mounted = {}
@@ -91,3 +180,4 @@ def test_classifier_refreshes_selected_job_and_app_on_completion():
     assert classify_event({"event_id": "4", "type": "job.updated", "job_id": "job-2"}, selected_job_id="job-1", last_event_id="2") == "ignore"
     assert classify_event({}, selected_job_id="job-1", last_event_id="") == "ignore"
     assert classify_event({"event_id": "5", "type": "job.incident", "former_job_id": "job-1"}, selected_job_id="job-1", last_event_id="4") == "refresh_incidents"
+    assert classify_event({"event_id": "6", "type": "status_probe"}, selected_job_id="job-1", last_event_id="5") == "refresh_job"
