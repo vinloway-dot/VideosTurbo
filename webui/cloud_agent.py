@@ -583,8 +583,18 @@ def _render_event_driven_production_status(*, script_ready, prepared_voice_ready
 
     snapshot = dict(ui_state.get("cloud_agent_job_snapshot") or {})
     job_id = str(snapshot.get("id") or "").strip()
+    status = str(snapshot.get("status") or "").strip().upper()
+    polling_enabled = bool(job_id) and status not in {
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED",
+        "HUMAN_REQUIRED",
+    }
     event = cloud_agent_events.render_cloud_job_event_listener(
-        "/api/v1/cloud-agent/events/stream", key="cloud-agent-events"
+        "/api/v1/cloud-agent/events/stream",
+        key="cloud-agent-events",
+        polling_enabled=polling_enabled,
+        poll_interval_seconds=15,
     )
     action = cloud_agent_events.classify_event(
         event,

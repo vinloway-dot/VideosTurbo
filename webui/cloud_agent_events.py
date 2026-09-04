@@ -18,17 +18,49 @@ export default function(component) {
     source.addEventListener('job.completed', emit);
     source.addEventListener('job.incident', emit);
     source.addEventListener('sync_required', emit);
-    parent.__cloudAgentEventSource = {source, emit};
+    const probeSessionId = globalThis.crypto?.randomUUID?.()
+      || `${Date.now()}-${Math.random()}`;
+    parent.__cloudAgentEventSource = {
+      source,
+      emit,
+      pollTimer: null,
+      probeSessionId,
+      probeSequence: 0,
+    };
+  }
+  const state = parent.__cloudAgentEventSource;
+  if (component.data.pollingEnabled && !state.pollTimer) {
+    state.pollTimer = setTimeout(() => {
+      state.pollTimer = null;
+      state.probeSequence += 1;
+      component.setTriggerValue('event', {
+        event_id: `status-probe-${state.probeSessionId}-${state.probeSequence}`,
+        type: 'status_probe',
+      });
+    }, component.data.pollIntervalMs);
+  } else if (!component.data.pollingEnabled && state.pollTimer) {
+    clearTimeout(state.pollTimer);
+    state.pollTimer = null;
   }
   return () => {
-    const state = parent.__cloudAgentEventSource;
-    if (state) { state.source.close(); delete parent.__cloudAgentEventSource; }
+    const current = parent.__cloudAgentEventSource;
+    if (current) {
+      if (current.pollTimer) clearTimeout(current.pollTimer);
+      current.source.close();
+      delete parent.__cloudAgentEventSource;
+    }
   };
 }
 """
 
 
-def render_cloud_job_event_listener(stream_url: str, *, key: str) -> Mapping[str, object] | None:
+def render_cloud_job_event_listener(
+    stream_url: str,
+    *,
+    key: str,
+    polling_enabled: bool = False,
+    poll_interval_seconds: int = 15,
+) -> Mapping[str, object] | None:
     components = getattr(st, "components", None)
     if components is None or not hasattr(components, "v2"):
         return None
@@ -38,7 +70,11 @@ def render_cloud_job_event_listener(stream_url: str, *, key: str) -> Mapping[str
         js=_EVENT_RENDERER,
     )
     result = renderer(
-        data={"streamUrl": stream_url},
+        data={
+            "streamUrl": stream_url,
+            "pollingEnabled": bool(polling_enabled),
+            "pollIntervalMs": max(1, int(poll_interval_seconds)) * 1000,
+        },
         key=key,
         on_event_change=lambda: None,
     )
@@ -59,6 +95,8 @@ def classify_event(event, *, selected_job_id: str, last_event_id: str) -> Litera
     event_type = event.get("type")
     if event_type == "sync_required":
         return "sync"
+    if event_type == "status_probe" and selected_job_id:
+        return "refresh_job"
     if event_type == "job.completed":
         return "refresh_job" if event.get("job_id") == selected_job_id else "refresh_app"
     if event_type == "job.incident":

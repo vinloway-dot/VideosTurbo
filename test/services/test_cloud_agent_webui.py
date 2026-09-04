@@ -1457,6 +1457,101 @@ def test_selected_job_event_reads_job_once_and_stores_snapshot(monkeypatch):
     assert rendered[-1][1]["progress"] == 15
 
 
+def test_status_probe_refreshes_missed_completed_job(monkeypatch):
+    state = {
+        "cloud_agent_job_id": "job-123",
+        "cloud_agent_job_snapshot": {
+            "id": "job-123",
+            "status": "FLOW_GENERATING",
+            "checkpoint": "TTS_READY",
+            "current_step": "flow_generating",
+            "progress": 35,
+        },
+        "cloud_agent_last_event_id": "event-1",
+    }
+
+    class EventStreamlit:
+        session_state = state
+
+    rendered = []
+    monkeypatch.setattr(cloud_agent, "st", EventStreamlit())
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_events,
+        "render_cloud_job_event_listener",
+        lambda *_args, **_kwargs: {
+            "event_id": "status-probe-1",
+            "type": "status_probe",
+        },
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_api",
+        lambda method, path, **_kwargs: {
+            "id": "job-123",
+            "status": "COMPLETED",
+            "checkpoint": "COMPLETED",
+            "current_step": "completed",
+            "progress": 100,
+        }
+        if (method, path) == ("GET", "jobs/job-123")
+        else pytest.fail(f"unexpected API call: {method} {path}"),
+    )
+    monkeypatch.setattr(cloud_agent, "_render_incident_banners", lambda *_args: None)
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_ui,
+        "render_production_status",
+        lambda stages, job: rendered.append((stages, job)),
+    )
+
+    cloud_agent._render_event_driven_production_status(
+        script_ready=True,
+        prepared_voice_ready=True,
+        ui_state=state,
+    )
+
+    assert state["cloud_agent_job_snapshot"]["status"] == "COMPLETED"
+    assert rendered[-1][1]["progress"] == 100
+
+
+def test_terminal_job_disables_status_fallback_polling(monkeypatch):
+    state = {
+        "cloud_agent_job_id": "job-123",
+        "cloud_agent_job_snapshot": {
+            "id": "job-123",
+            "status": "COMPLETED",
+            "checkpoint": "COMPLETED",
+            "current_step": "completed",
+            "progress": 100,
+        },
+    }
+    mounted = []
+
+    class EventStreamlit:
+        session_state = state
+
+    monkeypatch.setattr(cloud_agent, "st", EventStreamlit())
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_events,
+        "render_cloud_job_event_listener",
+        lambda *_args, **kwargs: mounted.append(kwargs) or None,
+    )
+    monkeypatch.setattr(cloud_agent, "_render_incident_banners", lambda *_args: None)
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_ui,
+        "render_production_status",
+        lambda *_args: None,
+    )
+
+    cloud_agent._render_event_driven_production_status(
+        script_ready=True,
+        prepared_voice_ready=True,
+        ui_state=state,
+    )
+
+    assert mounted[0]["polling_enabled"] is False
+    assert mounted[0]["poll_interval_seconds"] == 15
+
+
 def test_incident_event_reads_unread_once_and_clears_deleted_selection(monkeypatch):
     class WidgetSessionState(dict):
         def __init__(self):
