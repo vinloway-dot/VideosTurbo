@@ -25,6 +25,55 @@ _MISSING = object()
 _DELETE = object()
 _UTF8_BOM = "\ufeff"
 
+CLOUD_AGENT_DEFAULTS = {
+    "cloud_agent_enabled": False,
+    "cloud_agent_db_path": "storage/cloud-agent.sqlite3",
+    "cloud_agent_worker_poll_seconds": 2,
+    "cloud_agent_worker_lease_seconds": 120,
+    "cloud_agent_worker_heartbeat_seconds": 10,
+    "cloud_agent_event_queue_size": 128,
+    "cloud_agent_event_intake_url": "http://127.0.0.1:8080/api/v1/cloud-agent/internal/events",
+    "cloud_agent_event_delivery_timeout_seconds": 0.5,
+    "cloud_agent_sse_heartbeat_seconds": 25,
+    "cloud_agent_flow_recovery_retries": 2,
+    "cloud_agent_canva_restart_retries": 4,
+    "cloud_agent_canva_stall_seconds": 1200,
+    "cloud_agent_job_stall_seconds": 3600,
+    "cloud_agent_child_terminate_grace_seconds": 15,
+    "cloud_agent_progress_signal_queue_size": 64,
+    "cloud_agent_max_retries": 3,
+    "cloud_agent_min_free_disk_gb": 10,
+    "cloud_agent_tts_min_duration_seconds": 1,
+    "cloud_agent_canva_min_playback_speed": 0.85,
+    "cloud_agent_final_duration_tolerance_seconds": 1.0,
+    "cloud_agent_final_min_size_bytes": 1048576,
+    "cloud_agent_expected_width": 1080,
+    "cloud_agent_expected_height": 1920,
+    "cloud_agent_browser_headless": True,
+    "cloud_agent_google_profile_dir": "storage/browser-profiles/google-flow",
+    "cloud_agent_canva_profile_dir": "storage/browser-profiles/canva",
+    "cloud_agent_browser_lock_dir": "storage/browser-locks",
+    "cloud_agent_remote_browser_url": "http://127.0.0.1:6080/vnc.html",
+    "cloud_agent_flow_url": "",
+    "cloud_agent_canva_template_url": "",
+    "cloud_agent_default_tts_provider": "azure-tts-v1",
+    "cloud_agent_default_voice_id": "",
+    "cloud_agent_default_voice_speed": 1.0,
+    "cloud_agent_default_custom_system_prompt": "",
+}
+
+RESEARCH_DEFAULTS = {
+    "cloud_agent_research_enabled": False,
+    "cloud_agent_research_default_provider": "aihubmix",
+    "cloud_agent_research_openrouter_model": "openai/gpt-5.6-sol-pro",
+    "cloud_agent_research_openrouter_custom_model": "openai/gpt-5.6-sol-pro",
+    "cloud_agent_research_aihubmix_model": "gpt-5.6-sol",
+    "cloud_agent_research_aihubmix_custom_model": "gpt-5.6-sol",
+    "cloud_agent_research_custom_system_prompt": "",
+    "cloud_agent_research_openrouter_api_key": "",
+    "cloud_agent_research_aihubmix_api_key": "",
+}
+
 
 class _SynchronizedConfig(dict):
     """保持 dict 使用方式不变，同时让运行期配置写操作服从同一把锁。"""
@@ -81,6 +130,47 @@ class _SynchronizedConfig(dict):
             return
         with _config_save_lock:
             super().update(changes)
+
+
+def _apply_cloud_agent_defaults(app_config):
+    """Apply Cloud Agent defaults without replacing existing user settings."""
+    for key, value in CLOUD_AGENT_DEFAULTS.items():
+        app_config.setdefault(key, copy.deepcopy(value))
+    for key, value in RESEARCH_DEFAULTS.items():
+        app_config.setdefault(key, copy.deepcopy(value))
+    _validate_cloud_agent_guardrails(app_config)
+    return app_config
+
+
+def _validate_cloud_agent_guardrails(app_config):
+    for key, maximum in (
+        ("cloud_agent_flow_recovery_retries", 2),
+        ("cloud_agent_canva_restart_retries", 4),
+    ):
+        value = app_config[key]
+        if type(value) is not int or value < 0 or value > maximum:
+            raise ValueError(f"{key} must be an integer between 0 and {maximum}")
+
+    positive_keys = (
+        "cloud_agent_canva_stall_seconds",
+        "cloud_agent_job_stall_seconds",
+        "cloud_agent_child_terminate_grace_seconds",
+    )
+    for key in positive_keys:
+        value = app_config[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError(f"{key} must be positive")
+    if (
+        app_config["cloud_agent_canva_stall_seconds"]
+        >= app_config["cloud_agent_job_stall_seconds"]
+    ):
+        raise ValueError("Canva stall timeout must be shorter than job stall timeout")
+
+    queue_size = app_config["cloud_agent_progress_signal_queue_size"]
+    if type(queue_size) is not int or queue_size < 1 or queue_size > 1024:
+        raise ValueError(
+            "cloud_agent_progress_signal_queue_size must be between 1 and 1024"
+        )
 
 
 def _pending_update_key(config_section, key):
@@ -545,6 +635,7 @@ def save_config():
 
 _cfg = load_config()
 app = _SynchronizedConfig(_cfg.get("app", {}))
+_apply_cloud_agent_defaults(app)
 whisper = _cfg.get("whisper", {})
 proxy = _cfg.get("proxy", {})
 azure = _SynchronizedConfig(_cfg.get("azure", {}))

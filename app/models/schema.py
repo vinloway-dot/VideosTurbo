@@ -3,9 +3,10 @@ from enum import Enum
 from typing import Any, List, Literal, Optional, Union
 
 import pydantic
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.config import config
+from app.models.six_clip import SixClipPlan
 
 # 忽略 Pydantic 的特定警告
 warnings.filterwarnings(
@@ -46,6 +47,21 @@ class VideoAspect(str, Enum):
         raise ValueError(f"unsupported video aspect: {self}")
 
 
+class MaterialType(str, Enum):
+    video = "video"
+    image = "image"
+    mixed = "mixed"
+
+
+class ImageMotion(str, Enum):
+    slow_zoom_in = "slow_zoom_in"
+    slow_zoom_out = "slow_zoom_out"
+    pan_left_right = "pan_left_right"
+    pan_right_left = "pan_right_left"
+    random = "random"
+    none = "none"
+
+
 class _Config:
     arbitrary_types_allowed = True
 
@@ -79,6 +95,9 @@ class VideoParams(BaseModel):
     video_subject: str
     video_script: str = ""  # Script used to generate the video
     video_terms: Optional[str | list] = None  # Keywords used to generate the video
+    target_words: int = Field(default=120, ge=40, le=400)
+    six_clip_mode: bool = False
+    six_clip_plan: Optional[SixClipPlan] = None
     video_aspect: Optional[VideoAspect] = VideoAspect.portrait.value
     video_concat_mode: Optional[VideoConcatMode] = VideoConcatMode.random.value
     video_transition_mode: Optional[VideoTransitionMode] = None
@@ -88,10 +107,13 @@ class VideoParams(BaseModel):
     video_count: int = Field(default=1, ge=1)
 
     video_source: Optional[str] = "pexels"
+    material_type: MaterialType = MaterialType.video
+    image_duration: int = Field(default=8, ge=1, le=30)
+    image_motion: ImageMotion = ImageMotion.random
     video_materials: Optional[List[MaterialInfo]] = (
         None  # Materials used to generate the video
     )
-    
+
     custom_audio_file: Optional[str] = None  # Custom audio file path, will ignore TTS and can still use Whisper subtitles
     video_language: Optional[str] = ""  # auto detect
 
@@ -121,6 +143,42 @@ class VideoParams(BaseModel):
     paragraph_number: int = Field(default=1, ge=1, le=10)
     video_script_prompt: str = Field(default="", max_length=2000)
     custom_system_prompt: str = Field(default="", max_length=8000)
+
+    @model_validator(mode="after")
+    def _normalize_material_source(self):
+        source = str(self.video_source or "pexels").strip().lower() or "pexels"
+        inferred_type = None
+        for suffix, material_type in (
+            ("_image", MaterialType.image),
+            ("_mixed", MaterialType.mixed),
+        ):
+            if source.endswith(suffix):
+                source = source[: -len(suffix)]
+                inferred_type = material_type
+                break
+
+        if inferred_type is not None and "material_type" not in self.model_fields_set:
+            self.material_type = inferred_type
+
+        supported = {
+            "pexels": {MaterialType.video, MaterialType.image, MaterialType.mixed},
+            "pixabay": {MaterialType.video, MaterialType.image, MaterialType.mixed},
+            "coverr": {MaterialType.video},
+            "loomloom": {MaterialType.video},
+            "local": {MaterialType.video, MaterialType.image, MaterialType.mixed},
+        }
+        allowed = supported.get(source)
+        if allowed is not None and self.material_type not in allowed:
+            raise ValueError(
+                f"video source '{source}' does not support material type "
+                f"'{self.material_type.value}'"
+            )
+
+        if source in {"pexels", "pixabay"} and self.material_type != MaterialType.video:
+            self.video_source = f"{source}_{self.material_type.value}"
+        else:
+            self.video_source = source
+        return self
 
 
 class SubtitleRequest(BaseModel):

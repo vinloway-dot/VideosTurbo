@@ -514,3 +514,71 @@ class TestConfigPersistence:
                     config.app.pop(key, None)
                 else:
                     config.app[key] = original_value
+
+    def test_cloud_agent_missing_settings_receive_documented_defaults(self):
+        legacy_app = config._SynchronizedConfig({"video_source": "pexels"})
+
+        normalized = config._apply_cloud_agent_defaults(legacy_app)
+
+        assert normalized is legacy_app
+        assert normalized["video_source"] == "pexels"
+        assert normalized["cloud_agent_enabled"] is False
+        assert normalized["cloud_agent_db_path"] == "storage/cloud-agent.sqlite3"
+        assert normalized["cloud_agent_worker_poll_seconds"] == 2
+        assert normalized["cloud_agent_worker_lease_seconds"] == 120
+        assert normalized["cloud_agent_worker_heartbeat_seconds"] == 10
+        assert normalized["cloud_agent_event_queue_size"] == 128
+        assert normalized["cloud_agent_event_intake_url"] == (
+            "http://127.0.0.1:8080/api/v1/cloud-agent/internal/events"
+        )
+        assert normalized["cloud_agent_event_delivery_timeout_seconds"] == 0.5
+        assert normalized["cloud_agent_sse_heartbeat_seconds"] == 25
+        assert normalized["cloud_agent_flow_recovery_retries"] == 2
+        assert normalized["cloud_agent_canva_restart_retries"] == 4
+        assert normalized["cloud_agent_canva_stall_seconds"] == 1200
+        assert normalized["cloud_agent_job_stall_seconds"] == 3600
+        assert normalized["cloud_agent_child_terminate_grace_seconds"] == 15
+        assert normalized["cloud_agent_progress_signal_queue_size"] == 64
+        assert normalized["cloud_agent_max_retries"] == 3
+        assert normalized["cloud_agent_min_free_disk_gb"] == 10
+        assert normalized["cloud_agent_tts_min_duration_seconds"] == 1
+        assert normalized["cloud_agent_canva_min_playback_speed"] == 0.85
+        assert normalized["cloud_agent_final_duration_tolerance_seconds"] == 1.0
+        assert "cloud_agent_tts_max_duration_seconds" not in normalized
+        assert normalized["cloud_agent_final_min_size_bytes"] == 1048576
+        assert normalized["cloud_agent_expected_width"] == 1080
+        assert normalized["cloud_agent_expected_height"] == 1920
+        assert normalized["cloud_agent_browser_headless"] is True
+        assert normalized["cloud_agent_google_profile_dir"] == (
+            "storage/browser-profiles/google-flow"
+        )
+        assert normalized["cloud_agent_canva_profile_dir"] == (
+            "storage/browser-profiles/canva"
+        )
+        assert normalized["cloud_agent_browser_lock_dir"] == "storage/browser-locks"
+        assert normalized["cloud_agent_remote_browser_url"] == (
+            "http://127.0.0.1:6080/vnc.html"
+        )
+        assert normalized["cloud_agent_flow_url"] == ""
+        assert normalized["cloud_agent_canva_template_url"] == ""
+
+    def test_cloud_agent_example_config_matches_safe_defaults(self):
+        app_config = self._load_example_config()["app"]
+
+        for key, value in config.CLOUD_AGENT_DEFAULTS.items():
+            assert app_config[key] == value
+
+        path_keys = {
+            "cloud_agent_db_path",
+            "cloud_agent_google_profile_dir",
+            "cloud_agent_canva_profile_dir",
+            "cloud_agent_browser_lock_dir",
+        }
+        assert all(isinstance(app_config[key], str) for key in path_keys)
+        assert app_config["cloud_agent_flow_url"] == ""
+        assert app_config["cloud_agent_canva_template_url"] == ""
+        assert not any(
+            token in key.lower()
+            for key in config.CLOUD_AGENT_DEFAULTS
+            for token in ("password", "secret", "api_key", "token", "cookie")
+        )

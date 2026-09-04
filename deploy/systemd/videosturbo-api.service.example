@@ -1,0 +1,20 @@
+[Unit]
+Description=VideosTurbo Cloud Agent API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=linuxuser
+Group=linuxuser
+WorkingDirectory=/opt/VideosTurbo
+EnvironmentFile=-/etc/videosturbo/cloud-agent.env
+Environment=PYTHONPATH=/opt/VideosTurbo
+Environment=DISPLAY=:99
+ExecStart=/opt/VideosTurbo/.venv/bin/python -m uvicorn app.asgi:app --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

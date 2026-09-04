@@ -1,0 +1,2650 @@
+import ast
+from contextlib import nullcontext
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import requests
+
+from webui import cloud_agent, completed_videos
+
+
+UI_SOURCE = Path("webui/cloud_agent.py")
+MAIN_SOURCE = Path("webui/Main.py")
+
+
+def _video_page(*, page=1, total_pages=1, total_items=1, items=None):
+    return {
+        "items": (
+            items
+            if items is not None
+            else [
+                {
+                    "job_id": "job-1",
+                    "subject": "Completed video",
+                    "completed_at": "2026-08-28T00:00:00+00:00",
+                    "final_url": "/cloud-agent/jobs/job-1/final",
+                }
+            ]
+        ),
+        "page": page,
+        "page_size": 10,
+        "total_items": total_items,
+        "total_pages": total_pages,
+    }
+
+
+class _VideoLibraryStreamlit:
+    def __init__(self, state, pressed_key=""):
+        self.session_state = state
+        self.pressed_key = pressed_key
+        self.buttons = []
+        self.errors = []
+        self.reruns = 0
+
+    def container(self, **_kwargs):
+        return nullcontext()
+
+    def columns(self, count):
+        return [nullcontext() for _ in range(count)]
+
+    def html(self, _body):
+        return None
+
+    def video(self, _url, **_kwargs):
+        return None
+
+    def warning(self, _message):
+        return None
+
+    def button(self, _label, *, key, **_kwargs):
+        self.buttons.append(key)
+        return key == self.pressed_key
+
+    def error(self, message):
+        self.errors.append(message)
+
+    def rerun(self):
+        self.reruns += 1
+
+
+def test_completed_video_controller_requests_exactly_ten_items(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        completed_videos,
+        "_api",
+        lambda method, path, **_kwargs: calls.append((method, path)) or _video_page(),
+    )
+
+    assert completed_videos.load_video_library(1)["page_size"] == 10
+    assert calls == [("GET", "videos?page=1&page_size=10")]
+
+
+def test_video_library_media_is_fetched_from_internal_api_as_bytes(monkeypatch):
+    calls = []
+
+    class Response:
+        content = b"final-mp4"
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(
+        completed_videos.requests,
+        "request",
+        lambda method, url, **kwargs: calls.append((method, url, kwargs)) or Response(),
+    )
+
+    media = completed_videos.load_video_media(
+        "/api/v1/cloud-agent/jobs/job-1/final"
+    )
+
+    assert media == b"final-mp4"
+    assert calls == [
+        (
+            "GET",
+            "http://127.0.0.1:8080/api/v1/cloud-agent/jobs/job-1/final",
+            {"timeout": completed_videos.API_TIMEOUT_SECONDS},
+        )
+    ]
+
+
+def test_video_library_media_rejects_non_api_paths_before_request(monkeypatch):
+    monkeypatch.setattr(
+        completed_videos.requests,
+        "request",
+        lambda *_args, **_kwargs: pytest.fail("invalid media URL must not be fetched"),
+    )
+
+    with pytest.raises(ValueError, match="invalid cloud agent completed-media URL"):
+        completed_videos.load_video_media("job/final")
+
+
+def test_video_library_renderer_failure_does_not_hide_job_controls(monkeypatch):
+    errors = []
+    monkeypatch.setattr(
+        completed_videos,
+        "st",
+        SimpleNamespace(
+            error=errors.append,
+            rerun=lambda: None,
+        ),
+    )
+    monkeypatch.setattr(completed_videos, "load_video_library", lambda _page: _video_page())
+    monkeypatch.setattr(
+        completed_videos.cloud_agent_ui,
+        "render_video_library",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("renderer failed")),
+    )
+
+    completed_videos.render_video_library(ui_state={})
+
+    assert errors == ["ไม่สามารถแสดงวิดีโอที่สร้างได้ชั่วคราว กรุณารีเฟรชหน้าอีกครั้ง"]
+
+
+def test_first_video_delete_click_sets_the_shared_pending_id(monkeypatch):
+    state = {}
+    fake = _VideoLibraryStreamlit(state, "cloud_agent_delete_job-1")
+    calls = []
+    monkeypatch.setattr(completed_videos, "st", fake)
+    monkeypatch.setattr(completed_videos.cloud_agent_ui, "st", fake)
+    monkeypatch.setattr(completed_videos, "load_video_media", lambda _url: b"mp4")
+    monkeypatch.setattr(
+        completed_videos,
+        "_api",
+        lambda method, path, **_kwargs: calls.append((method, path)) or _video_page(),
+    )
+
+    completed_videos.render_video_library(ui_state=state)
+
+    assert state["cloud_agent_video_delete_pending_id"] == "job-1"
+    assert calls == [("GET", "videos?page=1&page_size=10")]
+    assert "cloud_agent_cancel_delete_job-1" in fake.buttons
+
+
+def test_video_delete_cancel_clears_only_pending_id_without_delete_api_call(monkeypatch):
+    state = {
+        "cloud_agent_video_library_page": 1,
+        "cloud_agent_video_delete_pending_id": "job-1",
+        "unrelated": "retained",
+    }
+    fake = _VideoLibraryStreamlit(state, "cloud_agent_cancel_delete_job-1")
+    calls = []
+    monkeypatch.setattr(completed_videos, "st", fake)
+    monkeypatch.setattr(completed_videos.cloud_agent_ui, "st", fake)
+    monkeypatch.setattr(completed_videos, "load_video_media", lambda _url: b"mp4")
+    monkeypatch.setattr(
+        completed_videos,
+        "_api",
+        lambda method, path, **_kwargs: calls.append((method, path)) or _video_page(),
+    )
+
+    completed_videos.render_video_library(ui_state=state)
+
+    assert state == {
+        "cloud_agent_video_library_page": 1,
+        "cloud_agent_video_delete_pending_id": "",
+        "unrelated": "retained",
+    }
+    assert calls == [("GET", "videos?page=1&page_size=10")]
+    assert fake.reruns == 1
+
+
+def test_video_delete_confirm_uses_pending_id_then_deletes_and_falls_back(monkeypatch):
+    state = {
+        "cloud_agent_video_library_page": 3,
+        "cloud_agent_video_delete_pending_id": "job-1",
+    }
+    fake = _VideoLibraryStreamlit(state, "cloud_agent_confirm_delete_job-1")
+    calls = []
+
+    def api(method, path, **_kwargs):
+        calls.append((method, path))
+        if method == "DELETE":
+            return {}
+        return _video_page(page=3, total_pages=3) if len(calls) == 1 else _video_page(
+            page=3, total_pages=2, items=[]
+        )
+
+    monkeypatch.setattr(completed_videos, "st", fake)
+    monkeypatch.setattr(completed_videos.cloud_agent_ui, "st", fake)
+    monkeypatch.setattr(completed_videos, "load_video_media", lambda _url: b"mp4")
+    monkeypatch.setattr(completed_videos, "_api", api)
+
+    completed_videos.render_video_library(ui_state=state)
+
+    assert calls == [
+        ("GET", "videos?page=3&page_size=10"),
+        ("DELETE", "videos/job-1"),
+        ("GET", "videos?page=3&page_size=10"),
+    ]
+    assert state == {
+        "cloud_agent_video_library_page": 2,
+        "cloud_agent_video_delete_pending_id": "",
+    }
+    assert fake.reruns == 1
+
+
+def test_successful_deletion_falls_back_to_previous_valid_page(monkeypatch):
+    state = {
+        "cloud_agent_video_library_page": 3,
+        "cloud_agent_video_delete_pending_id": "job-9",
+    }
+    monkeypatch.setattr(
+        completed_videos,
+        "_api",
+        lambda method, path, **_kwargs: {"total_pages": 2} if method == "GET" else {},
+    )
+
+    completed_videos.confirm_video_deletion(ui_state=state, job_id="job-9")
+
+    assert state == {
+        "cloud_agent_video_library_page": 2,
+        "cloud_agent_video_delete_pending_id": "",
+    }
+
+
+def test_successful_delete_is_not_reported_failed_when_library_refresh_fails(
+    monkeypatch,
+):
+    state = {
+        "cloud_agent_video_library_page": 3,
+        "cloud_agent_video_delete_pending_id": "job-9",
+    }
+    fake = _VideoLibraryStreamlit(state)
+    calls = []
+
+    def api(method, path, **_kwargs):
+        calls.append((method, path))
+        if method == "DELETE":
+            return {}
+        raise requests.ConnectionError("refresh unavailable")
+
+    monkeypatch.setattr(completed_videos, "st", fake)
+    monkeypatch.setattr(completed_videos, "_api", api)
+
+    deleted = completed_videos.confirm_video_deletion(ui_state=state, job_id="job-9")
+
+    assert deleted is True
+    assert calls == [
+        ("DELETE", "videos/job-9"),
+        ("GET", "videos?page=3&page_size=10"),
+    ]
+    assert state == {
+        "cloud_agent_video_library_page": 3,
+        "cloud_agent_video_delete_pending_id": "",
+    }
+    assert fake.errors == [
+        "ลบวิดีโอสำเร็จแล้ว แต่ยังรีเฟรชรายการไม่ได้ กรุณารีเฟรชหน้าอีกครั้ง"
+    ]
+
+
+def test_typed_video_delete_failure_shows_thai_actionable_copy(monkeypatch):
+    state = {
+        "cloud_agent_video_library_page": 1,
+        "cloud_agent_video_delete_pending_id": "job-9",
+    }
+    fake = _VideoLibraryStreamlit(state)
+
+    class Response:
+        def json(self):
+            return {"message": "cloud agent video not found"}
+
+    error = requests.HTTPError("not found", response=Response())
+    monkeypatch.setattr(completed_videos, "st", fake)
+    monkeypatch.setattr(completed_videos, "delete_video", lambda _job_id: (_ for _ in ()).throw(error))
+
+    deleted = completed_videos.confirm_video_deletion(ui_state=state, job_id="job-9")
+
+    assert deleted is False
+    assert state["cloud_agent_video_delete_pending_id"] == "job-9"
+    assert fake.errors == [
+        "ลบวิดีโอไม่สำเร็จ: cloud agent video not found "
+        "กรุณารีเฟรชรายการแล้วลองอีกครั้ง"
+    ]
+
+
+def test_video_delete_connection_failure_shows_thai_actionable_copy(monkeypatch):
+    state = {
+        "cloud_agent_video_library_page": 1,
+        "cloud_agent_video_delete_pending_id": "job-9",
+    }
+    fake = _VideoLibraryStreamlit(state)
+    error = requests.ConnectionError("offline")
+    monkeypatch.setattr(completed_videos, "st", fake)
+    monkeypatch.setattr(completed_videos, "delete_video", lambda _job_id: (_ for _ in ()).throw(error))
+
+    deleted = completed_videos.confirm_video_deletion(ui_state=state, job_id="job-9")
+
+    assert deleted is False
+    assert state["cloud_agent_video_delete_pending_id"] == "job-9"
+    assert fake.errors == [
+        "ไม่สามารถเชื่อมต่อเพื่อทำการลบวิดีโอได้ "
+        "กรุณาตรวจสอบการเชื่อมต่อแล้วลองอีกครั้ง"
+    ]
+
+
+class ModeStreamlit:
+    def __init__(self):
+        self.calls = []
+
+    def segmented_control(self, label, options, **kwargs):
+        self.calls.append((label, list(options), kwargs))
+        return "Research Script"
+
+
+def test_script_mode_uses_approved_segmented_control_and_retained_key(monkeypatch):
+    fake = ModeStreamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake)
+
+    selected = cloud_agent._render_script_mode_control(
+        ["Standard Script", "Research Script"],
+        "Standard Script",
+    )
+
+    assert selected == "Research Script"
+    assert fake.calls == [
+        (
+            "Script creation mode",
+            ["Standard Script", "Research Script"],
+            {
+                "default": "Standard Script",
+                "key": "cloud_agent_script_mode",
+                "width": "stretch",
+                "label_visibility": "collapsed",
+            },
+        )
+    ]
+
+
+def test_empty_script_editor_stays_collapsed_for_safe_default_layout(monkeypatch):
+    class Column:
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def button(self, *_args, **_kwargs):
+            return False
+
+    class Streamlit:
+        def __init__(self):
+            self.expanders = []
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def columns(self, *_args, **_kwargs):
+            return [Column(), Column()]
+
+        def expander(self, label, **kwargs):
+            self.expanders.append((label, kwargs))
+            return nullcontext()
+
+        def text_area(self, *_args, **_kwargs):
+            return ""
+
+        def caption(self, *_args, **_kwargs):
+            return None
+
+    fake = Streamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake)
+
+    cloud_agent._render_script_editor(
+        brief=cloud_agent._BriefSelection("", 130, "en-US", "Standard Script", ""),
+        ui_state={},
+    )
+
+    assert fake.expanders[0] == ("Script editor", {"expanded": False})
+
+
+class ExpanderStreamlit:
+    def __init__(self):
+        self.calls = []
+
+    def expander(self, label, **kwargs):
+        self.calls.append((label, kwargs))
+        return nullcontext()
+
+
+def test_advanced_settings_are_collapsed_behind_one_disclosure(monkeypatch):
+    fake = ExpanderStreamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake)
+
+    with cloud_agent._advanced_settings_container():
+        pass
+
+    assert fake.calls == [("Advanced settings", {"expanded": False})]
+
+
+def test_settings_provider_selectors_keep_research_and_tts_selection_separate(
+    monkeypatch,
+):
+    class SelectorStreamlit:
+        def __init__(self):
+            self.calls = []
+
+        def selectbox(self, label, options, **kwargs):
+            self.calls.append((label, list(options), kwargs["key"]))
+            return options[kwargs.get("index", 0)]
+
+    fake = SelectorStreamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake)
+    ui_state = {}
+    research_provider = cloud_agent._render_settings_research_provider_selector(
+        ui_state=ui_state,
+        research_settings={"provider": "openrouter"},
+        research_provider_catalog=[
+            {
+                "id": "openrouter",
+                "label": "OpenRouter",
+                "models": ["openai/gpt-5.6-sol-pro", "custom"],
+                "default_model": "openai/gpt-5.6-sol-pro",
+                "custom_model_id": "",
+                "api_key_configured": True,
+            },
+            {
+                "id": "aihubmix",
+                "label": "AIHubMix",
+                "models": ["gpt-5.6-sol", "custom"],
+                "default_model": "gpt-5.6-sol",
+                "custom_model_id": "",
+                "api_key_configured": True,
+            },
+        ],
+    )
+    tts_provider = cloud_agent._render_settings_tts_provider_selector(
+        ui_state=ui_state,
+        defaults={"tts_provider": "elevenlabs"},
+        provider_catalog=[
+            {
+                "id": "azure-tts-v1",
+                "label": "Azure TTS V1",
+                "voices": [],
+                "settings": [],
+                "requires_explicit_voice_refresh": False,
+            },
+            {
+                "id": "elevenlabs",
+                "label": "ElevenLabs TTS",
+                "voices": [],
+                "settings": [],
+                "requires_explicit_voice_refresh": True,
+            },
+        ],
+    )
+
+    assert research_provider == "openrouter"
+    assert tts_provider == "elevenlabs"
+    assert ui_state["cloud_agent_settings_research_provider"] == "openrouter"
+    assert ui_state["cloud_agent_settings_tts_provider"] == "elevenlabs"
+    assert fake.calls == [
+        (
+            "Research Provider",
+            ["openrouter", "aihubmix"],
+            "cloud_agent_settings_research_provider",
+        ),
+        (
+            "TTS Provider",
+            ["azure-tts-v1", "elevenlabs"],
+            "cloud_agent_settings_tts_provider",
+        ),
+    ]
+
+
+def test_invalid_research_provider_falls_back_to_aihubmix(monkeypatch):
+    class SelectorStreamlit:
+        @staticmethod
+        def selectbox(_label, options, **kwargs):
+            return options[kwargs.get("index", 0)]
+
+    monkeypatch.setattr(cloud_agent, "st", SelectorStreamlit())
+    ui_state = {}
+
+    selected = cloud_agent._render_settings_research_provider_selector(
+        ui_state=ui_state,
+        research_settings={"provider": "unsupported"},
+        research_provider_catalog=[
+            {"id": "openrouter", "label": "OpenRouter"},
+            {"id": "aihubmix", "label": "AIHubMix"},
+        ],
+    )
+
+    assert selected == "aihubmix"
+    assert ui_state["cloud_agent_settings_research_provider"] == "aihubmix"
+
+
+def test_cloud_agent_ui_is_a_thin_fastapi_client_with_required_controls_and_status():
+    source = UI_SOURCE.read_text(encoding="utf-8")
+
+    for label in (
+        "Video subject",
+        "Target words",
+        "Language",
+        "Generate script",
+        "Script Editor",
+        "View master prompt",
+        "TTS Provider",
+        "Voice",
+        "Speed",
+        "Google Flow",
+        "Canva",
+        "Open Browser",
+        "Continue to production",
+        "Pause",
+        "Resume",
+        "Retry",
+        "Cancel",
+        "Narration Too Long",
+        "shorten script",
+        "reduce Target Words",
+        "increase Voice Rate",
+    ):
+        assert label in source
+    assert "/api/v1/cloud-agent/" in source
+    assert "sqlite3" not in source.lower()
+    assert "PersistentBrowserManager" not in source
+    for placeholder in (
+        "job status/history",
+        "final video",
+        "measured narration duration",
+        "Canva playback factor",
+    ):
+        assert placeholder not in source
+
+
+def test_cloud_agent_video_subject_uses_compact_multiline_text_area():
+    tree = ast.parse(UI_SOURCE.read_text(encoding="utf-8"))
+    subject_assignment = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "subject"
+            for target in node.targets
+        )
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "text_area"
+    )
+    call = subject_assignment.value
+
+    assert isinstance(call, ast.Call)
+    assert isinstance(call.func, ast.Attribute)
+    assert call.func.attr == "text_area"
+    assert {keyword.arg: ast.literal_eval(keyword.value) for keyword in call.keywords} == {
+        "key": "cloud_agent_subject",
+        "height": 82,
+        "placeholder": "e.g., How to cook perfect rice every time",
+    }
+
+
+def test_create_voice_shows_an_animated_creating_status_above_the_button():
+    source = UI_SOURCE.read_text(encoding="utf-8")
+
+    assert "voice_creation_status = st.empty()" in source
+    assert 'with st.spinner("กำลังสร้างเสียง...")' in source
+    assert source.index("voice_creation_status = st.empty()") < source.index(
+        '"Create voice"'
+    )
+
+
+def test_cloud_agent_loads_tts_provider_metadata_through_fastapi(monkeypatch):
+    calls = []
+
+    def api(method, path, **_kwargs):
+        calls.append((method, path))
+        return [{"id": "elevenlabs", "label": "ElevenLabs TTS"}]
+
+    monkeypatch.setattr(cloud_agent, "_api", api)
+
+    assert cloud_agent._load_tts_provider_catalog() == [
+        {"id": "elevenlabs", "label": "ElevenLabs TTS"}
+    ]
+    assert calls == [("GET", "tts/providers")]
+
+
+def test_cloud_agent_tts_settings_payload_omits_blank_secret_unless_confirmed():
+    assert cloud_agent._tts_settings_payload(
+        settings={"api_key": "", "model_id": "eleven_v3"},
+        secret_fields={"api_key"},
+        clear_secret_fields=[],
+    ) == {"settings": {"model_id": "eleven_v3"}, "clear_secret_fields": []}
+
+    assert cloud_agent._tts_settings_payload(
+        settings={"api_key": ""},
+        secret_fields={"api_key"},
+        clear_secret_fields=["api_key"],
+    ) == {"settings": {}, "clear_secret_fields": ["api_key"]}
+
+
+def test_tts_settings_save_verification_requires_the_server_readback_to_match():
+    metadata = {
+        "settings": [
+            {
+                "name": "api_key",
+                "label": "ElevenLabs API Key",
+                "kind": "password",
+                "configured": True,
+            },
+            {
+                "name": "model_id",
+                "label": "ElevenLabs Model",
+                "kind": "select",
+                "value": "eleven_v3",
+            },
+        ]
+    }
+
+    assert cloud_agent._verify_tts_settings_save(
+        settings={"api_key": "new-secret", "model_id": "eleven_v3"},
+        secret_fields={"api_key"},
+        clear_secret_fields=[],
+        metadata=metadata,
+    ) == (
+        True,
+        "Saved and verified: ElevenLabs API Key configured; ElevenLabs Model = eleven_v3",
+    )
+
+    mismatched_metadata = {
+        "settings": [
+            {
+                "name": "api_key",
+                "label": "ElevenLabs API Key",
+                "kind": "password",
+                "configured": True,
+            },
+            {
+                "name": "model_id",
+                "label": "ElevenLabs Model",
+                "kind": "select",
+                "value": "eleven_v3",
+            },
+        ]
+    }
+    assert cloud_agent._verify_tts_settings_save(
+        settings={"model_id": "eleven_flash_v2_5"},
+        secret_fields={"api_key"},
+        clear_secret_fields=[],
+        metadata=mismatched_metadata,
+    ) == (
+        False,
+        "Could not verify saved settings. Reload the provider settings and try again.",
+    )
+
+
+def test_cloud_agent_defaults_save_verification_requires_exact_readback():
+    payload = {
+        "tts_provider": "elevenlabs",
+        "voice_id": "elevenlabs:voice-1",
+        "voice_speed": 1.0,
+        "custom_system_prompt": "Use a calm tone.",
+    }
+
+    assert cloud_agent._verify_cloud_agent_defaults_save(payload, payload) == (
+        True,
+        "Saved and verified.",
+    )
+    assert cloud_agent._verify_cloud_agent_defaults_save(
+        payload,
+        {**payload, "voice_id": "different-voice"},
+    ) == (
+        False,
+        "Could not verify saved defaults. Reload the page and try again.",
+    )
+
+
+def test_cloud_agent_ui_offers_explicit_secret_removal_and_voice_refresh():
+    source = UI_SOURCE.read_text(encoding="utf-8")
+
+    assert "Remove stored key" in source
+    assert "clear_secret_fields" in source
+    assert '"cloud_agent_tts_voices"' in source
+
+
+def test_cloud_agent_language_selector_reuses_the_main_script_auto_contract():
+    assert cloud_agent.SCRIPT_LANGUAGE_OPTIONS == [
+        ("Auto — detect from Video Subject", ""),
+        ("zh-CN", "zh-CN"),
+        ("zh-HK", "zh-HK"),
+        ("zh-TW", "zh-TW"),
+        ("de-DE", "de-DE"),
+        ("en-US", "en-US"),
+        ("es-ES", "es-ES"),
+        ("fr-FR", "fr-FR"),
+        ("ru-RU", "ru-RU"),
+        ("vi-VN", "vi-VN"),
+        ("th-TH", "th-TH"),
+        ("tr-TR", "tr-TR"),
+    ]
+
+
+def test_cloud_agent_brief_defaults_target_words_to_120(monkeypatch):
+    class Column:
+        def __init__(self, parent):
+            self.parent = parent
+
+        def number_input(self, label, **kwargs):
+            if label == "Target words":
+                self.parent.target_words_default = kwargs["value"]
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, **_kwargs):
+            return options[0]
+
+    class Streamlit:
+        def __init__(self):
+            self.session_state = {}
+            self.target_words_default = None
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def text_area(self, *_args, **_kwargs):
+            return ""
+
+        def columns(self, _specification, **_kwargs):
+            return [Column(self), Column(self), Column(self)]
+
+        def expander(self, *_args, **_kwargs):
+            return nullcontext()
+
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def segmented_control(self, _label, _options, *, default, **_kwargs):
+            return default
+
+    fake_streamlit = Streamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+
+    brief = cloud_agent._render_video_brief(
+        ui_state=fake_streamlit.session_state,
+        defaults={"tts_provider": "elevenlabs", "voice_id": "", "voice_speed": 1.0},
+        research_settings={"enabled": True},
+        research_provider_catalog=[],
+    )
+
+    assert fake_streamlit.target_words_default == 120
+    assert brief.words == 120
+
+
+def test_cloud_agent_language_selector_formats_the_auto_empty_value(monkeypatch):
+    class Column:
+        def __init__(self, parent):
+            self.parent = parent
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def link_button(self, *_args, **_kwargs):
+            return None
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, *, format_func, **_kwargs):
+            if _label == "Language":
+                self.parent.formatted_language_options = [
+                    format_func(option) for option in options
+                ]
+            return options[0]
+
+    class Streamlit:
+        def __init__(self):
+            self.session_state = {}
+            self.formatted_language_options = []
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def text_input(self, _label, **kwargs):
+            return kwargs.get("value", "")
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, *, format_func, **_kwargs):
+            if _label == "Language":
+                self.formatted_language_options = [
+                    format_func(option) for option in options
+                ]
+            return options[0]
+
+        def expander(self, *_args, **_kwargs):
+            return nullcontext()
+
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def columns(self, _count, **_kwargs):
+            return [Column(self), Column(self), Column(self), Column(self)]
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def segmented_control(self, _label, options, **_kwargs):
+            return options[0]
+
+        def text_area(self, *_args, **_kwargs):
+            return ""
+
+        def empty(self):
+            return nullcontext()
+
+        def caption(self, *_args, **_kwargs):
+            return None
+
+        def error(self, *_args, **_kwargs):
+            return None
+
+    fake_streamlit = Streamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+
+    cloud_agent.render_cloud_agent_panel()
+
+    assert fake_streamlit.formatted_language_options[0] == (
+        "Auto — detect from Video Subject"
+    )
+
+
+def test_cloud_agent_custom_system_prompt_is_hidden_by_default(monkeypatch):
+    class Column:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def link_button(self, *_args, **_kwargs):
+            return None
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, **_kwargs):
+            return options[0]
+
+    class Streamlit:
+        def __init__(self):
+            self.session_state = {}
+            self.expander_arguments = []
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def text_input(self, _label, **kwargs):
+            return kwargs.get("value", "")
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, **_kwargs):
+            return options[0]
+
+        def expander(self, label, *, expanded):
+            self.expander_arguments.append((label, expanded))
+            return nullcontext()
+
+        def text_area(self, *_args, **_kwargs):
+            return ""
+
+        def empty(self):
+            return nullcontext()
+
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def columns(self, _count, **_kwargs):
+            return [Column(), Column(), Column(), Column()]
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def segmented_control(self, _label, options, **_kwargs):
+            return options[0]
+
+        def caption(self, *_args, **_kwargs):
+            return None
+
+        def error(self, *_args, **_kwargs):
+            return None
+
+    fake_streamlit = Streamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+
+    cloud_agent.render_cloud_agent_panel()
+
+    assert ("Custom System Prompt", False) in fake_streamlit.expander_arguments
+
+
+def test_main_renders_cloud_agent_without_the_retired_local_generation_flow():
+    source = MAIN_SOURCE.read_text(encoding="utf-8")
+    application = source.split("def _render_application():", maxsplit=1)[1]
+
+    assert "from webui import cloud_agent" in source
+    assert "cloud_agent.render_cloud_agent_panel" in application
+    assert "_render_six_clip_video_settings" not in application
+    assert "_render_audio_settings" not in application
+    assert "_render_subtitle_settings" not in application
+    assert "_render_generation_controls" not in application
+
+
+def test_main_source_has_no_retired_classic_video_generation_dependencies():
+    source = MAIN_SOURCE.read_text(encoding="utf-8")
+
+    assert "cloud_agent.render_cloud_agent_panel" in source
+    for retired_symbol in (
+        "_render_generation_controls",
+        "_render_six_clip_video_settings",
+        "local_video_materials_uploader",
+        "stock_materials",
+        "six_clip_plan",
+        "six_clip_video_aspect_select",
+    ):
+        assert retired_symbol not in source
+
+
+def test_cloud_agent_api_allows_a_canva_readiness_timeout_longer_than_the_provider_wait(
+    monkeypatch,
+):
+    recorded = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": {"status": "READY"}}
+
+    def request(*_args, **kwargs):
+        recorded.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(cloud_agent.requests, "request", request)
+
+    assert cloud_agent._api(
+        "POST", "sessions/canva/check", timeout=45
+    ) == {"status": "READY"}
+    assert recorded["timeout"] >= 30
+
+
+def test_cloud_agent_ui_formats_persisted_job_failure_for_the_operator():
+    assert cloud_agent._job_error_message(
+        {
+            "error_code": "CANVA_UI_VERIFICATION_FAILED",
+            "error_message": "Canva Uploads control cannot be verified",
+        }
+    ) == "CANVA_UI_VERIFICATION_FAILED: Canva Uploads control cannot be verified"
+
+
+def test_successful_start_stores_job_for_production_status(monkeypatch):
+    session_state = {}
+    monkeypatch.setattr(cloud_agent.st, "session_state", session_state)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_start_job",
+        lambda **kwargs: {
+            "id": "job-123",
+            "status": "QUEUED",
+            "checkpoint": "NONE",
+            "current_step": "queued",
+            "progress": 0,
+        },
+    )
+
+    cloud_agent._start_and_store_job(
+        {
+            "subject": "Rice",
+            "target_words": 130,
+            "language": "en-US",
+            "script": "Ready narration",
+            "master_prompt": "Ready master prompt",
+            "clip_plan": {"target_words": 130, "segments": [{"index": 1}] * 6},
+            "tts_provider": "elevenlabs",
+            "voice_id": "voice-1",
+            "voice_speed": 1.0,
+            "research_draft_id": "",
+            "prepared_voice_fingerprint": "",
+        }
+    )
+
+    assert session_state["cloud_agent_job_id"] == "job-123"
+    assert session_state["cloud_agent_job_snapshot"]["status"] == "QUEUED"
+    assert session_state["cloud_agent_job_lookup_id"] == "job-123"
+
+
+class _StartActionStreamlit:
+    def __init__(self, state):
+        self.session_state = state
+        self.errors = []
+        self.spinners = []
+
+    def button(self, _label, **_kwargs):
+        return True
+
+    def error(self, message):
+        self.errors.append(message)
+
+    def spinner(self, message):
+        self.spinners.append(message)
+        return nullcontext()
+
+
+def _queued_job():
+    return {
+        "id": "job-123",
+        "status": "QUEUED",
+        "checkpoint": "NONE",
+        "current_step": "queued",
+        "progress": 0,
+    }
+
+
+def test_continue_generates_missing_standard_draft_before_starting_job(monkeypatch):
+    state = {}
+    fake_streamlit = _StartActionStreamlit(state)
+    started = {}
+    prepared = {}
+    generated_plan = {
+        "target_words": 130,
+        "segments": [{"index": index} for index in range(1, 7)],
+    }
+
+    def prepare_draft(**kwargs):
+        prepared.update(kwargs)
+        return {
+            "script": "Generated narration",
+            "master_prompt": "Generated master prompt",
+            "clip_plan": generated_plan,
+        }
+
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(cloud_agent, "_prepare_draft", prepare_draft)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_start_and_store_job",
+        lambda inputs: started.update(inputs) or _queued_job(),
+    )
+
+    job = cloud_agent._render_start_action(
+        brief=cloud_agent._BriefSelection(
+            "Saturn's hexagon", 130, "English", "Standard Script", "Documentary"
+        ),
+        script="",
+        master_prompt="",
+        generation=cloud_agent._GenerationSelection(
+            "elevenlabs", "voice-1", 1.0, None
+        ),
+        ui_state=state,
+    )
+
+    assert job["status"] == "QUEUED"
+    assert prepared == {
+        "subject": "Saturn's hexagon",
+        "language": "English",
+        "target_words": 130,
+        "script": "",
+        "custom_system_prompt": "Documentary",
+    }
+    assert started["script"] == "Generated narration"
+    assert started["master_prompt"] == "Generated master prompt"
+    assert started["clip_plan"] == generated_plan
+    assert started["prepared_voice_fingerprint"] == ""
+    assert state["cloud_agent_pending_production_draft"]["script"] == (
+        "Generated narration"
+    )
+    assert fake_streamlit.errors == []
+
+
+def test_auto_preparation_defers_editor_widget_updates_until_next_run(monkeypatch):
+    state = {}
+    fake_streamlit = _StartActionStreamlit(state)
+    generated_plan = {
+        "target_words": 130,
+        "segments": [{"index": index} for index in range(1, 7)],
+    }
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_prepare_draft",
+        lambda **_kwargs: {
+            "script": "Generated narration",
+            "master_prompt": "Generated master prompt",
+            "clip_plan": generated_plan,
+        },
+    )
+
+    draft = cloud_agent._prepare_production_draft(
+        brief=cloud_agent._BriefSelection(
+            "Saturn's hexagon", 130, "English", "Standard Script", ""
+        ),
+        script="",
+        master_prompt="",
+        ui_state=state,
+    )
+
+    assert draft["script"] == "Generated narration"
+    assert "cloud_agent_script" not in state
+    assert "cloud_agent_master_prompt" not in state
+
+
+def test_continue_rebuilds_plan_from_edited_script_and_discards_stale_voice(monkeypatch):
+    state = {
+        "cloud_agent_script": "Edited narration",
+        "cloud_agent_draft_script": "Original narration",
+        "cloud_agent_master_prompt": "Original master prompt",
+        "cloud_agent_clip_plan": {
+            "target_words": 130,
+            "segments": [{"index": index} for index in range(1, 7)],
+        },
+        "cloud_agent_research_draft_id": "research-1",
+        "cloud_agent_research_sources": [{"url": "https://example.com"}],
+        "cloud_agent_research_accounting": {"provider_rounds": 2},
+    }
+    fake_streamlit = _StartActionStreamlit(state)
+    started = {}
+    refreshed_plan = {
+        "target_words": 130,
+        "segments": [{"index": index} for index in range(1, 7)],
+    }
+
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_prepare_draft",
+        lambda **kwargs: {
+            "script": kwargs["script"],
+            "master_prompt": "Refreshed master prompt",
+            "clip_plan": refreshed_plan,
+        },
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_start_and_store_job",
+        lambda inputs: started.update(inputs) or _queued_job(),
+    )
+
+    job = cloud_agent._render_start_action(
+        brief=cloud_agent._BriefSelection(
+            "Saturn's hexagon", 130, "English", "Research Script", ""
+        ),
+        script="Edited narration",
+        master_prompt="Original master prompt",
+        generation=cloud_agent._GenerationSelection(
+            "elevenlabs",
+            "voice-1",
+            1.0,
+            {
+                "fingerprint": "f" * 64,
+                "script": "Original narration",
+                "tts_provider": "elevenlabs",
+                "voice_id": "voice-1",
+                "voice_speed": 1.0,
+            },
+        ),
+        ui_state=state,
+    )
+
+    assert job["status"] == "QUEUED"
+    assert started["script"] == "Edited narration"
+    assert started["master_prompt"] == "Refreshed master prompt"
+    assert started["prepared_voice_fingerprint"] == ""
+    assert started["research_draft_id"] == ""
+    assert state["cloud_agent_pending_production_draft"]["research_draft_id"] == ""
+    cloud_agent._apply_pending_production_draft(state)
+    assert "cloud_agent_research_draft_id" not in state
+    assert state["cloud_agent_script"] == "Edited narration"
+
+
+def test_continue_reuses_matching_draft_and_prepared_voice(monkeypatch):
+    plan = {
+        "target_words": 130,
+        "segments": [{"index": index} for index in range(1, 7)],
+    }
+    state = {
+        "cloud_agent_draft_script": "Ready narration",
+        "cloud_agent_master_prompt": "Ready master prompt",
+        "cloud_agent_clip_plan": plan,
+        "cloud_agent_research_draft_id": "research-1",
+    }
+    fake_streamlit = _StartActionStreamlit(state)
+    started = {}
+    prepared_voice = {
+        "fingerprint": "f" * 64,
+        "script": "Ready narration",
+        "tts_provider": "elevenlabs",
+        "voice_id": "voice-1",
+        "voice_speed": 1.0,
+    }
+
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_prepare_draft",
+        lambda **_kwargs: pytest.fail("matching draft must be reused"),
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_start_and_store_job",
+        lambda inputs: started.update(inputs) or _queued_job(),
+    )
+
+    job = cloud_agent._render_start_action(
+        brief=cloud_agent._BriefSelection(
+            "Saturn's hexagon", 130, "English", "Research Script", ""
+        ),
+        script="Ready narration",
+        master_prompt="Ready master prompt",
+        generation=cloud_agent._GenerationSelection(
+            "elevenlabs", "voice-1", 1.0, prepared_voice
+        ),
+        ui_state=state,
+    )
+
+    assert job["status"] == "QUEUED"
+    assert started["prepared_voice_fingerprint"] == "f" * 64
+    assert started["research_draft_id"] == "research-1"
+
+
+def test_continue_generates_missing_research_draft_before_starting_job(monkeypatch):
+    state = {
+        "cloud_agent_research_source_url_count": 2,
+        "cloud_agent_research_source_url_1": "https://example.com/one",
+        "cloud_agent_research_source_url_2": "https://example.com/two.pdf",
+        "cloud_agent_research_openrouter_model": "Custom Model ID",
+        "cloud_agent_research_openrouter_custom_model_id": "openai/gpt-test",
+        "cloud_agent_research_custom_system_prompt": "Cite reliable facts.",
+        "cloud_agent_research_allow_citations": True,
+    }
+    fake_streamlit = _StartActionStreamlit(state)
+    researched = {}
+    started = {}
+    plan = {
+        "target_words": 130,
+        "segments": [{"index": index} for index in range(1, 7)],
+    }
+
+    def prepare_research_draft(**kwargs):
+        researched.update(kwargs)
+        return {
+            "research_draft_id": "research-1",
+            "script": "Research narration",
+            "master_prompt": "Research master prompt",
+            "clip_plan": plan,
+            "sources": [{"url": "https://example.com/one"}],
+            "accounting": {"provider_rounds": 2},
+        }
+
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(
+        cloud_agent, "_prepare_research_draft", prepare_research_draft
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_start_and_store_job",
+        lambda inputs: started.update(inputs) or _queued_job(),
+    )
+
+    job = cloud_agent._render_start_action(
+        brief=cloud_agent._BriefSelection(
+            "Enceladus",
+            130,
+            "English",
+            "Research Script",
+            "",
+            "openrouter",
+            "Custom Model ID",
+        ),
+        script="",
+        master_prompt="",
+        generation=cloud_agent._GenerationSelection(
+            "elevenlabs", "voice-1", 1.0, None
+        ),
+        ui_state=state,
+    )
+
+    assert job["status"] == "QUEUED"
+    assert researched == {
+        "subject": "Enceladus",
+        "language": "English",
+        "target_words": 130,
+        "provider": "openrouter",
+        "model_choice": "Custom Model ID",
+        "custom_model_id": "openai/gpt-test",
+        "source_urls": [
+            "https://example.com/one",
+            "https://example.com/two.pdf",
+        ],
+        "custom_system_prompt": "Cite reliable facts.",
+        "allow_citations": True,
+    }
+    assert started["script"] == "Research narration"
+    assert started["research_draft_id"] == "research-1"
+    assert started["prepared_voice_fingerprint"] == ""
+
+
+def test_new_session_restores_the_latest_job_for_controls(monkeypatch):
+    session_state = {}
+    monkeypatch.setattr(cloud_agent.st, "session_state", session_state)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_api",
+        lambda method, path, **_kwargs: [
+            {
+                "id": "job-latest",
+                "status": "FAILED",
+                "checkpoint": "TTS_READY",
+                "current_step": "failed",
+                "progress": 30,
+            }
+        ]
+        if (method, path) == ("GET", "jobs")
+        else pytest.fail(f"unexpected API call: {method} {path}"),
+    )
+
+    restored = cloud_agent._restore_latest_job_if_needed(session_state)
+
+    assert restored["id"] == "job-latest"
+    assert session_state["cloud_agent_job_id"] == "job-latest"
+    assert session_state["cloud_agent_job_lookup_id"] == "job-latest"
+
+
+def test_event_driven_status_does_not_read_job_without_event(monkeypatch):
+    class EventStreamlit:
+        def __init__(self):
+            self.session_state = {
+                "cloud_agent_job_id": "job-123",
+                "cloud_agent_job_snapshot": {
+                    "id": "job-123",
+                    "status": "QUEUED",
+                    "checkpoint": "NONE",
+                    "current_step": "queued",
+                    "progress": 0,
+                },
+            }
+    fake_streamlit = EventStreamlit()
+    rendered = []
+    calls = []
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_events,
+        "render_cloud_job_event_listener",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_api",
+        lambda method, path, **_kwargs: calls.append((method, path)),
+    )
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_ui,
+        "render_production_status",
+        lambda stages, job: rendered.append((stages, job)),
+    )
+
+    cloud_agent._render_event_driven_production_status(
+        script_ready=True,
+        prepared_voice_ready=False,
+        ui_state=fake_streamlit.session_state,
+    )
+
+    assert calls == []
+    assert rendered[-1][1]["status"] == "QUEUED"
+
+
+def test_selected_job_event_reads_job_once_and_stores_snapshot(monkeypatch):
+    state = {
+        "cloud_agent_job_id": "job-123",
+        "cloud_agent_job_snapshot": {
+            "id": "job-123", "status": "QUEUED", "checkpoint": "NONE",
+            "current_step": "queued", "progress": 0,
+        },
+        "cloud_agent_last_event_id": "",
+    }
+
+    class EventStreamlit:
+        session_state = state
+
+    calls = []
+    rendered = []
+    monkeypatch.setattr(cloud_agent, "st", EventStreamlit())
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_events,
+        "render_cloud_job_event_listener",
+        lambda *_args, **_kwargs: {
+            "event_id": "event-1", "type": "job.updated", "job_id": "job-123"
+        },
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_api",
+        lambda method, path, **_kwargs: calls.append((method, path)) or {
+            "id": "job-123", "status": "TTS_GENERATING",
+            "checkpoint": "PREFLIGHT_PASSED", "current_step": "tts_generating",
+            "progress": 15,
+        },
+    )
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_ui,
+        "render_production_status",
+        lambda stages, job: rendered.append((stages, job)),
+    )
+
+    cloud_agent._render_event_driven_production_status(
+        script_ready=True, prepared_voice_ready=False, ui_state=state
+    )
+
+    assert calls == [("GET", "jobs/job-123")]
+    assert state["cloud_agent_last_event_id"] == "event-1"
+    assert state["cloud_agent_job_snapshot"]["status"] == "TTS_GENERATING"
+    assert rendered[-1][1]["progress"] == 15
+
+
+def test_status_probe_refreshes_missed_completed_job(monkeypatch):
+    state = {
+        "cloud_agent_job_id": "job-123",
+        "cloud_agent_job_snapshot": {
+            "id": "job-123",
+            "status": "FLOW_GENERATING",
+            "checkpoint": "TTS_READY",
+            "current_step": "flow_generating",
+            "progress": 35,
+        },
+        "cloud_agent_last_event_id": "event-1",
+    }
+
+    class EventStreamlit:
+        session_state = state
+
+    rendered = []
+    monkeypatch.setattr(cloud_agent, "st", EventStreamlit())
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_events,
+        "render_cloud_job_event_listener",
+        lambda *_args, **_kwargs: {
+            "event_id": "status-probe-1",
+            "type": "status_probe",
+        },
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_api",
+        lambda method, path, **_kwargs: {
+            "id": "job-123",
+            "status": "COMPLETED",
+            "checkpoint": "COMPLETED",
+            "current_step": "completed",
+            "progress": 100,
+        }
+        if (method, path) == ("GET", "jobs/job-123")
+        else pytest.fail(f"unexpected API call: {method} {path}"),
+    )
+    monkeypatch.setattr(cloud_agent, "_render_incident_banners", lambda *_args: None)
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_ui,
+        "render_production_status",
+        lambda stages, job: rendered.append((stages, job)),
+    )
+
+    cloud_agent._render_event_driven_production_status(
+        script_ready=True,
+        prepared_voice_ready=True,
+        ui_state=state,
+    )
+
+    assert state["cloud_agent_job_snapshot"]["status"] == "COMPLETED"
+    assert rendered[-1][1]["progress"] == 100
+
+
+def test_terminal_job_disables_status_fallback_polling(monkeypatch):
+    state = {
+        "cloud_agent_job_id": "job-123",
+        "cloud_agent_job_snapshot": {
+            "id": "job-123",
+            "status": "COMPLETED",
+            "checkpoint": "COMPLETED",
+            "current_step": "completed",
+            "progress": 100,
+        },
+    }
+    mounted = []
+
+    class EventStreamlit:
+        session_state = state
+
+    monkeypatch.setattr(cloud_agent, "st", EventStreamlit())
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_events,
+        "render_cloud_job_event_listener",
+        lambda *_args, **kwargs: mounted.append(kwargs) or None,
+    )
+    monkeypatch.setattr(cloud_agent, "_render_incident_banners", lambda *_args: None)
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_ui,
+        "render_production_status",
+        lambda *_args: None,
+    )
+
+    cloud_agent._render_event_driven_production_status(
+        script_ready=True,
+        prepared_voice_ready=True,
+        ui_state=state,
+    )
+
+    assert mounted[0]["polling_enabled"] is False
+    assert mounted[0]["poll_interval_seconds"] == 15
+
+
+def test_incident_event_reads_unread_once_and_clears_deleted_selection(monkeypatch):
+    class WidgetSessionState(dict):
+        def __init__(self):
+            super().__init__(
+                {
+                    "cloud_agent_job_id": "job-123",
+                    "cloud_agent_job_lookup_id": "job-123",
+                    "cloud_agent_job_snapshot": {
+                        "id": "job-123",
+                        "status": "FLOW_GENERATING",
+                    },
+                    "cloud_agent_last_event_id": "",
+                }
+            )
+            self.instantiated_widget_keys = {"cloud_agent_job_lookup_id"}
+
+        def __setitem__(self, key, value):
+            if key in self.instantiated_widget_keys:
+                raise RuntimeError(f"widget key mutated after instantiation: {key}")
+            super().__setitem__(key, value)
+
+    state = WidgetSessionState()
+    reruns = []
+
+    class EventStreamlit:
+        session_state = state
+
+        @staticmethod
+        def rerun(*, scope="app"):
+            reruns.append(scope)
+
+    calls = []
+    monkeypatch.setattr(cloud_agent, "st", EventStreamlit())
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_events,
+        "render_cloud_job_event_listener",
+        lambda *_args, **_kwargs: {
+            "event_id": "incident-event-1",
+            "type": "job.incident",
+            "incident_id": "incident-1",
+            "former_job_id": "job-123",
+        },
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_api",
+        lambda method, path, **_kwargs: calls.append((method, path)) or [],
+    )
+    monkeypatch.setattr(cloud_agent, "_render_incident_banners", lambda *_args: None)
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_ui, "render_production_status", lambda *_args: None
+    )
+
+    cloud_agent._render_event_driven_production_status(
+        script_ready=True, prepared_voice_ready=True, ui_state=state
+    )
+
+    assert calls == [("GET", "incidents?unread=true")]
+    assert state["cloud_agent_job_id"] == ""
+    assert state["cloud_agent_job_lookup_id"] == "job-123"
+    assert state["cloud_agent_job_snapshot"] == {}
+    assert state["cloud_agent_job_lookup_clear_pending"] is True
+    assert reruns == ["app"]
+
+
+def test_pending_job_lookup_clear_is_applied_before_widget_instantiation():
+    state = {
+        "cloud_agent_job_lookup_id": "job-123",
+        "cloud_agent_job_lookup_clear_pending": True,
+    }
+
+    cloud_agent._apply_pending_job_lookup_clear(state)
+
+    assert state["cloud_agent_job_lookup_id"] == ""
+    assert "cloud_agent_job_lookup_clear_pending" not in state
+
+
+def test_pause_refreshes_snapshot_without_mutating_the_lookup_widget(monkeypatch):
+    rendered_statuses = []
+
+    class WidgetSessionState(dict):
+        def __init__(self):
+            super().__init__(
+                {
+                    "cloud_agent_job_lookup_id": "",
+                    "cloud_agent_job_id": "job-123",
+                    "cloud_agent_job_snapshot": {
+                        "id": "job-123",
+                        "status": "TTS_GENERATING",
+                        "checkpoint": "TTS_READY",
+                        "current_step": "tts_generating",
+                        "progress": 15,
+                    },
+                }
+            )
+            self.instantiated_widget_keys = set()
+
+        def __setitem__(self, key, value):
+            if key in self.instantiated_widget_keys:
+                raise RuntimeError(f"widget key mutated after instantiation: {key}")
+            super().__setitem__(key, value)
+
+    class Column:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def button(self, _label, *, key, **_kwargs):
+            return key == "cloud_agent_pause"
+
+        def link_button(self, *_args, **_kwargs):
+            return None
+
+    class Streamlit:
+        def __init__(self):
+            self.session_state = WidgetSessionState()
+
+        def columns(self, _count, **_kwargs):
+            return [Column(), Column(), Column(), Column()]
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def expander(self, *_args, **_kwargs):
+            return nullcontext()
+
+        def text_input(self, _label, *, key, **_kwargs):
+            self.session_state.instantiated_widget_keys.add(key)
+            return self.session_state.get(key, "")
+
+        def caption(self, *_args, **_kwargs):
+            return None
+
+        def error(self, message):
+            raise AssertionError(message)
+
+    fake_streamlit = Streamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_render_video_brief",
+        lambda **_kwargs: cloud_agent._BriefSelection(
+            "Rice", 130, "en-US", "Standard Script", ""
+        ),
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_render_script_editor",
+        lambda **_kwargs: ("Ready narration", "Ready master prompt"),
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_render_generation_setup",
+        lambda **_kwargs: cloud_agent._GenerationSelection(
+            "elevenlabs", "voice-1", 1.0, None
+        ),
+    )
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_ui, "render_workflow_rail", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_ui,
+        "render_production_status",
+        lambda stages, job: rendered_statuses.append((stages, job)),
+    )
+    monkeypatch.setattr(
+        cloud_agent,
+        "_api",
+        lambda method, path, **_kwargs: {
+            "id": "job-123",
+            "status": "PAUSED",
+            "checkpoint": "TTS_READY",
+            "current_step": "paused",
+            "progress": 40,
+        }
+        if (method, path) == ("POST", "jobs/job-123/pause")
+        else pytest.fail(f"unexpected API call: {method} {path}"),
+    )
+
+    cloud_agent.render_cloud_agent_panel()
+
+    assert fake_streamlit.session_state["cloud_agent_job_id"] == "job-123"
+    assert fake_streamlit.session_state["cloud_agent_job_snapshot"]["status"] == "PAUSED"
+    assert rendered_statuses[-1][1]["status"] == "PAUSED"
+
+
+def test_job_snapshot_allow_lists_the_production_status_fields(monkeypatch):
+    session_state = {}
+    monkeypatch.setattr(cloud_agent.st, "session_state", session_state)
+
+    cloud_agent._store_job_snapshot(
+        {
+            "id": "job-123",
+            "status": "QUEUED",
+            "checkpoint": "NONE",
+            "current_step": "queued",
+            "progress": 0,
+            "api_key": "must-not-persist",
+            "provider_response": {"secret": "must-not-persist"},
+        }
+    )
+
+    assert session_state["cloud_agent_job_snapshot"] == {
+        "id": "job-123",
+        "status": "QUEUED",
+        "checkpoint": "NONE",
+        "current_step": "queued",
+        "progress": 0,
+    }
+
+
+def test_prepared_voice_matches_only_its_current_generation_inputs():
+    prepared_voice = {
+        "fingerprint": "voice-fingerprint",
+        "script": "Ready narration",
+        "tts_provider": "elevenlabs",
+        "voice_id": "voice-1",
+        "voice_speed": 1.0,
+    }
+
+    assert cloud_agent._prepared_voice_matches(
+        prepared_voice,
+        script="Ready narration",
+        provider="elevenlabs",
+        voice="voice-1",
+        speed=1.0,
+    )
+    assert not cloud_agent._prepared_voice_matches(
+        prepared_voice,
+        script="Edited narration",
+        provider="elevenlabs",
+        voice="voice-1",
+        speed=1.0,
+    )
+
+
+def test_canva_check_timeout_is_shown_as_a_safe_webui_error(monkeypatch):
+    class Column:
+        def __init__(self, pressed_key=""):
+            self.pressed_key = pressed_key
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def button(self, _label, *, key, **_kwargs):
+            return key == self.pressed_key
+
+        def link_button(self, *_args, **_kwargs):
+            raise AssertionError("Open Browser must not run during a Canva check")
+
+    class Streamlit:
+        def __init__(self):
+            self.errors = []
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def text_input(self, _label, **kwargs):
+            return kwargs.get("value", "")
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, **_kwargs):
+            return options[0]
+
+        def expander(self, *_args, **_kwargs):
+            return nullcontext()
+
+        def text_area(self, *_args, **_kwargs):
+            return ""
+
+        def empty(self):
+            return nullcontext()
+
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def columns(self, _count, **_kwargs):
+            return [Column(), Column("canva-check"), Column(), Column()]
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def json(self, *_args, **_kwargs):
+            raise AssertionError("Canva timeout must not render a success result")
+
+        def error(self, message):
+            self.errors.append(message)
+
+        def caption(self, *_args, **_kwargs):
+            return None
+
+        def info(self, *_args, **_kwargs):
+            return None
+
+    fake_streamlit = Streamlit()
+
+    def request(*_args, **_kwargs):
+        raise requests.ReadTimeout("Canva took longer than the UI request budget")
+
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(cloud_agent.requests, "request", request)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_render_video_brief",
+        lambda **_kwargs: cloud_agent._BriefSelection("", 130, "", "Standard Script", ""),
+    )
+
+    cloud_agent.render_cloud_agent_panel()
+
+    assert fake_streamlit.errors == ["Cloud Agent request could not be completed."]
+
+
+def test_prepare_draft_calls_the_fastapi_draft_endpoint_with_editor_inputs(monkeypatch):
+    recorded = {}
+
+    def api(method, path, **kwargs):
+        recorded.update(method=method, path=path, **kwargs)
+        return {"script": "Draft", "master_prompt": "Prompt", "clip_plan": {}}
+
+    monkeypatch.setattr(cloud_agent, "_api", api)
+
+    assert cloud_agent._prepare_draft(
+        subject="Why Saturn Has a Hexagon",
+        language="English",
+        target_words=130,
+        script="Edited narration",
+        custom_system_prompt="Use a documentary tone.",
+    )["script"] == "Draft"
+    assert recorded == {
+        "method": "POST",
+        "path": "draft",
+        "json": {
+            "subject": "Why Saturn Has a Hexagon",
+            "language": "English",
+            "target_words": 130,
+            "script": "Edited narration",
+            "custom_system_prompt": "Use a documentary tone.",
+        },
+        "timeout": 120,
+    }
+
+
+def test_google_flow_open_browser_uses_the_api_service_identifier(monkeypatch):
+    recorded = {}
+
+    def api(method, path, **kwargs):
+        recorded.update(method=method, path=path, **kwargs)
+        return {"url": "https://remote-browser.example"}
+
+    monkeypatch.setattr(cloud_agent, "_api", api)
+
+    assert cloud_agent._open_browser_url("google-flow") == "https://remote-browser.example"
+    assert recorded == {
+        "method": "GET",
+        "path": "sessions/google_flow/open-browser",
+    }
+
+
+def test_start_job_sends_the_draft_clip_plan_required_by_the_api(monkeypatch):
+    recorded = {}
+
+    def api(method, path, **kwargs):
+        recorded.update(method=method, path=path, **kwargs)
+        return {"id": "job-123"}
+
+    clip_plan = {"target_words": 130, "segments": [{"index": 1}] * 6}
+    monkeypatch.setattr(cloud_agent, "_api", api)
+
+    assert cloud_agent._start_job(
+        subject="Why Saturn Has a Hexagon",
+        target_words=130,
+        language="English",
+        script="Ready narration",
+        master_prompt="Ready prompt",
+        clip_plan=clip_plan,
+        tts_provider="azure-tts-v1",
+        voice_id="en-AU-NatashaNeural-Female",
+        voice_speed=1.0,
+        create_canva_captions=False,
+        prepared_voice_fingerprint="a" * 64,
+    ) == {"id": "job-123"}
+    assert recorded["method"] == "POST"
+    assert recorded["path"] == "jobs"
+    assert recorded["json"]["clip_plan"] == clip_plan
+    assert recorded["json"]["script"] == "Ready narration"
+    assert recorded["json"]["prepared_voice_fingerprint"] == "a" * 64
+    assert recorded["json"]["create_canva_captions"] is False
+
+
+def test_prepare_draft_voice_posts_the_full_script_and_selected_voice(monkeypatch):
+    recorded = {}
+
+    def api(method, path, **kwargs):
+        recorded.update(method=method, path=path, **kwargs)
+        return {"fingerprint": "f" * 64, "reused": False}
+
+    monkeypatch.setattr(cloud_agent, "_api", api)
+
+    assert cloud_agent._prepare_draft_voice(
+        script="The entire narration.",
+        tts_provider="elevenlabs",
+        voice_id="elevenlabs:P9NVJuTccNIK9usP8iEI:001",
+        voice_speed=1.0,
+    )["fingerprint"] == "f" * 64
+    assert recorded == {
+        "method": "POST",
+        "path": "draft/voice",
+        "json": {
+            "script": "The entire narration.",
+            "tts_provider": "elevenlabs",
+            "voice_id": "elevenlabs:P9NVJuTccNIK9usP8iEI:001",
+            "voice_speed": 1.0,
+        },
+        "timeout": 120,
+    }
+
+
+def test_cloud_agent_defaults_payload_keeps_voice_and_custom_system_prompt_together():
+    assert cloud_agent._cloud_agent_defaults_payload(
+        tts_provider="elevenlabs",
+        voice_id="elevenlabs:P9NVJuTccNIK9usP8iEI:001",
+        voice_speed=1.1,
+        custom_system_prompt="Write in a calm documentary tone.",
+        create_canva_captions=False,
+    ) == {
+        "tts_provider": "elevenlabs",
+        "voice_id": "elevenlabs:P9NVJuTccNIK9usP8iEI:001",
+        "voice_speed": 1.1,
+        "custom_system_prompt": "Write in a calm documentary tone.",
+        "create_canva_captions": False,
+    }
+
+
+def test_cloud_agent_ui_exposes_visible_individual_save_controls_for_voice_and_prompt():
+    source = UI_SOURCE.read_text(encoding="utf-8")
+
+    assert "Save TTS Provider & Voice Default" in source
+    assert "Save Custom System Prompt" in source
+    assert "Saved and verified" in source
+
+
+def test_research_mode_offers_fastapi_only_controls_and_shared_editor_handoff():
+    source = UI_SOURCE.read_text(encoding="utf-8")
+
+    for label in (
+        "Standard Script",
+        "Research Script",
+        "Source URLs",
+        "Generate research script",
+        "cloud_agent_research_sources",
+    ):
+        assert label in source
+    assert "sqlite3" not in source.lower()
+    assert "PersistentBrowserManager" not in source
+
+
+def test_research_script_mode_remains_available_when_settings_are_disabled():
+    assert cloud_agent._research_mode_options(False) == [
+        "Standard Script",
+        "Research Script",
+    ]
+
+
+def test_research_error_data_reads_safe_message_code_and_accounting():
+    class Response:
+        def json(self):
+            return {
+                "status": 422,
+                "message": "กรุณาใส่ URL อย่างน้อยหนึ่งแหล่ง",
+                "data": {
+                    "code": "URL_REQUIRED",
+                    "accounting": {"provider_rounds": 0},
+                },
+            }
+
+    assert cloud_agent._research_error_data(Response()) == {
+        "message": "กรุณาใส่ URL อย่างน้อยหนึ่งแหล่ง",
+        "code": "URL_REQUIRED",
+        "accounting": {"provider_rounds": 0},
+    }
+
+
+def test_research_settings_save_requires_exact_server_readback(monkeypatch):
+    responses = iter(
+        [
+            {
+                "provider": "openrouter",
+                "openrouter_model": "openai/gpt-5.6-sol-pro",
+                "openrouter_custom_model_id": "",
+                "aihubmix_model": "gpt-5.6-sol",
+                "aihubmix_custom_model_id": "",
+                "custom_system_prompt": "Use source evidence first.",
+            },
+            {
+                "provider": "aihubmix",
+                "openrouter_model": "openai/gpt-5.6-sol-pro",
+                "openrouter_custom_model_id": "",
+                "aihubmix_model": "gpt-5.6-sol",
+                "aihubmix_custom_model_id": "",
+                "custom_system_prompt": "Use source evidence first.",
+            },
+        ]
+    )
+
+    def api(method, path, **_kwargs):
+        assert (method, path) in {
+            ("PUT", "research/settings"),
+            ("GET", "research/settings"),
+        }
+        return next(responses)
+
+    monkeypatch.setattr(cloud_agent, "_api", api)
+
+    assert cloud_agent._save_and_verify_research_settings(
+        {
+            "provider": "openrouter",
+            "openrouter_model": "openai/gpt-5.6-sol-pro",
+            "openrouter_custom_model_id": "",
+            "aihubmix_model": "gpt-5.6-sol",
+            "aihubmix_custom_model_id": "",
+            "custom_system_prompt": "Use source evidence first.",
+        }
+    ) == (
+        False,
+        "Could not verify saved research settings. Reload the page and try again.",
+    )
+
+
+def test_blank_research_key_is_not_sent_as_replacement():
+    assert cloud_agent._research_key_payload("") is None
+    assert cloud_agent._research_key_payload(" new-key ") == {"api_key": "new-key"}
+
+
+def test_research_payload_forwards_citation_toggle_and_bounded_timeout(monkeypatch):
+    recorded = {}
+
+    def api(method, path, **kwargs):
+        recorded.update(method=method, path=path, **kwargs)
+        return {"research_draft_id": "draft-1"}
+
+    monkeypatch.setattr(cloud_agent, "_api", api)
+    cloud_agent._prepare_research_draft(
+        subject="Topic",
+        language="English",
+        target_words=130,
+        provider="openrouter",
+        model_choice="openai/gpt-5.6-sol-pro",
+        custom_model_id="",
+        source_urls=["https://example.com/article"],
+        custom_system_prompt="",
+        allow_citations=True,
+    )
+
+    assert recorded["timeout"] >= 300
+    assert recorded["json"]["allow_citations"] is True
+
+
+def test_research_mode_and_url_row_helpers_enforce_explicit_ui_bounds():
+    assert cloud_agent._research_mode_options(False) == [
+        "Standard Script",
+        "Research Script",
+    ]
+    assert cloud_agent._research_mode_options(True) == [
+        "Standard Script",
+        "Research Script",
+    ]
+    assert cloud_agent._research_url_row_count(0) == 1
+    assert cloud_agent._research_url_row_count(2) == 2
+    assert cloud_agent._research_url_row_count(99) == 3
+    assert cloud_agent._research_source_urls(
+        [" https://one.example ", "", "https://two.example"]
+    ) == ["https://one.example", "https://two.example"]
+
+
+def test_research_model_options_come_from_provider_catalog():
+    provider = cloud_agent._fallback_research_provider_catalog()[0]
+
+    assert provider["models"] == ["openai/gpt-5.6-sol-pro", "custom"]
+    assert provider["default_model"] == "openai/gpt-5.6-sol-pro"
+    assert provider["custom_model_id"] == "openai/gpt-5.6-sol-pro"
+
+
+def test_research_model_selection_reads_streamlit_widget_state():
+    widget_state = {
+        "cloud_agent_research_aihubmix_model": "gpt-5.6-sol",
+        "cloud_agent_research_aihubmix_custom_model_id": "vendor/custom-model",
+    }
+
+    assert cloud_agent._research_model_choice("aihubmix", widget_state) == "gpt-5.6-sol"
+    assert (
+        cloud_agent._research_custom_model_id("aihubmix", widget_state)
+        == "vendor/custom-model"
+    )
+
+
+def test_research_key_submit_removes_raw_secret_before_api_call(monkeypatch):
+    state_key = "cloud_agent_research_api_key_openrouter"
+    session_state = {state_key: "raw-secret"}
+    monkeypatch.setattr(cloud_agent.st, "session_state", session_state)
+
+    def save(provider, value):
+        assert provider == "openrouter"
+        assert value == "raw-secret"
+        assert state_key not in session_state
+        return {"api_key_configured": True}
+
+    monkeypatch.setattr(cloud_agent, "_save_research_api_key", save)
+
+    cloud_agent._submit_research_api_key("openrouter", remove=False)
+
+    assert state_key not in session_state
+    assert "raw-secret" not in repr(session_state)
+
+
+def test_store_draft_clears_stale_research_provenance(monkeypatch):
+    session_state = {
+        "cloud_agent_research_draft_id": "draft-1",
+        "cloud_agent_research_sources": [{"url": "https://example.com"}],
+        "cloud_agent_research_accounting": {"provider_rounds": 2},
+    }
+    monkeypatch.setattr(cloud_agent.st, "session_state", session_state)
+
+    cloud_agent._store_draft(
+        {
+            "script": "Standard narration",
+            "master_prompt": "Standard prompt",
+            "clip_plan": {"target_words": 130, "segments": [{"index": 1}] * 6},
+        }
+    )
+
+    assert "cloud_agent_research_draft_id" not in session_state
+    assert "cloud_agent_research_sources" not in session_state
+    assert "cloud_agent_research_accounting" not in session_state
+
+
+def test_edit_then_refresh_clears_research_association_but_keeps_shared_workflow(monkeypatch):
+    session_state = {
+        "cloud_agent_script": "Edited narration",
+        "cloud_agent_draft_script": "Original research narration",
+        "cloud_agent_research_draft_id": "draft-1",
+        "cloud_agent_research_sources": [{"url": "https://example.com"}],
+        "cloud_agent_research_accounting": {"provider_rounds": 2},
+    }
+    monkeypatch.setattr(cloud_agent.st, "session_state", session_state)
+
+    cloud_agent._store_refreshed_draft(
+        {
+            "script": "Edited narration",
+            "master_prompt": "Refreshed prompt",
+            "clip_plan": {"target_words": 130, "segments": [{"index": 1}] * 6},
+        }
+    )
+
+    assert "cloud_agent_research_draft_id" not in session_state
+    assert session_state["cloud_agent_script"] == "Edited narration"
+    assert session_state["cloud_agent_draft_script"] == "Edited narration"
+
+
+def test_unchanged_refresh_retains_research_association(monkeypatch):
+    session_state = {
+        "cloud_agent_draft_script": "Research narration",
+        "cloud_agent_research_draft_id": "draft-1",
+        "cloud_agent_research_sources": [{"url": "https://example.com"}],
+        "cloud_agent_research_accounting": {"provider_rounds": 2},
+    }
+    monkeypatch.setattr(cloud_agent.st, "session_state", session_state)
+
+    cloud_agent._store_refreshed_draft(
+        {
+            "script": "Research narration",
+            "master_prompt": "Research prompt",
+            "clip_plan": {"target_words": 130, "segments": [{"index": 1}] * 6},
+        }
+    )
+
+    assert session_state["cloud_agent_research_draft_id"] == "draft-1"
+    assert session_state["cloud_agent_research_sources"] == [
+        {"url": "https://example.com"}
+    ]
+
+
+def test_start_job_sends_optional_research_draft_id_when_present(monkeypatch):
+    recorded = {}
+
+    def api(method, path, **kwargs):
+        recorded.update(method=method, path=path, **kwargs)
+        return {"id": "job-123"}
+
+    monkeypatch.setattr(cloud_agent, "_api", api)
+
+    cloud_agent._start_job(
+        subject="Research start",
+        target_words=130,
+        language="English",
+        script="Ready narration",
+        master_prompt="Ready prompt",
+        clip_plan={"target_words": 130, "segments": [{"index": 1}] * 6},
+        tts_provider="azure-tts-v1",
+        voice_id="en-US-JennyNeural-Female",
+        voice_speed=1.0,
+        prepared_voice_fingerprint="f" * 64,
+        research_draft_id="draft-1",
+    )
+
+    assert recorded["json"]["research_draft_id"] == "draft-1"
+
+
+def test_research_failure_never_stores_draft(monkeypatch):
+    class Response:
+        def __init__(self):
+            self.status_code = 422
+
+        def json(self):
+            return {
+                "message": "กรุณาใส่ URL อย่างน้อยหนึ่งแหล่ง",
+                "data": {
+                    "code": "URL_REQUIRED",
+                    "accounting": {"provider_rounds": 0},
+                },
+            }
+
+    class Column:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def link_button(self, *_args, **_kwargs):
+            return None
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, **_kwargs):
+            return options[0]
+
+        def caption(self, *_args, **_kwargs):
+            return None
+
+    class Spinner:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Streamlit:
+        def __init__(self):
+            self.session_state = {}
+            self.errors = []
+            self.captions = []
+            self.radios = []
+            self.checkboxes = []
+            self.text_area_calls = []
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def text_input(self, _label, **kwargs):
+            return self.session_state.get(kwargs.get("key", ""), kwargs.get("value", ""))
+
+        def text_area(self, label, **kwargs):
+            self.text_area_calls.append((label, kwargs))
+            if label == "Video subject":
+                return "Research-backed draft"
+            if label == "Source URLs":
+                return ""
+            return self.session_state.get(kwargs.get("key", ""), "")
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, **_kwargs):
+            return options[0]
+
+        def segmented_control(self, _label, options, **_kwargs):
+            self.radios.append(tuple(options))
+            return "Research Script"
+
+        def expander(self, *_args, **_kwargs):
+            return nullcontext()
+
+        def button(self, label, **_kwargs):
+            return label == "Generate research script"
+
+        def columns(self, _count, **_kwargs):
+            return [Column(), Column(), Column(), Column()]
+
+        def empty(self):
+            return self
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def spinner(self, _label):
+            return Spinner()
+
+        def caption(self, message):
+            self.captions.append(message)
+
+        def error(self, message):
+            self.errors.append(message)
+
+        def success(self, *_args, **_kwargs):
+            return None
+
+        def info(self, *_args, **_kwargs):
+            return None
+
+        def warning(self, *_args, **_kwargs):
+            return None
+
+        def checkbox(self, label, **kwargs):
+            self.checkboxes.append((label, kwargs))
+            return False
+
+        def link_button(self, *_args, **_kwargs):
+            return None
+
+        def json(self, *_args, **_kwargs):
+            return None
+
+        def rerun(self):
+            raise AssertionError("rerun must not happen on research failure")
+
+        def audio(self, *_args, **_kwargs):
+            return None
+
+    prepared = {}
+
+    def prepare_research_draft(**kwargs):
+        prepared.update(kwargs)
+        error = requests.HTTPError("research failed")
+        error.response = Response()
+        raise error
+
+    fake_streamlit = Streamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(cloud_agent, "_prepare_research_draft", prepare_research_draft)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_store_draft",
+        lambda _draft: pytest.fail("research failure must preserve the existing editor"),
+    )
+
+    cloud_agent.render_cloud_agent_panel()
+
+    assert fake_streamlit.errors == ["กรุณาใส่ URL อย่างน้อยหนึ่งแหล่ง"]
+    assert (
+        "อนุญาตให้ใส่อ้างอิงในสคริปต์",
+        {"key": "cloud_agent_research_allow_citations", "value": False},
+    ) in fake_streamlit.checkboxes
+    assert prepared["allow_citations"] is False
+    assert (
+        "Script",
+        {
+                "key": "cloud_agent_script",
+                "height": 120,
+                "label_visibility": "collapsed",
+        },
+    ) in fake_streamlit.text_area_calls
+
+
+def test_start_button_forwards_stored_research_draft_id(monkeypatch):
+    recorded = {}
+    rendered_statuses = []
+
+    class Column:
+        def __init__(self, pressed_key=""):
+            self.pressed_key = pressed_key
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def button(self, _label, *, key, **_kwargs):
+            return key == self.pressed_key
+
+        def link_button(self, *_args, **_kwargs):
+            return None
+
+    class Streamlit:
+        def __init__(self):
+            self.session_state = {
+                "cloud_agent_script": "Ready narration",
+                "cloud_agent_draft_script": "Ready narration",
+                "cloud_agent_master_prompt": "Ready prompt",
+                "cloud_agent_clip_plan": {"target_words": 130, "segments": [{"index": 1}] * 6},
+                "cloud_agent_research_draft_id": "draft-1",
+                "cloud_agent_voice": "voice-1",
+            }
+            self.rendered_text_inputs = []
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def text_input(self, label, **kwargs):
+            self.rendered_text_inputs.append(label)
+            return self.session_state.get(kwargs.get("key", ""), kwargs.get("value", ""))
+
+        def text_area(self, label, **kwargs):
+            if label == "Video Subject":
+                return "Research start"
+            return self.session_state.get(kwargs.get("key", ""), "")
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, **_kwargs):
+            return options[0]
+
+        def checkbox(self, label, **kwargs):
+            assert label == "สร้าง Caption ใน Canva"
+            assert kwargs["key"] == "cloud_agent_create_canva_captions"
+            return True
+
+        def radio(self, _label, options, **_kwargs):
+            return "Standard Script"
+
+        def expander(self, *_args, **_kwargs):
+            return nullcontext()
+
+        def button(self, _label, *, key, **_kwargs):
+            return key == "cloud_agent_start"
+
+        def columns(self, _count, **_kwargs):
+            return [Column(), Column(), Column(), Column()]
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def empty(self):
+            return nullcontext()
+
+        def caption(self, *_args, **_kwargs):
+            return None
+
+        def error(self, message):
+            raise AssertionError(message)
+
+        def success(self, *_args, **_kwargs):
+            return None
+
+        def json(self, *_args, **_kwargs):
+            return None
+
+    def start_job(**kwargs):
+        recorded.update(kwargs)
+        return {
+            "id": "job-123",
+            "status": "QUEUED",
+            "checkpoint": "NONE",
+            "current_step": "queued",
+            "progress": 0,
+        }
+
+    fake_streamlit = Streamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+    monkeypatch.setattr(cloud_agent, "_start_job", start_job)
+    monkeypatch.setattr(
+        cloud_agent,
+        "_render_video_brief",
+        lambda **_kwargs: cloud_agent._BriefSelection("Research start", 130, "", "Standard Script", ""),
+    )
+    monkeypatch.setattr(
+        cloud_agent.cloud_agent_ui,
+        "render_production_status",
+        lambda stages, job: rendered_statuses.append((stages, job)),
+    )
+
+    cloud_agent.render_cloud_agent_panel()
+
+    assert recorded["research_draft_id"] == "draft-1"
+    assert recorded["create_canva_captions"] is True
+    assert rendered_statuses[-1][1]["status"] == "QUEUED"
+
+
+def test_standard_mode_hides_research_only_controls(monkeypatch):
+    class Column:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def button(self, *_args, **_kwargs):
+            return False
+
+        def link_button(self, *_args, **_kwargs):
+            return None
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, _label, options, **_kwargs):
+            return options[0]
+
+    class Streamlit:
+        def __init__(self):
+            self.session_state = {}
+            self.selectbox_labels = []
+            self.text_input_labels = []
+            self.text_area_labels = []
+            self.expander_labels = []
+            self.button_labels = []
+            self.captions = []
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def text_input(self, label, **kwargs):
+            self.text_input_labels.append(label)
+            return self.session_state.get(kwargs.get("key", ""), kwargs.get("value", ""))
+
+        def text_area(self, label, **kwargs):
+            self.text_area_labels.append(label)
+            return self.session_state.get(kwargs.get("key", ""), "")
+
+        def number_input(self, _label, **kwargs):
+            return kwargs["value"]
+
+        def selectbox(self, label, options, **_kwargs):
+            self.selectbox_labels.append(label)
+            return options[0]
+
+        def segmented_control(self, _label, options, **_kwargs):
+            return "Standard Script"
+
+        def expander(self, label, **_kwargs):
+            self.expander_labels.append(label)
+            return nullcontext()
+
+        def button(self, label, **_kwargs):
+            self.button_labels.append(label)
+            return False
+
+        def columns(self, _count, **_kwargs):
+            return [Column(), Column(), Column(), Column()]
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def empty(self):
+            return nullcontext()
+
+        def caption(self, message):
+            self.captions.append(message)
+
+        def error(self, *_args, **_kwargs):
+            return None
+
+        def success(self, *_args, **_kwargs):
+            return None
+
+    fake_streamlit = Streamlit()
+    monkeypatch.setattr(cloud_agent, "st", fake_streamlit)
+
+    cloud_agent.render_cloud_agent_panel()
+
+    assert "Research Provider" not in fake_streamlit.selectbox_labels
+    assert "Research API Key" not in fake_streamlit.text_input_labels
+    assert "Source URLs" not in fake_streamlit.text_area_labels
+    assert "Research Settings" not in fake_streamlit.expander_labels
+    assert "Research Provider Key" not in fake_streamlit.expander_labels
+    assert "Save Research Settings" not in fake_streamlit.button_labels
+    assert "Save Research API Key" not in fake_streamlit.button_labels
+    assert "Generate Research Script" not in fake_streamlit.button_labels
+    assert "Research generation may call the selected provider up to 3 rounds." not in fake_streamlit.captions

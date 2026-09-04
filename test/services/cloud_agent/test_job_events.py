@@ -1,0 +1,266 @@
+import pytest
+
+from app.models.cloud_agent import (
+    CloudJobCheckpoint,
+    CloudJobCreate,
+    CloudJobRecord,
+    CloudJobStatus,
+    FlowRecoveryState,
+)
+from app.models.six_clip import empty_six_clip_plan
+from app.services.cloud_agent.job_events import (
+    CloudJobIncidentEvent,
+    CloudJobEvent,
+    CloudJobEventType,
+    EventPublishingCloudJobStore,
+)
+
+
+def _request(subject: str = "Event test") -> CloudJobCreate:
+    return CloudJobCreate(
+        subject=subject,
+        script="A valid narration script.",
+        master_prompt="Create six videos from this narration.",
+        clip_plan=empty_six_clip_plan(target_words=130),
+        language="English",
+        target_words=130,
+        tts_provider="azure-tts-v1",
+        voice_id="en-US-JennyNeural-Female",
+        voice_speed=1.0,
+    )
+
+
+class RecordingSink:
+    def __init__(self):
+        self.events = []
+
+    def publish_nowait(self, event):
+        self.events.append(event)
+        assert event.job_id
+        assert event.type.value in {"job.updated", "job.completed"}
+        return True
+
+
+def test_status_patch_emits_safe_projection_after_commit(tmp_path):
+    sink = RecordingSink()
+    store = EventPublishingCloudJobStore(str(tmp_path / "agent.sqlite3"), sink=sink)
+    job = store.create_job(_request())
+
+    changed = store.patch_job(
+        job.id,
+        status=CloudJobStatus.TTS_GENERATING,
+        current_step="tts_generating",
+        progress=15,
+        error_message="must-not-leak",
+    )
+
+    assert store.get_job(job.id) == changed
+    assert sink.events[0].model_dump(mode="json") == {
+        "event_id": sink.events[0].event_id,
+        "type": "job.updated",
+        "job_id": job.id,
+        "status": "TTS_GENERATING",
+        "checkpoint": "NONE",
+        "current_step": "tts_generating",
+        "progress": 15,
+        "updated_at": changed.updated_at,
+        "completed_at": "",
+    }
+    assert "must-not-leak" not in sink.events[0].model_dump_json()
+
+
+def test_flow_workspace_retry_reservation_emits_committed_job_update(tmp_path):
+    """Catches durable retry progress being invisible to the event-driven UI."""
+    sink = RecordingSink()
+    store = EventPublishingCloudJobStore(str(tmp_path / "agent.sqlite3"), sink=sink)
+    job = store.create_job(_request())
+    claimed = store.claim_next_job("worker-a", lease_seconds=60)
+    assert claimed is not None
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.TTS_READY,
+        checkpoint=CloudJobCheckpoint.TTS_READY,
+        current_step="tts_ready",
+        progress=30,
+    )
+    sink.events.clear()
+
+    reserved = store.reserve_flow_workspace_retry(
+        job.id,
+        delay_seconds=30.0,
+        worker_id="worker-a",
+    )
+
+    assert reserved is not None
+    assert reserved.current_step == "flow_workspace_retrying"
+    assert reserved.flow_workspace_retry_attempts == 1
+    assert len(sink.events) == 1
+    assert sink.events[0].type is CloudJobEventType.JOB_UPDATED
+    assert sink.events[0].current_step == "flow_workspace_retrying"
+
+    opening = store.begin_flow_workspace_retry_opening(
+        job.id,
+        worker_id="worker-a",
+    )
+
+    assert opening is not None
+    assert opening.current_step == "flow_workspace_retry_opening"
+    assert len(sink.events) == 2
+    assert sink.events[1].type is CloudJobEventType.JOB_UPDATED
+    assert sink.events[1].current_step == "flow_workspace_retry_opening"
+
+
+def test_inventory_retry_reservation_is_atomic_and_emits_committed_state(tmp_path):
+    sink = RecordingSink()
+    store = EventPublishingCloudJobStore(str(tmp_path / "agent.sqlite3"), sink=sink)
+    job = store.create_job(_request())
+    claimed = store.claim_next_job("worker-a", lease_seconds=60)
+    assert claimed is not None
+    store.patch_job(
+        job.id,
+        status=CloudJobStatus.FLOW_GENERATING,
+        checkpoint=CloudJobCheckpoint.TTS_READY,
+        current_step="flow_generating",
+        progress=35,
+        flow_generation_unresolved=True,
+    )
+    sink.events.clear()
+
+    reserved = store.reserve_flow_workspace_retry(
+        job.id,
+        delay_seconds=30.0,
+        worker_id="worker-a",
+        enter_inventory_recovery=True,
+    )
+
+    assert reserved is not None
+    assert reserved.status is CloudJobStatus.TTS_READY
+    assert reserved.current_step == "flow_workspace_retrying"
+    assert reserved.flow_generation_unresolved is False
+    assert reserved.flow_recovery_state is FlowRecoveryState.INVENTORY_PENDING
+    assert reserved.flow_workspace_retry_attempts == 1
+    assert len(sink.events) == 1
+    assert sink.events[0].current_step == "flow_workspace_retrying"
+
+
+def test_non_progress_and_duplicate_patches_do_not_emit(tmp_path):
+    sink = RecordingSink()
+    store = EventPublishingCloudJobStore(str(tmp_path / "agent.sqlite3"), sink=sink)
+    job = store.create_job(_request())
+
+    store.patch_job(job.id, voice_file="voice.mp3")
+    store.patch_job(job.id, progress=0)
+
+    assert sink.events == []
+
+
+def test_timestamp_only_progress_does_not_emit_job_updated(tmp_path):
+    sink = RecordingSink()
+    store = EventPublishingCloudJobStore(str(tmp_path / "agent.sqlite3"), sink=sink)
+    job = store.create_job(_request())
+
+    store.mark_progress(
+        job.id,
+        "canva.audio.inserted",
+        at="2026-08-28T00:00:00+00:00",
+    )
+
+    assert sink.events == []
+
+
+def test_completed_transition_emits_one_completed_event(tmp_path):
+    sink = RecordingSink()
+    store = EventPublishingCloudJobStore(str(tmp_path / "agent.sqlite3"), sink=sink)
+    job = store.create_job(_request())
+
+    completed = store.patch_job(
+        job.id,
+        status=CloudJobStatus.COMPLETED,
+        current_step="completed",
+        progress=100,
+    )
+    store.patch_job(job.id, current_step=completed.current_step)
+
+    assert [event.type.value for event in sink.events] == ["job.completed"]
+    assert sink.events[0].completed_at == completed.completed_at
+    assert completed.checkpoint is CloudJobCheckpoint.COMPLETED
+
+
+def test_sink_failure_cannot_fail_committed_job_update(tmp_path):
+    class FailingSink:
+        def publish_nowait(self, _event):
+            raise RuntimeError("event transport unavailable")
+
+    store = EventPublishingCloudJobStore(
+        str(tmp_path / "agent.sqlite3"), sink=FailingSink()
+    )
+    job = store.create_job(_request())
+
+    completed = store.patch_job(
+        job.id,
+        status=CloudJobStatus.COMPLETED,
+        current_step="completed",
+        progress=100,
+    )
+
+    assert completed.status is CloudJobStatus.COMPLETED
+    assert store.get_job(job.id).status is CloudJobStatus.COMPLETED
+
+
+def test_event_model_rejects_sensitive_extra_fields():
+    with pytest.raises(ValueError):
+        CloudJobEvent.model_validate(
+            {
+                "event_id": "event-1",
+                "type": CloudJobEventType.JOB_UPDATED,
+                "job_id": "job-1",
+                "status": CloudJobStatus.TTS_GENERATING,
+                "checkpoint": CloudJobCheckpoint.NONE,
+                "current_step": "tts_generating",
+                "progress": 15,
+                "updated_at": "2026-08-28T00:00:00+00:00",
+                "completed_at": "",
+                "script": "must-not-enter",
+            }
+        )
+
+
+def test_incident_event_contains_no_subject_message_or_paths():
+    event = CloudJobIncidentEvent(
+        event_id="event-1",
+        type="job.incident",
+        incident_id="incident-1",
+        former_job_id="job-1",
+        reason_code="JOB_STALLED_TIMEOUT",
+        stage="canva",
+        created_at="2026-08-28T00:00:00+00:00",
+    )
+
+    assert set(event.model_dump(mode="json")) == {
+        "event_id",
+        "type",
+        "incident_id",
+        "former_job_id",
+        "reason_code",
+        "stage",
+        "created_at",
+    }
+
+
+def test_parent_can_republish_one_durable_snapshot_after_child_exit(tmp_path):
+    sink = RecordingSink()
+    store = EventPublishingCloudJobStore(str(tmp_path / "agent.sqlite3"), sink=sink)
+    job = store.create_job(_request())
+    completed = CloudJobRecord.model_validate(
+        {
+            **job.model_dump(),
+            "status": CloudJobStatus.COMPLETED,
+            "checkpoint": CloudJobCheckpoint.COMPLETED,
+            "current_step": "completed",
+            "progress": 100,
+            "completed_at": "2026-08-28T00:00:00+00:00",
+        }
+    )
+
+    assert store.publish_snapshot(completed) is True
+    assert sink.events[-1].type is CloudJobEventType.JOB_COMPLETED

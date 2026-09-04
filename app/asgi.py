@@ -4,6 +4,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -43,7 +44,7 @@ def validation_exception_handler(request: Request, e: RequestValidationError):
     return JSONResponse(
         status_code=400,
         content=utils.get_response(
-            status=400, data=e.errors(), message="field required"
+            status=400, data=jsonable_encoder(e.errors()), message="field required"
         ),
     )
 

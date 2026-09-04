@@ -1,0 +1,1236 @@
+from __future__ import annotations
+
+import re
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Callable
+from urllib.parse import urlparse
+
+from loguru import logger
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+from app.models.cloud_agent import ServiceSessionStatus
+from app.services.cloud_agent.download_transport import save_download_with_url_fallback
+from app.services.cloud_agent.providers._browser_session import BrowserSessionProvider
+from app.services.cloud_agent.providers._session_detection import (
+    classify_security_challenge,
+)
+from app.services.cloud_agent.session import SessionManager
+
+
+class CanvaUIVerificationError(RuntimeError):
+    """Raised when an essential, observable Canva editor state cannot be proved."""
+
+    def __init__(self, message: str, *, audio_card_count: int | None = None) -> None:
+        super().__init__(message)
+        self.audio_card_count = audio_card_count
+
+
+class CanvaPlaybackVerificationError(CanvaUIVerificationError):
+    """Raised when Canva cannot prove a playback or timeline change."""
+
+
+class CanvaDownloadVerificationError(RuntimeError):
+    """Raised when the final Canva download does not yield a usable MP4 artifact."""
+
+
+def classify_canva_session(*, url: str, html: str) -> ServiceSessionStatus:
+    """Classify observable Canva editor state without relying on cookies."""
+    challenge = classify_security_challenge(html=html)
+    if challenge is not None:
+        return challenge
+
+    page_url = str(url or "").lower()
+    body = str(html or "").lower()
+
+    if (
+        "/login" in page_url
+        or "/signup" in page_url
+        or "log in or sign up" in body
+        or "log in to canva" in body
+        or "continue with google" in body
+    ):
+        return ServiceSessionStatus.SESSION_EXPIRED
+
+    is_design_editor = "canva.com/design/" in page_url and "/edit" in page_url
+    has_share_control = 'aria-label="share"' in body or ">share<" in body
+    has_editor_surface = "canva editor" in body
+    if is_design_editor and has_share_control and has_editor_surface:
+        return ServiceSessionStatus.READY
+
+    return ServiceSessionStatus.ERROR
+
+
+class CanvaSessionProvider(BrowserSessionProvider):
+    _READY_TIMEOUT_MS = 180_000
+
+    def __init__(self, browser, *, service_url: str) -> None:
+        super().__init__(
+            browser,
+            service="canva",
+            service_url=service_url,
+            classifier=classify_canva_session,
+        )
+
+    def _wait_for_observable_state(self, page: Any) -> None:
+        initial_status = self.classifier(url=page.url, html=page.content())
+        if initial_status not in {
+            ServiceSessionStatus.ERROR,
+            ServiceSessionStatus.READY,
+        }:
+            return
+
+        share_name = re.compile(r"^\s*share\s*$", re.IGNORECASE)
+        share_control = page.get_by_role(
+            "button",
+            name=share_name,
+        ).or_(
+            page.get_by_role(
+                "menuitem",
+                name=share_name,
+            )
+        )
+        try:
+            share_control.first.wait_for(
+                state="visible",
+                timeout=self._READY_TIMEOUT_MS,
+            )
+        except PlaywrightTimeoutError:
+            # Classification below still distinguishes login/challenge/error states.
+            pass
+
+
+class CanvaAssemblyClient:
+    """Assemble the canonical six clips in Canva and return its exported MP4."""
+
+    _VIDEO_START_EDGE = '[role="slider"][aria-label="Trimming, start edge"]'
+    _VIDEO_END_EDGE = '[role="slider"][aria-label="Trimming, end edge"]'
+    _VIDEO_DURATION_TEXT = re.compile(r"^\d+(?:\.\d+)?s$")
+    _WORKSPACE_TAB_HYDRATION_SECONDS = 30.0
+    _AUDIO_PANEL_HYDRATION_SECONDS = 5.0
+    _MEDIA_MENU_HYDRATION_SECONDS = 5.0
+    _EDITOR_NAVIGATION_TIMEOUT_SECONDS = 180.0
+    _CAPTION_GENERATION_TIMEOUT_SECONDS = 90.0
+    _CAPTION_STABILITY_SECONDS = 5.0
+
+    def __init__(
+        self,
+        browser: Any,
+        sessions: SessionManager,
+        *,
+        service_url: str,
+        timeline_tolerance_seconds: float = 1.0,
+        export_timeout_seconds: float = 180.0,
+        poll_seconds: float = 0.5,
+    ) -> None:
+        service_url = str(service_url or "").strip()
+        if not service_url:
+            raise ValueError("Canva service URL is required")
+        if timeline_tolerance_seconds < 0:
+            raise ValueError("timeline_tolerance_seconds must be non-negative")
+        if export_timeout_seconds <= 0:
+            raise ValueError("export_timeout_seconds must be positive")
+        if poll_seconds < 0:
+            raise ValueError("poll_seconds must be non-negative")
+
+        self.browser = browser
+        self.sessions = sessions
+        self.service_url = service_url
+        self.timeline_tolerance_seconds = float(timeline_tolerance_seconds)
+        self.export_timeout_seconds = float(export_timeout_seconds)
+        self.poll_seconds = float(poll_seconds)
+
+    def assemble_and_export(
+        self,
+        job: Any,
+        clips: list[Path],
+        audio: Path,
+        output: Path,
+        progress: Callable[[str], None] | None = None,
+    ) -> Path:
+        with self.open_job_session(job) as session:
+            return session.assemble_and_export(
+                job,
+                clips,
+                audio,
+                output,
+                progress=progress,
+            )
+
+    def _assemble_open_page(
+        self,
+        page: Any,
+        job: Any,
+        clips: list[Path],
+        audio: Path,
+        output: Path,
+        progress: Callable[[str], None] | None = None,
+    ) -> Path:
+        emit = progress or (lambda _milestone: None)
+        clip_paths = [Path(clip) for clip in clips]
+        audio_path = Path(audio)
+        output_path = Path(output)
+        self._validate_media_inputs(clip_paths, audio_path)
+        clip_names = [clip.name for clip in clip_paths]
+        self._clear_video_timeline(page)
+        self._clear_audio_timeline(page)
+        self._clean_uploaded_videos(page, clip_names)
+        self._clean_uploaded_audio(page, audio_path.name)
+        emit("canva.timeline.cleared")
+        self._upload_media(page, [*clip_paths, audio_path])
+        emit("canva.uploads.ready")
+        self._add_uploaded_audio(page, audio_path.name)
+        emit("canva.audio.inserted")
+        self._add_uploaded_clips(
+            page,
+            clip_names,
+            progress=lambda number: emit(f"canva.video.inserted.{number}"),
+        )
+        self._order_clips(page, clip_names)
+        self._mute_source_audio(page)
+        emit("canva.source_audio.muted")
+        if getattr(job, "create_canva_captions", True):
+            self._generate_auto_captions(
+                page,
+                requested=lambda: emit("canva.captions.requested"),
+            )
+            emit("canva.captions.stable")
+        else:
+            emit("canva.captions.skipped")
+        self._export_mp4_1080p(page)
+        emit("canva.export.started")
+        self._download_export(page, output_path)
+        emit("canva.export.downloaded")
+        return output_path
+
+    @contextmanager
+    def open_job_session(self, job: Any):
+        """Own exactly one Canva browser context for assembly and post-final cleanup."""
+        job_id = str(getattr(job, "id", job))
+        persisted_url = str(getattr(job, "canva_design_url", "") or "").strip()
+        destination_url = persisted_url or self.service_url
+        with self.browser.open("canva", headed=True) as context:
+            page = BrowserSessionProvider._page(context)
+            page.goto(
+                destination_url,
+                wait_until="domcontentloaded",
+                timeout=int(self._EDITOR_NAVIGATION_TIMEOUT_SECONDS * 1000),
+            )
+            self.sessions.ensure_open_page_ready("canva", page, job_id)
+            yield _CanvaJobSession(self, page, self._editor_url(page))
+
+    @staticmethod
+    def _editor_url(page: Any) -> str:
+        editor_url = str(getattr(page, "url", "") or "").strip()
+        parsed = urlparse(editor_url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc.endswith("canva.com")
+            or re.fullmatch(r"/design/[^/]+(?:/[^/]+)?/edit", parsed.path) is None
+        ):
+            raise CanvaUIVerificationError("Canva editor URL cannot be verified")
+        return editor_url
+
+    @staticmethod
+    def _validate_media_inputs(clips: list[Path], audio: Path) -> None:
+        if len(clips) != 6:
+            raise ValueError("Canva assembly requires exactly six video clips")
+        if len({clip.name for clip in clips}) != 6:
+            raise ValueError("Canva assembly clip names must be unique")
+        missing = [path.name for path in [*clips, audio] if not path.is_file()]
+        if missing:
+            raise ValueError(f"Canva assembly media files are missing: {', '.join(missing)}")
+
+    def clean_workspace(self, job_id: str) -> None:
+        """Return this configured workspace's Uploads → Videos surface to zero cards."""
+        with self.open_job_session(job_id) as session:
+            session.clean_workspace(job_id)
+
+    def _clean_open_page(self, page: Any) -> None:
+        self._clear_video_timeline(page)
+        self._clear_audio_timeline(page)
+        self._clean_uploaded_videos(
+            page,
+            tuple(f"clip_{index:02d}.mp4" for index in range(1, 7)),
+        )
+        self._clean_uploaded_audio(page, "voice.mp3")
+
+    def _clean_uploaded_videos(self, page: Any, names: list[str] | tuple[str, ...] = ()) -> None:
+        """Delete only this job's named video uploads using card-scoped trash menus."""
+        if getattr(page, "no_uploaded_videos_tab", False):
+            return
+        if hasattr(page, "clean_uploaded_videos"):
+            page.clean_uploaded_videos(names)
+            return
+
+        panel = self._open_uploaded_videos(page)
+        if panel is None:
+            return
+        for name in names:
+            while True:
+                cards = panel.get_by_role("button", name=name, exact=True)
+                if cards.count() == 0:
+                    break
+                self._delete_uploaded_video_card(page, cards)
+                panel = self._open_uploaded_videos(page)
+                if panel is None:
+                    panel = self._open_uploaded_videos(page)
+                    if panel is None:
+                        return
+
+        panel = self._open_uploaded_videos(page)
+        if panel is not None and any(
+            panel.get_by_role("button", name=name, exact=True).count() != 0
+            for name in names
+        ):
+            raise CanvaUIVerificationError("Canva named uploaded videos could not be cleaned to zero")
+
+    def _clean_uploaded_audio(self, page: Any, audio_name: str) -> None:
+        """Delete only stale narration; an absent Audio tab is the verified zero state."""
+        if hasattr(page, "clean_uploaded_audio"):
+            page.clean_uploaded_audio(audio_name)
+            return
+
+        panel = self._open_hydrated_uploaded_audio(page, audio_name)
+        if panel is None:
+            return
+        while True:
+            cards = panel.get_by_role("button", name=f"Apply audio: {audio_name}", exact=True)
+            if cards.count() == 0:
+                break
+            self._delete_uploaded_audio_card(page, cards, audio_name)
+            panel = self._open_uploaded_audio(page)
+            if panel is None:
+                return
+
+        panel = self._open_uploaded_audio(page)
+        if panel is None:
+            return
+        if panel.get_by_role("button", name=f"Apply audio: {audio_name}", exact=True).count() == 0:
+            return
+        page.reload(wait_until="domcontentloaded")
+        panel = self._open_uploaded_audio(page)
+        if (
+            panel is not None
+            and panel.get_by_role("button", name=f"Apply audio: {audio_name}", exact=True).count() != 0
+        ):
+            raise CanvaUIVerificationError("Canva named uploaded audio could not be cleaned to zero")
+
+    def _open_uploaded_videos(self, page: Any) -> Any | None:
+        self._activate_uploads(page)
+        video_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-videos"]:visible')
+        deadline = time.monotonic() + self._WORKSPACE_TAB_HYDRATION_SECONDS
+        while video_tab.count() == 0:
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(self.poll_seconds)
+        if video_tab.count() != 1:
+            raise CanvaUIVerificationError("Canva uploaded Videos tab is ambiguous")
+        video_tab.click()
+        panel_id = video_tab.get_attribute("aria-controls")
+        if not panel_id:
+            raise CanvaUIVerificationError("Canva uploaded Videos panel cannot be found")
+        return page.locator(f'[role="tabpanel"][id="{panel_id}"]')
+
+    def _open_uploaded_audio(self, page: Any) -> Any | None:
+        self._activate_uploads(page)
+        audio_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-audio"]:visible')
+        deadline = time.monotonic() + self._WORKSPACE_TAB_HYDRATION_SECONDS
+        while audio_tab.count() == 0:
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(self.poll_seconds)
+        if audio_tab.count() != 1:
+            raise CanvaUIVerificationError("Canva uploaded Audio tab is ambiguous")
+        audio_tab.click()
+        panel_id = audio_tab.get_attribute("aria-controls")
+        if not panel_id:
+            raise CanvaUIVerificationError("Canva uploaded Audio panel cannot be found")
+        return page.locator(f'[role="tabpanel"][id="{panel_id}"]')
+
+    def _open_hydrated_uploaded_audio(self, page: Any, audio_name: str) -> Any | None:
+        """Avoid accepting Canva's transient empty Audio panel as a cleanup success."""
+        panel = self._open_uploaded_audio(page)
+        if panel is None:
+            return None
+        cards = panel.get_by_role("button", name=f"Apply audio: {audio_name}", exact=True)
+        if cards.count() != 0:
+            return panel
+
+        deadline = time.monotonic() + self._AUDIO_PANEL_HYDRATION_SECONDS
+        while time.monotonic() < deadline:
+            time.sleep(self.poll_seconds)
+            hydrated_panel = self._open_uploaded_audio(page)
+            if hydrated_panel is None:
+                continue
+            hydrated_cards = hydrated_panel.get_by_role(
+                "button", name=f"Apply audio: {audio_name}", exact=True
+            )
+            if hydrated_cards.count() != 0:
+                return hydrated_panel
+            panel = hydrated_panel
+        return panel
+
+    @staticmethod
+    def _activate_uploads(page: Any) -> None:
+        legacy_elements = page.get_by_role("tab", name="Elements", exact=True)
+        if CanvaAssemblyClient._is_single_visible_control(legacy_elements):
+            legacy_elements.click()
+            page.get_by_role("tab", name="Uploads", exact=True).click()
+            return
+
+        add_elements = page.get_by_role("button", name="Add elements", exact=True)
+        if not CanvaAssemblyClient._is_single_visible_control(add_elements):
+            raise CanvaUIVerificationError("Canva Add elements control cannot be verified")
+        add_elements.click()
+        uploads = page.get_by_text("Uploads", exact=True)
+        if not CanvaAssemblyClient._is_single_visible_control(uploads):
+            raise CanvaUIVerificationError("Canva Uploads control cannot be verified")
+        uploads.click()
+
+    @staticmethod
+    def _is_single_visible_control(control: Any) -> bool:
+        """Accept the live Playwright control and small legacy test doubles."""
+        if not hasattr(control, "count"):
+            return True
+        return (
+            control.count() == 1
+            and control.is_visible()
+            and control.is_enabled()
+        )
+
+    def _delete_uploaded_video_card(self, page: Any, cards: Any) -> None:
+        card, card_box = self._first_visible_box(cards)
+        if card is None or card_box is None:
+            raise CanvaUIVerificationError("Canva uploaded video card cannot be found")
+        name = card.get_attribute("aria-label")
+        if not name:
+            raise CanvaUIVerificationError("Canva uploaded video card has no semantic name")
+        page.mouse.move(card_box["x"] + card_box["width"] / 2, card_box["y"] + card_box["height"] / 2)
+        time.sleep(self.poll_seconds)
+        overlay = self._card_details_overlay(page, name, card_box)
+        if overlay is None:
+            raise CanvaUIVerificationError("Canva card-scoped details overlay cannot be verified")
+        _, overlay_box = overlay
+        page.mouse.click(
+            overlay_box["x"] + overlay_box["width"] / 2,
+            overlay_box["y"] + overlay_box["height"] / 2,
+        )
+        trash, trash_box = self._verified_trash_menu_item(page)
+        before = cards.count()
+        page.mouse.click(
+            trash_box["x"] + trash_box["width"] / 2,
+            trash_box["y"] + trash_box["height"] / 2,
+        )
+        self._wait_for_fresh_card_count_decrease(
+            page,
+            before,
+            self._open_uploaded_videos,
+            lambda panel: panel.get_by_role("button", name=name, exact=True),
+            "Canva video deletion postcondition cannot be verified",
+        )
+
+    def _delete_uploaded_audio_card(self, page: Any, cards: Any, audio_name: str) -> None:
+        card, card_box = self._first_visible_box(cards)
+        if card is None or card_box is None:
+            raise CanvaUIVerificationError("Canva uploaded audio card cannot be found")
+        page.mouse.move(card_box["x"] + card_box["width"] / 2, card_box["y"] + card_box["height"] / 2)
+        time.sleep(self.poll_seconds)
+        overlay = self._card_details_overlay(page, audio_name, card_box)
+        if overlay is None:
+            overlay = self._generic_card_details_overlay(page, card_box)
+        if overlay is None:
+            raise CanvaUIVerificationError("Canva audio-card details overlay cannot be verified")
+        _, overlay_box = overlay
+        page.mouse.click(
+            overlay_box["x"] + overlay_box["width"] / 2,
+            overlay_box["y"] + overlay_box["height"] / 2,
+        )
+        delete = page.locator('button[aria-label="Delete"]')
+        try:
+            delete.wait_for(
+                state="visible",
+                timeout=int(self._MEDIA_MENU_HYDRATION_SECONDS * 1_000),
+            )
+        except PlaywrightTimeoutError as exc:
+            raise CanvaUIVerificationError("Canva audio Delete action cannot be verified") from exc
+        delete_box = self._first_visible_box(delete)[1]
+        if delete.count() != 1 or delete_box is None or not self._is_hit_testable(page, delete_box):
+            raise CanvaUIVerificationError("Canva audio Delete action cannot be verified")
+        before = cards.count()
+        page.mouse.click(
+            delete_box["x"] + delete_box["width"] / 2,
+            delete_box["y"] + delete_box["height"] / 2,
+        )
+        self._wait_for_fresh_card_count_decrease(
+            page,
+            before,
+            self._open_uploaded_audio,
+            lambda panel: panel.get_by_role(
+                "button", name=f"Apply audio: {audio_name}", exact=True
+            ),
+            "Canva audio deletion postcondition cannot be verified",
+        )
+
+    def _wait_for_fresh_card_count_decrease(
+        self,
+        page: Any,
+        before: int,
+        open_panel: Any,
+        cards_for_panel: Any,
+        error_message: str,
+    ) -> None:
+        deadline = time.monotonic() + self.export_timeout_seconds
+        while True:
+            panel = open_panel(page)
+            card_count = 0 if panel is None else cards_for_panel(panel).count()
+            if card_count < before:
+                return
+            if time.monotonic() >= deadline:
+                page.reload(wait_until="domcontentloaded")
+                refreshed_panel = open_panel(page)
+                refreshed_count = (
+                    0
+                    if refreshed_panel is None
+                    else cards_for_panel(refreshed_panel).count()
+                )
+                if refreshed_count < before:
+                    return
+                raise CanvaUIVerificationError(error_message)
+            time.sleep(self.poll_seconds)
+
+    @staticmethod
+    def _first_visible_box(locator: Any) -> tuple[Any | None, dict[str, float] | None]:
+        for index in range(locator.count()):
+            candidate = locator.nth(index)
+            box = candidate.bounding_box()
+            if box is not None and box["width"] > 0 and box["height"] > 0:
+                return candidate, box
+        return None, None
+
+    def _card_details_overlay(self, page: Any, name: str, card_box: dict[str, float]) -> tuple[Any, dict[str, float]] | None:
+        overlays = page.get_by_role("button", name=f'Show details for “{name}”', exact=True)
+        for index in range(overlays.count()):
+            candidate = overlays.nth(index)
+            box = candidate.bounding_box()
+            if box is None or not self._boxes_overlap(card_box, box):
+                continue
+            if self._is_hit_testable(page, box):
+                return candidate, box
+        return None
+
+    def _generic_card_details_overlay(
+        self, page: Any, card_box: dict[str, float]
+    ) -> tuple[Any, dict[str, float]] | None:
+        """Find Canva Audio's unnamed details control only when it overlaps its card."""
+        overlays = page.get_by_role("button", name="Show details", exact=True)
+        for index in range(overlays.count()):
+            candidate = overlays.nth(index)
+            box = candidate.bounding_box()
+            if box is None or not self._boxes_overlap(card_box, box):
+                continue
+            if self._is_hit_testable(page, box):
+                return candidate, box
+        return None
+
+    @staticmethod
+    def _boxes_overlap(first: dict[str, float], second: dict[str, float]) -> bool:
+        return (
+            min(first["x"] + first["width"], second["x"] + second["width"])
+            > max(first["x"], second["x"])
+            and min(first["y"] + first["height"], second["y"] + second["height"])
+            > max(first["y"], second["y"])
+        )
+
+    @staticmethod
+    def _is_hit_testable(page: Any, box: dict[str, float]) -> bool:
+        x = box["x"] + box["width"] / 2
+        y = box["y"] + box["height"] / 2
+        return bool(
+            page.evaluate(
+                "(point) => document.elementFromPoint(point.x, point.y) !== null",
+                {"x": x, "y": y},
+            )
+        )
+
+    def _verified_trash_menu_item(self, page: Any) -> tuple[Any, dict[str, float]]:
+        deadline = time.monotonic() + min(
+            self._MEDIA_MENU_HYDRATION_SECONDS,
+            self.export_timeout_seconds,
+        )
+        while True:
+            menu_items = {
+                action: self._first_visible_box(page.get_by_text(action, exact=True))
+                for action in ("Details", "Download", "Move", "Move to Trash")
+            }
+            trash, trash_box = menu_items["Move to Trash"]
+            if (
+                all(item is not None for item, _box in menu_items.values())
+                and trash is not None
+                and trash_box is not None
+                and self._is_hit_testable(page, trash_box)
+            ):
+                return trash, trash_box
+            if time.monotonic() >= deadline:
+                raise CanvaUIVerificationError("Canva media-card menu cannot be verified")
+            time.sleep(self.poll_seconds)
+
+    def _clear_video_timeline(self, page: Any) -> None:
+        if hasattr(page, "clear_video_timeline"):
+            page.clear_video_timeline()
+            return
+        while True:
+            starts = self._video_timeline_starts(page)
+            if not starts:
+                return
+            before = len(starts)
+            starts[0].locator("xpath=..").click()
+            page.keyboard.press("Delete")
+            deadline = time.monotonic() + self.export_timeout_seconds
+            while len(self._video_timeline_starts(page)) >= before:
+                if time.monotonic() >= deadline:
+                    raise CanvaUIVerificationError("Canva video timeline cannot be cleared")
+                time.sleep(self.poll_seconds)
+
+    def _video_timeline_starts(self, page: Any) -> list[Any]:
+        """Return visual clips only; generated captions and audio use the same edge role."""
+        starts = page.locator(self._VIDEO_START_EDGE)
+        videos = []
+        for index in range(starts.count()):
+            start = starts.nth(index)
+            parent_text = str(start.locator("xpath=..").inner_text() or "").strip()
+            if self._VIDEO_DURATION_TEXT.fullmatch(parent_text):
+                videos.append(start)
+        return videos
+
+    def _clear_audio_timeline(self, page: Any) -> None:
+        """Remove every audio track from the reusable design before a new job."""
+        if hasattr(page, "clear_audio_timeline"):
+            page.clear_audio_timeline()
+            return
+
+        while True:
+            tracks = page.locator('[role="button"][aria-label$=", audio track"]')
+            if tracks.count() == 0:
+                return
+            track, _track_box = self._first_visible_box(tracks)
+            if track is None:
+                raise CanvaUIVerificationError("Canva audio timeline track cannot be selected")
+            before = tracks.count()
+            track.click()
+            page.keyboard.press("Delete")
+            deadline = time.monotonic() + self.export_timeout_seconds
+            while page.locator('[role="button"][aria-label$=", audio track"]').count() >= before:
+                if time.monotonic() >= deadline:
+                    raise CanvaUIVerificationError("Canva audio timeline cannot be cleared")
+                time.sleep(self.poll_seconds)
+
+    def _add_uploaded_clips(
+        self,
+        page: Any,
+        expected_names: list[str],
+        *,
+        progress: Callable[[int], None] | None = None,
+    ) -> None:
+        if len(expected_names) != 6:
+            raise ValueError("Canva timeline insertion requires exactly six clip names")
+        panel = None if hasattr(page, "add_uploaded_clip") else self._open_uploaded_videos(page)
+        if panel is None and not hasattr(page, "add_uploaded_clip"):
+            raise CanvaUIVerificationError("Canva uploaded Videos panel cannot be found")
+        for index, name in enumerate(expected_names, start=1):
+            before = self._timeline_video_count(page)
+            if hasattr(page, "add_uploaded_clip"):
+                page.add_uploaded_clip(name)
+            else:
+                card = panel.get_by_role("button", name=name, exact=True)
+                if card.count() != 1:
+                    raise CanvaUIVerificationError("Canva uploaded clip card is ambiguous")
+                card.click()
+            deadline = time.monotonic() + self.export_timeout_seconds
+            while self._timeline_video_count(page) == before:
+                if time.monotonic() >= deadline:
+                    raise CanvaUIVerificationError("Canva timeline video count did not increase by one")
+                time.sleep(self.poll_seconds)
+            after = self._timeline_video_count(page)
+            if after != before + 1:
+                raise CanvaUIVerificationError("Canva timeline video count did not increase by one")
+            if progress is not None:
+                progress(index)
+
+    def _timeline_video_count(self, page: Any) -> int:
+        if hasattr(page, "timeline_video_count_value"):
+            return int(page.timeline_video_count_value())
+        return len(self._video_timeline_starts(page))
+
+    def _upload_media(self, page: Any, paths: list[Path]) -> None:
+        if hasattr(page, "upload_media"):
+            page.upload_media(paths)
+            return
+        self._activate_uploads(page)
+        video_paths = [
+            path for path in paths if path.suffix.lower() in {".mp4", ".mov", ".webm"}
+        ]
+        audio_paths = [path for path in paths if path not in video_paths]
+        if len(audio_paths) != 1:
+            raise ValueError("Canva upload requires exactly one canonical audio file")
+        audio_path = audio_paths[0]
+        baseline_inventory = self._upload_inventory(page, audio_path.name)
+        upload_input = page.locator('input[type="file"]')
+        upload_input.wait_for(
+            state="visible",
+            timeout=int(self.export_timeout_seconds * 1000),
+        )
+        upload_input.set_input_files([str(path) for path in video_paths])
+        self._wait_for_upload_completion(
+            page,
+            [path.name for path in video_paths],
+            baseline_inventory=baseline_inventory,
+            audio_name=None,
+        )
+        audio_baseline = self._upload_inventory(page, audio_path.name)
+        upload_input.set_input_files([str(audio_path)])
+        self._wait_for_upload_completion(
+            page,
+            [audio_path.name],
+            baseline_inventory=audio_baseline,
+            audio_name=audio_path.name,
+        )
+
+    def _upload_inventory(self, page: Any, audio_name: str) -> tuple[int, int] | None:
+        self._activate_uploads(page)
+        video_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-videos"]:visible')
+        audio_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-audio"]:visible')
+        photos_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-photos"]:visible')
+        if video_tab.count() == 0 and audio_tab.count() == 0 and photos_tab.count() == 1:
+            return None
+        if audio_tab.count() == 0 and video_tab.count() == 1:
+            video_tab.click()
+            video_panel_id = video_tab.get_attribute("aria-controls")
+            if not video_panel_id:
+                raise CanvaUIVerificationError("Canva upload media panels cannot be found")
+            video_panel = page.locator(f'[role="tabpanel"][id="{video_panel_id}"]')
+            return (
+                video_panel.get_by_text(re.compile(r"^\d+(?:\.\d+)?s$")).count(),
+                0,
+            )
+        ready_timeout = int(self.export_timeout_seconds * 1000)
+        try:
+            audio_tab.wait_for(state="visible", timeout=ready_timeout)
+            audio_tab.click()
+        except PlaywrightTimeoutError as exc:
+            raise CanvaUIVerificationError("Canva upload media tabs cannot be found") from exc
+        if video_tab.count() > 1 or audio_tab.count() != 1:
+            raise CanvaUIVerificationError("Canva upload media tabs cannot be found")
+
+        audio_panel_id = audio_tab.get_attribute("aria-controls")
+        if not audio_panel_id:
+            raise CanvaUIVerificationError("Canva upload media panels cannot be found")
+        audio_panel = page.locator(f'[role="tabpanel"][id="{audio_panel_id}"]')
+        audio_count = audio_panel.get_by_role(
+            "button", name=f"Apply audio: {audio_name}", exact=True
+        ).count()
+        if video_tab.count() == 0:
+            return (
+                0,
+                audio_count,
+            )
+        video_tab.click()
+        video_panel_id = video_tab.get_attribute("aria-controls")
+        if not video_panel_id:
+            raise CanvaUIVerificationError("Canva upload media panels cannot be found")
+        video_panel = page.locator(f'[role="tabpanel"][id="{video_panel_id}"]')
+        return (
+            video_panel.get_by_text(re.compile(r"^\d+(?:\.\d+)?s$")).count(),
+            audio_count,
+        )
+
+    def _wait_for_upload_completion(
+        self,
+        page: Any,
+        expected_names: list[str],
+        *,
+        baseline_inventory: tuple[int, int] | None = None,
+        audio_name: str | None = None,
+    ) -> None:
+        deadline = time.monotonic() + self.export_timeout_seconds
+        refreshed = False
+        while True:
+            body = page.content().lower()
+            failed = any(marker in body for marker in ("upload failed", "retry upload", "unsupported file"))
+            if failed:
+                raise CanvaUIVerificationError("Canva reported that an upload failed")
+            named_uploads = [page.get_by_text(name, exact=True) for name in expected_names]
+            names_observable = any(upload.count() > 0 for upload in named_uploads)
+            names_visible = all(
+                upload.count() == 1 and upload.is_visible() for upload in named_uploads
+            )
+            inventory_complete = False
+            if baseline_inventory is not None:
+                video_before, audio_before = baseline_inventory
+                video_after, audio_after = self._upload_inventory(
+                    page, audio_name or expected_names[-1]
+                )
+                expected_video_count = sum(
+                    Path(name).suffix.lower() in {".mp4", ".mov", ".webm"}
+                    for name in expected_names
+                )
+                expected_audio_count = len(expected_names) - expected_video_count
+                inventory_complete = (
+                    video_after >= video_before + expected_video_count
+                    and audio_after >= audio_before + expected_audio_count
+                )
+            cards_complete = self._uploaded_media_cards_complete(
+                page, expected_names, audio_name
+            )
+            if (baseline_inventory is None and (names_visible or cards_complete)) or (
+                inventory_complete
+                and (
+                    cards_complete
+                    or (not names_observable or names_visible)
+                )
+            ):
+                return
+            if time.monotonic() >= deadline:
+                if not refreshed:
+                    page.reload(wait_until="domcontentloaded")
+                    refreshed = True
+                    deadline = time.monotonic() + self.export_timeout_seconds
+                    continue
+                raise CanvaUIVerificationError("Canva upload completion could not be verified")
+            time.sleep(self.poll_seconds)
+
+    def _uploaded_media_cards_complete(
+        self, page: Any, expected_names: list[str], audio_name: str | None
+    ) -> bool:
+        video_names = [
+            name
+            for name in expected_names
+            if Path(name).suffix.lower() in {".mp4", ".mov", ".webm"}
+        ]
+        if not video_names and not audio_name:
+            return False
+        try:
+            if video_names:
+                video_panel = self._open_uploaded_videos(page)
+                if video_panel is None or any(
+                    video_panel.get_by_role("button", name=name, exact=True).count() != 1
+                    for name in video_names
+                ):
+                    return False
+            if not audio_name:
+                return True
+            audio_tab = page.locator('[role="tab"][aria-controls$="-tabpanel-audio"]:visible')
+            if audio_tab.count() != 1:
+                return False
+            audio_tab.click()
+            audio_panel_id = audio_tab.get_attribute("aria-controls")
+            if not audio_panel_id:
+                return False
+            audio_panel = page.locator(f'[role="tabpanel"][id="{audio_panel_id}"]')
+            return (
+                audio_panel.get_by_role(
+                    "button", name=f"Apply audio: {audio_name}", exact=True
+                ).count()
+                >= 1
+            )
+        except Exception:
+            return False
+
+    def _order_clips(self, page: Any, expected_names: list[str]) -> None:
+        if hasattr(page, "order_clips"):
+            page.order_clips(expected_names)
+            return
+        starts = self._video_timeline_starts(page)
+        if len(starts) < 6:
+            raise CanvaUIVerificationError("Canva six-clip timeline cannot be found for ordering")
+        start_values = [self._slider_seconds(starts[index]) for index in range(6)]
+        if start_values != sorted(start_values) or len(set(start_values)) != 6:
+            raise CanvaUIVerificationError("Canva clip ordering 1 through 6 cannot be verified")
+
+    def _set_and_verify_playback(self, page: Any, index: int, speed: float) -> None:
+        self._select_video_clip(page, index)
+        if hasattr(page, "open_video_speed"):
+            page.open_video_speed()
+            page.set_custom_speed(speed)
+            verified = page.verify_playback_speed(speed)
+        else:
+            try:
+                page.get_by_role("button", name="Speed", exact=True).click()
+                panel = page.locator('[aria-label="Video Speed"]')
+                if panel.count() != 1:
+                    raise CanvaPlaybackVerificationError("Canva Video Speed panel cannot be found")
+                control = panel.locator('input[role="spinbutton"]')
+                control.fill(str(speed))
+                control.press("Enter")
+                verified = abs(float(control.input_value()) - speed) <= 0.001
+            except CanvaPlaybackVerificationError:
+                raise
+            except Exception as exc:
+                raise CanvaPlaybackVerificationError(
+                    "Canva playback control cannot be found or verified"
+                ) from exc
+        if not verified:
+            raise CanvaPlaybackVerificationError(
+                "Canva playback or resulting timeline state cannot be verified"
+            )
+
+    def _select_video_clip(self, page: Any, index: int) -> None:
+        if hasattr(page, "select_video_clip"):
+            page.select_video_clip(index)
+            return
+        clips = self._video_timeline_starts(page)
+        if len(clips) < index:
+            raise CanvaPlaybackVerificationError("Canva video timeline clip cannot be found")
+        clips[index - 1].locator("xpath=..").click()
+
+    def _mute_source_audio(self, page: Any) -> None:
+        if hasattr(page, "mute_source_audio"):
+            page.mute_source_audio()
+            return
+        for index in range(1, 7):
+            self._select_video_clip(page, index)
+            volume = page.get_by_role("button", name="Volume", exact=True)
+            volume.click()
+            control = page.locator('input[role="spinbutton"][aria-label="Volume"]')
+            control.fill("0")
+            control.press("Enter")
+            if control.input_value() not in {"0", "0.0", "0.00"}:
+                raise CanvaUIVerificationError("Canva source-video audio mute cannot be verified")
+
+    def _add_uploaded_audio(self, page: Any, audio_name: str) -> None:
+        if hasattr(page, "add_uploaded_audio"):
+            page.add_uploaded_audio(audio_name)
+            return
+        before = page.locator(self._VIDEO_START_EDGE).count()
+        page.get_by_role("tab", name="Elements", exact=True).click()
+        panel = self._open_uploaded_audio(page)
+        if panel is None:
+            raise CanvaUIVerificationError("Canva uploaded Audio panel cannot be found")
+        audio = panel.get_by_role("button", name=f"Apply audio: {audio_name}", exact=True)
+        audio_card_count = audio.count()
+        if audio_card_count != 1:
+            raise CanvaUIVerificationError(
+                f"Canva narration audio cards: {audio_card_count}",
+                audio_card_count=audio_card_count,
+            )
+        audio.click()
+        deadline = time.monotonic() + self.export_timeout_seconds
+        while page.locator(self._VIDEO_START_EDGE).count() <= before:
+            if time.monotonic() >= deadline:
+                raise CanvaUIVerificationError("Canva narration was not added to the timeline")
+            time.sleep(self.poll_seconds)
+
+    def _verify_narration_starts_at_zero(self, page: Any, audio_name: str) -> None:
+        """Observe narration placement without moving or trimming the track."""
+        if hasattr(page, "verify_narration_starts_at_zero"):
+            observed = page.verify_narration_starts_at_zero(audio_name)
+            self._accept_start_observation(observed, "narration")
+            return
+
+        try:
+            audio_track = page.get_by_role(
+                "button", name=f"{audio_name}, audio track", exact=True
+            )
+            if audio_track.count() != 1:
+                self._accept_start_observation(None, "narration")
+                return
+            audio_track.click()
+            narration_position = page.get_by_role(
+                "slider", name="Trimming position", exact=True
+            )
+            if narration_position.count() != 1:
+                self._accept_start_observation(None, "narration")
+                return
+            self._accept_start_observation(
+                self._slider_is_at_zero(narration_position),
+                "narration",
+            )
+        except CanvaUIVerificationError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Canva narration start could not be observed; continuing: {}",
+                type(exc).__name__,
+            )
+
+    def _verify_first_video_starts_at_zero(self, page: Any) -> None:
+        """Best-effort observation of the first visual clip's timeline start."""
+        if hasattr(page, "verify_first_video_starts_at_zero"):
+            observed = page.verify_first_video_starts_at_zero()
+            self._accept_start_observation(observed, "first video")
+            return
+
+        try:
+            starts = self._video_timeline_starts(page)
+            if not starts:
+                self._accept_start_observation(None, "first video")
+                return
+            self._accept_start_observation(
+                self._slider_is_at_zero(starts[0]),
+                "first video",
+            )
+        except CanvaUIVerificationError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Canva first-video start could not be observed; continuing: {}",
+                type(exc).__name__,
+            )
+
+    def _accept_start_observation(self, observed: bool | None, label: str) -> None:
+        if observed is None:
+            logger.warning("Canva {} start could not be observed; continuing", label)
+            return
+        if not observed:
+            raise CanvaUIVerificationError(f"Canva {label} cannot be verified at timeline time 0")
+
+    def _slider_is_at_zero(self, slider: Any) -> bool | None:
+        accessible_position = str(
+            slider.get_attribute("aria-valuetext") or ""
+        ).strip().lower()
+        if accessible_position in {"0 second", "0 seconds"}:
+            return True
+        raw_value = slider.get_attribute("aria-valuenow")
+        if raw_value is None:
+            return None
+        return abs(float(raw_value) / 1_000_000) <= 0.05
+
+    def _bound_final_visual_end(self, page: Any, target_seconds: float) -> None:
+        if hasattr(page, "bound_final_visual_end"):
+            page.bound_final_visual_end(target_seconds)
+            return
+        ends = page.locator(self._VIDEO_END_EDGE)
+        if ends.count() < 6:
+            raise CanvaUIVerificationError("Canva final visual end cannot be found")
+        edge = ends.nth(5)
+        current = self._slider_seconds(edge)
+        if abs(current - target_seconds) > self.timeline_tolerance_seconds:
+            raise CanvaUIVerificationError("Canva final visual end cannot be bounded safely")
+
+    def _verify_timeline_end(self, page: Any, target_seconds: float) -> None:
+        if hasattr(page, "verify_timeline_end"):
+            verified = page.verify_timeline_end(target_seconds, self.timeline_tolerance_seconds)
+        else:
+            ends = page.locator(self._VIDEO_END_EDGE)
+            verified = ends.count() >= 6 and (
+                abs(self._slider_seconds(ends.nth(5)) - target_seconds)
+                <= self.timeline_tolerance_seconds
+            )
+        if not verified:
+            raise CanvaPlaybackVerificationError(
+                "Canva resulting playback or timeline state cannot be verified"
+            )
+
+    def _generate_auto_captions(
+        self,
+        page: Any,
+        *,
+        requested: Callable[[], None] | None = None,
+    ) -> None:
+        if hasattr(page, "generate_auto_captions"):
+            page.generate_auto_captions()
+            if requested is not None:
+                requested()
+            return
+        self._select_video_clip(page, 1)
+        page.get_by_role("button", name="Captions", exact=True).click()
+        classic = page.get_by_role("button", name="Classic", exact=True)
+        classic.wait_for(
+            state="visible",
+            timeout=int(self.export_timeout_seconds * 1_000),
+        )
+        classic.click()
+        caption_audio_scope = page.get_by_role(
+            "combobox",
+            name=re.compile(r"^(?:All|\d+) selected \(\d+ of \d+ suitable\)$"),
+            exact=False,
+        )
+        if caption_audio_scope.count() != 1:
+            raise CanvaUIVerificationError("Canva caption audio scope cannot be verified")
+        caption_audio_scope.click()
+        all_audio = page.get_by_role("option", name="All audio", exact=True)
+        all_audio.wait_for(
+            state="visible",
+            timeout=int(self.export_timeout_seconds * 1_000),
+        )
+        all_audio.click()
+        page.get_by_role("button", name="Generate captions", exact=True).click()
+        if requested is not None:
+            requested()
+        self._wait_for_generated_captions(page)
+
+    def _wait_for_generated_captions(self, page: Any) -> None:
+        deadline = time.monotonic() + self._CAPTION_GENERATION_TIMEOUT_SECONDS
+        stable_signature: tuple[str, ...] = ()
+        stable_since: float | None = None
+
+        while True:
+            now = time.monotonic()
+            signature = self._generated_caption_signature(page)
+            if signature and signature == stable_signature:
+                if stable_since is not None and (
+                    now - stable_since >= self._CAPTION_STABILITY_SECONDS
+                ):
+                    return
+            elif signature:
+                stable_signature = signature
+                stable_since = now
+            else:
+                stable_signature = ()
+                stable_since = None
+
+            if now >= deadline:
+                raise CanvaUIVerificationError(
+                    "Canva generated captions did not become ready before export"
+                )
+            time.sleep(self.poll_seconds)
+
+    def _generated_caption_signature(self, page: Any) -> tuple[str, ...]:
+        starts = page.locator(self._VIDEO_START_EDGE)
+        captions = []
+        for index in range(starts.count()):
+            parent_text = str(
+                starts.nth(index).locator("xpath=..").inner_text() or ""
+            ).strip()
+            if parent_text and not self._VIDEO_DURATION_TEXT.fullmatch(parent_text):
+                captions.append(parent_text)
+        return tuple(captions)
+
+    def _export_mp4_1080p(self, page: Any) -> None:
+        if hasattr(page, "export_mp4_1080p"):
+            page.export_mp4_1080p()
+            return
+        page.get_by_role("menuitem", name="Share", exact=True).click()
+        page.get_by_label("Download", exact=True).click()
+        file_type = page.get_by_role("combobox", name="File type", exact=True)
+        if "mp4" not in file_type.inner_text().lower():
+            raise CanvaUIVerificationError("Canva MP4 Video export option cannot be verified")
+        resolution = page.get_by_role(
+            "radio", name="Width 1080 by height 1920 pixels", exact=True
+        )
+        if resolution.get_attribute("aria-checked") != "true":
+            resolution.click()
+        if resolution.get_attribute("aria-checked") != "true":
+            raise CanvaUIVerificationError("Canva 1080 by 1920 export option cannot be verified")
+
+    def _download_export(self, page: Any, output: Path) -> None:
+        if hasattr(page, "download_export"):
+            page.download_export(output)
+        else:
+            final_download = self._wait_for_final_download_ready(page)
+            try:
+                with page.expect_download(timeout=int(self.export_timeout_seconds * 1000)) as info:
+                    final_download.click()
+                download = info.value
+                suggested_name = str(download.suggested_filename or "")
+                if not suggested_name.lower().endswith(".mp4"):
+                    raise CanvaDownloadVerificationError("Canva final download is not an MP4")
+                output.parent.mkdir(parents=True, exist_ok=True)
+                save_download_with_url_fallback(
+                    download,
+                    output,
+                    timeout_seconds=self.export_timeout_seconds,
+                )
+            except CanvaDownloadVerificationError:
+                raise
+            except Exception as exc:
+                raise CanvaDownloadVerificationError(
+                    "Canva final Download did not complete"
+                ) from exc
+        if not output.is_file() or output.stat().st_size <= 0:
+            raise CanvaDownloadVerificationError(
+                "Canva final download did not produce a completed MP4 artifact"
+            )
+
+    def _wait_for_final_download_ready(self, page: Any) -> Any:
+        """Wait through Canva's export-sheet transition for one usable action."""
+        deadline = time.monotonic() + self.export_timeout_seconds
+        last_state = "missing"
+        while True:
+            final_downloads = page.get_by_role("button", name="Download", exact=True)
+            visible = []
+            try:
+                count = final_downloads.count()
+            except Exception:
+                count = 0
+            for index in range(count):
+                candidate = final_downloads.nth(index)
+                try:
+                    if candidate.is_visible():
+                        visible.append(candidate)
+                except Exception:
+                    continue
+
+            if len(visible) == 1:
+                last_state = "disabled"
+                try:
+                    if visible[0].is_enabled():
+                        return visible[0]
+                except Exception:
+                    last_state = "missing"
+            elif len(visible) > 1:
+                last_state = "ambiguous"
+            else:
+                last_state = "missing"
+
+            if time.monotonic() >= deadline:
+                if last_state == "ambiguous":
+                    message = "Canva final Download control is ambiguous"
+                elif last_state == "disabled":
+                    message = "Canva final Download did not become enabled"
+                else:
+                    message = "Canva final Download control did not appear"
+                raise CanvaDownloadVerificationError(message)
+            time.sleep(self.poll_seconds)
+
+    def _wait_for_export_state(self, page: Any) -> None:
+        deadline = time.monotonic() + self.export_timeout_seconds
+        while True:
+            body = page.content().lower()
+            if any(marker in body for marker in ("download failed", "export failed", "error exporting")):
+                raise CanvaDownloadVerificationError("Canva reported an export failure")
+            if any(marker in body for marker in ("preparing", "processing", "exporting", "downloading")):
+                return
+            if time.monotonic() >= deadline:
+                raise CanvaDownloadVerificationError(
+                    "Canva export state could not be observed before download completion"
+                )
+            time.sleep(self.poll_seconds)
+
+    @staticmethod
+    def _slider_seconds(slider: Any) -> float:
+        value = slider.get_attribute("aria-valuenow")
+        if value is None:
+            raise CanvaUIVerificationError("Canva timeline value cannot be read")
+        return float(value) / 1_000_000
+
+
+class _CanvaJobSession:
+    """Page-bound Canva operations; its owner closes the browser context once."""
+
+    def __init__(self, client: CanvaAssemblyClient, page: Any, editor_url: str) -> None:
+        self.client = client
+        self.page = page
+        self.editor_url = editor_url
+
+    def assemble_and_export(
+        self,
+        job: Any,
+        clips: list[Path],
+        audio: Path,
+        output: Path,
+        progress: Callable[[str], None] | None = None,
+    ) -> Path:
+        return self.client._assemble_open_page(
+            self.page,
+            job,
+            clips,
+            audio,
+            output,
+            progress=progress,
+        )
+
+    def clean_workspace(self, job_id: str) -> None:
+        del job_id
+        self.client._clean_open_page(self.page)

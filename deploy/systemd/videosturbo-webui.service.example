@@ -5,10 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=videosturbo
-Group=videosturbo
+User=linuxuser
+Group=linuxuser
 WorkingDirectory=/opt/VideosTurbo
 Environment=PYTHONPATH=/opt/VideosTurbo
+EnvironmentFile=-/etc/videosturbo/cloud-agent.env
 Environment=MPT_WEBUI_HOST=127.0.0.1
 Environment=MPT_WEBUI_PORT=8501
 Environment=MPT_CLOUD_SAFE_MODE=1

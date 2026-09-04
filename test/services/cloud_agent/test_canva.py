@@ -1,0 +1,2430 @@
+from pathlib import Path
+from contextlib import contextmanager
+from types import SimpleNamespace
+
+import pytest
+
+from app.models.cloud_agent import ServiceSessionStatus
+from app.services.cloud_agent.providers import canva
+from app.services.cloud_agent.providers.canva import classify_canva_session
+
+
+FIXTURE_DIR = Path(__file__).resolve().parents[2] / "resources" / "cloud_agent" / "canva"
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "url", "expected"),
+    [
+        ("ready.html", "https://www.canva.com/design/DEMO/edit", ServiceSessionStatus.READY),
+        ("login.html", "https://www.canva.com/login", ServiceSessionStatus.SESSION_EXPIRED),
+        ("continue_google.html", "https://www.canva.com/login", ServiceSessionStatus.SESSION_EXPIRED),
+        ("password.html", "https://www.canva.com/login", ServiceSessionStatus.LOGIN_REQUIRED),
+        ("captcha.html", "https://www.canva.com/login", ServiceSessionStatus.CAPTCHA_REQUIRED),
+        ("two_factor.html", "https://www.canva.com/login", ServiceSessionStatus.TWO_FACTOR_REQUIRED),
+        ("verification.html", "https://www.canva.com/login", ServiceSessionStatus.VERIFICATION_REQUIRED),
+        ("unknown.html", "https://www.canva.com/design/DEMO/edit", ServiceSessionStatus.ERROR),
+    ],
+)
+def test_canva_session_fixture_classification(fixture_name, url, expected):
+    html = (FIXTURE_DIR / fixture_name).read_text(encoding="utf-8")
+
+    assert classify_canva_session(url=url, html=html) is expected
+
+
+def test_canva_challenge_wins_over_editor_ready_marker():
+    html = """
+    <html><body>
+      <nav><button aria-label="Share">Share</button></nav>
+      <main>Canva editor</main>
+      <div>Verify it's you</div>
+    </body></html>
+    """
+
+    assert (
+        classify_canva_session(
+            url="https://www.canva.com/design/DEMO/edit",
+            html=html,
+        )
+        is ServiceSessionStatus.VERIFICATION_REQUIRED
+    )
+
+
+class FakeCanvaEditorPage:
+    """Deterministic boundary double for the live Task 9 editor controls."""
+
+    def __init__(self, *, playback_verifies=True, download_completes=True):
+        self.playback_verifies = playback_verifies
+        self.download_completes = download_completes
+        self.actions = []
+        self.timeline_end_seconds = 60.0
+        self.timeline_video_count = 0
+
+    def goto(self, url, **kwargs):
+        self.actions.append(("goto", url, kwargs))
+        self.url = url
+
+    def upload_media(self, paths):
+        self.actions.append(("upload", tuple(Path(path).name for path in paths)))
+
+    def clean_uploaded_videos(self, _names=()):
+        return None
+
+    def clean_uploaded_audio(self, _name):
+        return None
+
+    def clear_video_timeline(self):
+        self.timeline_video_count = 0
+
+    def clear_audio_timeline(self):
+        self.actions.append(("clear_audio_timeline",))
+
+    def add_uploaded_clip(self, _name):
+        self.timeline_video_count += 1
+
+    def add_uploaded_audio(self, name):
+        self.actions.append(("add_uploaded_audio", name))
+
+    def verify_narration_starts_at_zero(self, name):
+        self.actions.append(("verify_narration_zero", name))
+        return True
+
+    def verify_first_video_starts_at_zero(self):
+        self.actions.append(("verify_first_video_zero",))
+        return True
+
+    def timeline_video_count_value(self):
+        return self.timeline_video_count
+
+    def order_clips(self, expected_names):
+        self.actions.append(("order", tuple(expected_names)))
+
+    def select_video_clip(self, index):
+        self.actions.append(("select_clip", index))
+
+    def open_video_speed(self):
+        self.actions.append(("open_video_speed",))
+
+    def set_custom_speed(self, speed):
+        self.actions.append(("set_speed", speed))
+
+    def verify_playback_speed(self, speed):
+        self.actions.append(("verify_speed", speed))
+        return self.playback_verifies
+
+    def mute_source_audio(self):
+        self.actions.append(("mute_source_audio",))
+
+    def position_narration_at_zero(self):
+        self.actions.append(("narration_at_zero",))
+
+    def bound_final_visual_end(self, target_seconds):
+        self.actions.append(("bound_final_end", target_seconds))
+        self.timeline_end_seconds = target_seconds
+
+    def verify_timeline_end(self, target_seconds, tolerance_seconds):
+        self.actions.append(("verify_timeline_end", target_seconds, tolerance_seconds))
+        return abs(self.timeline_end_seconds - target_seconds) <= tolerance_seconds
+
+    def generate_auto_captions(self):
+        self.actions.append(("auto_captions",))
+
+    def export_mp4_1080p(self):
+        self.actions.append(("export_mp4_1080p",))
+
+    def download_export(self, output):
+        self.actions.append(("download", Path(output).name))
+        if self.download_completes:
+            Path(output).write_bytes(b"final-mp4")
+
+
+class FakeUnobservableTimelineStartsPage(FakeCanvaEditorPage):
+    """Models a Canva UI revision whose start positions cannot be observed."""
+
+    def verify_narration_starts_at_zero(self, name):
+        self.actions.append(("verify_narration_zero", name))
+        return None
+
+    def verify_first_video_starts_at_zero(self):
+        self.actions.append(("verify_first_video_zero",))
+        return None
+
+
+class FakeConfirmedNonZeroNarrationPage(FakeCanvaEditorPage):
+    """Models a semantically observable narration start away from zero."""
+
+    def verify_narration_starts_at_zero(self, name):
+        self.actions.append(("verify_narration_zero", name))
+        return False
+
+
+class _CaptionControl:
+    def __init__(self, page, name):
+        self.page = page
+        self.name = name
+
+    def click(self):
+        self.page.actions.append(("caption_control", self.name))
+
+    def count(self):
+        return 1
+
+    def wait_for(self, **_kwargs):
+        return None
+
+
+class _GeneratedCaptionParent:
+    def __init__(self, text):
+        self.text = text
+
+    def inner_text(self):
+        return self.text
+
+
+class _GeneratedCaptionStart:
+    def __init__(self, text):
+        self.text = text
+
+    def locator(self, selector):
+        assert selector == "xpath=.."
+        return _GeneratedCaptionParent(self.text)
+
+
+class _GeneratedCaptionStarts:
+    def __init__(self, page):
+        self.page = page
+
+    def _texts(self):
+        if self.page.elapsed_seconds < self.page.caption_ready_after_seconds:
+            return []
+        if self.page.elapsed_seconds < self.page.caption_growth_after_seconds:
+            return ["First generated caption"]
+        return ["First generated caption", "Second generated caption"]
+
+    def count(self):
+        return len(self._texts())
+
+    def nth(self, index):
+        return _GeneratedCaptionStart(self._texts()[index])
+
+
+class FakeCaptionStylePage:
+    """Models Canva's Captions flow ending in an explicit style selection."""
+
+    def __init__(
+        self,
+        *,
+        caption_ready_after_seconds=0.0,
+        caption_growth_after_seconds=None,
+    ):
+        self.actions = []
+        self.elapsed_seconds = 0.0
+        self.caption_ready_after_seconds = caption_ready_after_seconds
+        self.caption_growth_after_seconds = (
+            caption_ready_after_seconds
+            if caption_growth_after_seconds is None
+            else caption_growth_after_seconds
+        )
+
+    def select_video_clip(self, index):
+        self.actions.append(("select_clip", index))
+
+    def get_by_role(self, role, *, name, exact):
+        if role == "combobox":
+            assert exact is False
+            assert (
+                getattr(name, "pattern", "")
+                == r"^(?:All|\d+) selected \(\d+ of \d+ suitable\)$"
+            )
+            return _CaptionControl(self, "caption_audio_scope")
+        assert role in {"button", "option"}
+        assert exact is True
+        assert name in {"Captions", "Generate captions", "Classic", "All audio"}
+        return _CaptionControl(self, name)
+
+    def get_by_text(self, name, *, exact):
+        raise AssertionError("Classic must be selected through its accessible button role")
+
+    def locator(self, selector):
+        assert selector == canva.CanvaAssemblyClient._VIDEO_START_EDGE
+        return _GeneratedCaptionStarts(self)
+
+
+class FakePreparedCanvaEditorPage(FakeCanvaEditorPage):
+    """Boundary double for verified workspace preparation operations."""
+
+    def __init__(self, *, add_succeeds=True, **kwargs):
+        super().__init__(**kwargs)
+        self.timeline_video_count = 0
+        self.add_succeeds = add_succeeds
+
+    def clean_uploaded_videos(self, names=()):
+        self.actions.append(("clean_uploaded_videos", tuple(names)))
+
+    def clear_video_timeline(self):
+        self.actions.append(("clear_video_timeline",))
+        self.timeline_video_count = 0
+
+    def clear_audio_timeline(self):
+        self.actions.append(("clear_audio_timeline",))
+
+    def add_uploaded_clip(self, name):
+        before = self.timeline_video_count
+        if self.add_succeeds:
+            self.timeline_video_count += 1
+        self.actions.append(("add_uploaded_clip", name, before, self.timeline_video_count))
+
+    def timeline_video_count_value(self):
+        return self.timeline_video_count
+
+
+class FakeRedirectingCanvaEditorPage(FakeCanvaEditorPage):
+    def goto(self, url, **kwargs):
+        super().goto(url, **kwargs)
+        if "?create" in url:
+            self.url = "https://www.canva.com/design/DEMO/edit"
+
+
+class FakeManagedMediaCleanupPage(FakePreparedCanvaEditorPage):
+    """Boundary double for cleanup restricted to this CloudJob's media names."""
+
+    def clean_uploaded_videos(self, names=None):
+        self.actions.append(("clean_uploaded_videos", tuple(names or ())))
+
+    def clean_uploaded_audio(self, name=None):
+        self.actions.append(("clean_uploaded_audio", name))
+
+
+class _TimelineStarts:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return self.page.timeline_count
+
+
+class _TimelineDeleteHandle:
+    def __init__(self, page):
+        self.page = page
+
+    def locator(self, selector):
+        assert selector == "xpath=.."
+        return self
+
+    def click(self):
+        self.page.selected = True
+
+    def inner_text(self):
+        return "10.0s"
+
+
+class _StaleTimelineStarts:
+    """Models Canva retaining the old locator after its timeline node unmounts."""
+
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return 1
+
+    def nth(self, index):
+        assert index == 0
+        return _TimelineDeleteHandle(self.page)
+
+
+class _FreshTimelineStarts:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return self.page.timeline_count
+
+    def nth(self, index):
+        assert index == 0
+        return _TimelineDeleteHandle(self.page)
+
+
+class FakeUnmountingTimelinePage:
+    def __init__(self):
+        self.timeline_count = 1
+        self.locator_calls = 0
+        self.selected = False
+        self.keyboard = self
+
+    def locator(self, selector):
+        assert selector == canva.CanvaAssemblyClient._VIDEO_START_EDGE
+        self.locator_calls += 1
+        if self.locator_calls == 1:
+            return _StaleTimelineStarts(self)
+        return _FreshTimelineStarts(self)
+
+    def press(self, key):
+        assert key == "Delete"
+        assert self.selected is True
+        self.timeline_count = 0
+
+
+class _TypedTimelineHandle:
+    def __init__(self, page, kind):
+        self.page = page
+        self.kind = kind
+
+    def locator(self, selector):
+        assert selector == "xpath=.."
+        return self
+
+    def inner_text(self):
+        return "10.0s" if self.kind == "video" else "Generated caption text"
+
+    def click(self):
+        self.page.selected_kind = self.kind
+
+
+class _TypedTimelineStarts:
+    def __init__(self, page):
+        self.page = page
+
+    def _kinds(self):
+        return ["caption"] * self.page.caption_count + ["video"] * self.page.video_count
+
+    def count(self):
+        return len(self._kinds())
+
+    def nth(self, index):
+        return _TypedTimelineHandle(self.page, self._kinds()[index])
+
+
+class FakeCaptionedVideoTimelinePage:
+    """Models Canva removing generated captions when their videos are deleted."""
+
+    def __init__(self):
+        self.caption_count = 3
+        self.video_count = 2
+        self.selected_kind = ""
+        self.deleted_kinds = []
+        self.keyboard = self
+
+    def locator(self, selector):
+        assert selector == canva.CanvaAssemblyClient._VIDEO_START_EDGE
+        return _TypedTimelineStarts(self)
+
+    def press(self, key):
+        assert key == "Delete"
+        self.deleted_kinds.append(self.selected_kind)
+        if self.selected_kind != "video":
+            raise AssertionError("cleanup must never select a generated caption")
+        self.video_count -= 1
+        self.caption_count = 0
+
+
+class _NarrationStartSlider:
+    def __init__(self, raw_value, text):
+        self.raw_value = raw_value
+        self.text = text
+
+    def get_attribute(self, name):
+        if name == "aria-valuenow":
+            return str(self.raw_value)
+        if name == "aria-valuetext":
+            return self.text
+        return None
+
+
+class _NarrationStartSliders:
+    def __init__(self):
+        self.sliders = [
+            _NarrationStartSlider(index * 10_000_000, f"{index * 10} seconds")
+            for index in range(6)
+        ] + [_NarrationStartSlider(31_968, "0 seconds")]
+
+    def count(self):
+        return len(self.sliders)
+
+    def nth(self, index):
+        return self.sliders[index]
+
+
+class FakeAccessibleZeroNarrationPage:
+    """Canva rounds its audio-track position to the accessible zero-second state."""
+
+    def locator(self, selector):
+        assert selector == canva.CanvaAssemblyClient._VIDEO_START_EDGE
+        return _NarrationStartSliders()
+
+
+class _AudioPositionSlider:
+    def __init__(self, page, *, audio_start=False):
+        self.page = page
+        self.audio_start = audio_start
+
+    def count(self):
+        return 1
+
+    def get_attribute(self, name):
+        if self.page.pending_audio_position_update:
+            if self.page.audio_position_reads_after_drag:
+                self.page.audio_position_text = "0 seconds"
+                self.page.audio_position_raw = 0
+                self.page.pending_audio_position_update = False
+            else:
+                self.page.audio_position_reads_after_drag += 1
+        if self.audio_start:
+            if name == "aria-valuetext":
+                return self.page.audio_position_text
+            if name == "aria-valuenow":
+                return str(self.page.audio_position_raw)
+        if name == "aria-valuetext":
+            return self.page.audio_position_text
+        if name == "aria-valuenow":
+            return str(self.page.audio_position_raw)
+        return None
+
+    def bounding_box(self):
+        return self.page.audio_box if not self.audio_start else self.page.zero_box
+
+
+class _AudioTimelineStarts:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return 7
+
+    def nth(self, index):
+        if index == 0:
+            return _AudioPositionSlider(self.page, audio_start=True)
+        if index == 6:
+            return _AudioPositionSlider(self.page, audio_start=True)
+        return _NarrationStartSlider(index * 10_000_000, f"{index * 10} seconds")
+
+
+class _AudioPositionMouse:
+    def __init__(self, page):
+        self.page = page
+        self.is_down = False
+        self.moves = []
+
+    def move(self, x, y, *, steps=None):
+        self.moves.append((x, y, steps))
+
+    def down(self):
+        self.is_down = True
+
+    def up(self):
+        assert self.is_down is True
+        self.page.pending_audio_position_update = True
+
+
+class _AudioTrackButton:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return 1
+
+    def click(self):
+        self.page.audio_track_selected = True
+
+
+class FakeCurrentCanvaAudioTimelinePage:
+    """Current Canva exposes a separate draggable audio-position control."""
+
+    def __init__(self):
+        self.audio_position_text = "9.1 seconds"
+        self.audio_position_raw = 9_102_000
+        self.pending_audio_position_update = False
+        self.audio_position_reads_after_drag = 0
+        self.audio_track_selected = False
+        self.audio_box = {"x": 300.0, "y": 20.0, "width": 20.0, "height": 28.0}
+        self.zero_box = {"x": 100.0, "y": 20.0, "width": 20.0, "height": 64.0}
+        self.mouse = _AudioPositionMouse(self)
+
+    def locator(self, selector):
+        assert selector == canva.CanvaAssemblyClient._VIDEO_START_EDGE
+        return _AudioTimelineStarts(self)
+
+    def get_by_role(self, role, *, name, exact):
+        if (role, name, exact) == ("button", "voice.mp3, audio track", True):
+            return _AudioTrackButton(self)
+        assert (role, name, exact) == ("slider", "Trimming position", True)
+        return _AudioPositionSlider(self)
+
+
+class _EventuallyEnabledDownloadButton:
+    def __init__(self):
+        self.states = [False, True]
+
+    def count(self):
+        return 1
+
+    def is_enabled(self):
+        return self.states.pop(0) if self.states else True
+
+    def is_visible(self):
+        return True
+
+    def nth(self, index):
+        assert index == 0
+        return self
+
+
+class _EventuallyMountedDownloadButtons:
+    """Models Canva mounting the final action after its export sheet hydrates."""
+
+    def __init__(self):
+        self.counts = [0, 1]
+        self.button = _EventuallyEnabledDownloadButton()
+
+    def count(self):
+        return self.counts.pop(0) if self.counts else 1
+
+    def nth(self, index):
+        assert index == 0
+        return self.button
+
+
+class FakeEventuallyEnabledDownloadPage:
+    """Canva keeps final Download disabled while captions are still settling."""
+
+    def __init__(self):
+        self.download = _EventuallyEnabledDownloadButton()
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) == ("button", "Download", True)
+        return self.download
+
+
+class FakeEventuallyMountedDownloadPage:
+    """Canva can briefly expose no final Download button after opening export."""
+
+    def __init__(self):
+        self.downloads = _EventuallyMountedDownloadButtons()
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) == ("button", "Download", True)
+        return self.downloads
+
+
+class _ScopedAudioCard:
+    def __init__(self, page):
+        self.page = page
+        self.clicked = False
+
+    def count(self):
+        return 1
+
+    def click(self):
+        self.clicked = True
+        self.page.timeline_count += 1
+
+
+class _AmbiguousGlobalAudioCard:
+    def count(self):
+        return 2
+
+
+class _ScopedAudioPanel:
+    def __init__(self, page):
+        self.card = _ScopedAudioCard(page)
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) == ("button", "Apply audio: voice.mp3", True)
+        return self.card
+
+
+class _CountedAudioCard:
+    def __init__(self, count):
+        self.count_value = count
+
+    def count(self):
+        return self.count_value
+
+
+class _CountedAudioPanel:
+    def __init__(self, count):
+        self.card = _CountedAudioCard(count)
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) == ("button", "Apply audio: voice.mp3", True)
+        return self.card
+
+
+class FakeScopedAudioAddPage:
+    """Models hidden duplicate narration controls outside the live Audio panel."""
+
+    def __init__(self):
+        self.timeline_count = 6
+        self.global_audio = _AmbiguousGlobalAudioCard()
+
+    def locator(self, selector):
+        assert selector == canva.CanvaAssemblyClient._VIDEO_START_EDGE
+        return _TimelineStarts(self)
+
+    def get_by_role(self, role, *, name, exact):
+        if (role, name, exact) in {
+            ("tab", "Elements", True),
+            ("tab", "Uploads", True),
+        }:
+            return _ClickOnly()
+        assert (role, name, exact) == ("button", "Apply audio: voice.mp3", True)
+        return self.global_audio
+
+
+class FakeNoVideosTabPage:
+    no_uploaded_videos_tab = True
+
+
+class _LiveSidebarControl:
+    def __init__(self, page, name, *, present=True):
+        self.page = page
+        self.name = name
+        self.present = present
+
+    def count(self):
+        return int(self.present)
+
+    def is_visible(self):
+        return self.present
+
+    def is_enabled(self):
+        return self.present
+
+    def click(self):
+        self.page.sidebar_clicks.append(self.name)
+
+
+class FakeLiveCanvaSidebarPage:
+    """Models Canva's current sidebar, where Elements/Uploads are not tabs."""
+
+    def __init__(self):
+        self.sidebar_clicks = []
+
+    def get_by_role(self, role, *, name, exact):
+        if (role, name, exact) == ("tab", "Elements", True):
+            return _LiveSidebarControl(self, "legacy-elements", present=False)
+        if (role, name, exact) == ("button", "Add elements", True):
+            return _LiveSidebarControl(self, "Add elements")
+        raise AssertionError(f"unexpected role lookup: {role} {name}")
+
+    def get_by_text(self, name, *, exact):
+        assert (name, exact) == ("Uploads", True)
+        return _LiveSidebarControl(
+            self,
+            "Uploads",
+            present=self.sidebar_clicks == ["Add elements"],
+        )
+
+
+class _ClickOnly:
+    def click(self):
+        return None
+
+
+class _MenuItem:
+    def __init__(self, visible):
+        self.visible = visible
+
+    def bounding_box(self):
+        if not self.visible:
+            return None
+        return {"x": 1.0, "y": 1.0, "width": 10.0, "height": 10.0}
+
+
+class _MenuLocator:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return 1
+
+    def nth(self, _index):
+        return _MenuItem(self.page.menu_query_count >= 5)
+
+
+class FakeDelayedMediaMenuPage:
+    """Models Canva hydrating the card menu immediately after its overlay click."""
+
+    def __init__(self):
+        self.menu_query_count = 0
+
+    def get_by_text(self, _action, *, exact):
+        assert exact is True
+        self.menu_query_count += 1
+        return _MenuLocator(self)
+
+    def evaluate(self, _expression, _point):
+        return True
+
+
+class _MissingVideosTab:
+    def count(self):
+        return 0
+
+
+class FakeHydratedNoVideosTabPage:
+    """Canva's live zero state: Uploads is ready, but the Videos subtype is absent."""
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) in {
+            ("tab", "Elements", True),
+            ("tab", "Uploads", True),
+        }
+        return _ClickOnly()
+
+    def locator(self, _selector):
+        return _MissingVideosTab()
+
+
+class _CleanupCards:
+    def __init__(self, count):
+        self.count_value = count
+
+    def count(self):
+        return self.count_value
+
+
+class _CleanupPanel:
+    def __init__(self, cards):
+        self.cards = cards
+
+    def locator(self, selector):
+        assert selector == '[role="button"][aria-label]'
+        return self.cards
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, exact) == ("button", True)
+        assert name == "clip_01.mp4"
+        return self.cards
+
+
+class _StaleDeleteCard:
+    def count(self):
+        return 1
+
+    def nth(self, index):
+        assert index == 0
+        return self
+
+    def bounding_box(self):
+        return {"x": 1.0, "y": 1.0, "width": 10.0, "height": 10.0}
+
+    def get_attribute(self, name):
+        assert name == "aria-label"
+        return "clip_01.mp4"
+
+
+class _FreshDeletePanel:
+    def __init__(self, page):
+        self.page = page
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) == ("button", "clip_01.mp4", True)
+        return _CleanupCards(0 if self.page.deleted else 1)
+
+
+class _DeleteMouse:
+    def __init__(self, page):
+        self.page = page
+        self.click_count = 0
+
+    def move(self, _x, _y):
+        return None
+
+    def click(self, _x, _y):
+        self.click_count += 1
+        if self.click_count == 2:
+            self.page.deleted = True
+
+
+class FakeDetachedVideoDeletePage:
+    """Canva discards the original card locator immediately after Move to Trash."""
+
+    def __init__(self):
+        self.deleted = False
+        self.mouse = _DeleteMouse(self)
+
+
+class FakeRefreshableAudioCleanupPage:
+    def __init__(self):
+        self.reload_count = 0
+
+    def reload(self, *, wait_until):
+        assert wait_until == "domcontentloaded"
+        self.reload_count += 1
+
+
+class _AudioDeleteCards:
+    def __init__(self, page):
+        self.page = page
+
+    def count(self):
+        return 0 if self.page.deleted else 1
+
+    def nth(self, index):
+        assert index == 0
+        return self
+
+    def bounding_box(self):
+        return {"x": 20.0, "y": 20.0, "width": 100.0, "height": 40.0}
+
+
+class _AudioDeleteControl:
+    def __init__(self, page, *, name):
+        self.page = page
+        self.name = name
+
+    def count(self):
+        return 1
+
+    def nth(self, index):
+        assert index == 0
+        return self
+
+    def bounding_box(self):
+        return {"x": 80.0, "y": 24.0, "width": 20.0, "height": 20.0}
+
+    def wait_for(self, *, state, timeout):
+        assert state == "visible"
+        assert timeout > 0
+        self.page.waited_for_delete = True
+
+
+class _EmptyLocator:
+    def count(self):
+        return 0
+
+
+class _AudioDeleteMouse:
+    def __init__(self, page):
+        self.page = page
+        self.click_count = 0
+
+    def move(self, _x, _y):
+        return None
+
+    def click(self, _x, _y):
+        self.click_count += 1
+        if self.click_count == 2:
+            self.page.deleted = True
+
+
+class FakeGenericAudioDeletePage:
+    """Models Canva's generic card overlay and aria-labelled Audio Delete command."""
+
+    def __init__(self):
+        self.deleted = False
+        self.waited_for_delete = False
+        self.cards = _AudioDeleteCards(self)
+        self.generic_details = _AudioDeleteControl(self, name="Show details")
+        self.delete = _AudioDeleteControl(self, name="Delete")
+        self.mouse = _AudioDeleteMouse(self)
+
+    def get_by_role(self, role, *, name, exact):
+        assert role == "button"
+        assert exact is True
+        if name == "Show details for “voice.mp3”":
+            return _EmptyLocator()
+        if name == "Show details":
+            return self.generic_details
+        raise AssertionError(f"unexpected role query: {name}")
+
+    def locator(self, selector):
+        assert selector == 'button[aria-label="Delete"]'
+        return self.delete
+
+    def evaluate(self, _expression, _point):
+        return True
+
+
+class _AudioDeletePanel:
+    def __init__(self, cards):
+        self.cards = cards
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) == ("button", "Apply audio: voice.mp3", True)
+        return self.cards
+
+
+class FakeCanvaContext:
+    def __init__(self, page):
+        self.pages = [page]
+
+
+class FakeCanvaBrowser:
+    def __init__(self, page):
+        self.page = page
+        self.open_calls = []
+
+    @contextmanager
+    def open(self, service, *, headed=None):
+        self.open_calls.append((service, headed))
+        yield FakeCanvaContext(self.page)
+
+
+class FakeCanvaSessions:
+    def __init__(self):
+        self.calls = []
+
+    def ensure_service_ready(self, service, job_id):
+        self.calls.append(("service", service, job_id))
+
+    def ensure_open_page_ready(self, service, page, job_id):
+        self.calls.append(("page", service, page, job_id))
+
+
+class _VisibleUploadName:
+    def __init__(self, visible: bool):
+        self.visible = visible
+
+    def count(self):
+        return 1 if self.visible else 0
+
+    def is_visible(self):
+        return self.visible
+
+
+class _CountedUploadName:
+    def __init__(self, count: int):
+        self.count_value = count
+
+    def count(self):
+        return self.count_value
+
+    def is_visible(self):
+        return self.count_value == 1
+
+
+class FakeCompletedUploadPage:
+    def __init__(self, visible_names):
+        self.visible_names = set(visible_names)
+
+    def content(self):
+        return "Canva editor"
+
+    def reload(self, *, wait_until):
+        assert wait_until == "domcontentloaded"
+
+    def get_by_text(self, name, *, exact):
+        assert exact is True
+        return _VisibleUploadName(name in self.visible_names)
+
+
+class FakePartialNamedUploadPage(FakeCompletedUploadPage):
+    """Models a completed-count UI with duplicate and missing visible upload names."""
+
+    def __init__(self, name_counts):
+        super().__init__(set())
+        self.name_counts = dict(name_counts)
+
+    def get_by_text(self, name, *, exact):
+        assert exact is True
+        return _CountedUploadName(self.name_counts.get(name, 0))
+
+
+class _SequentialUploadInput:
+    def __init__(self):
+        self.submissions = []
+
+    def wait_for(self, *, state, timeout):
+        assert state == "visible"
+        assert timeout > 0
+
+    def set_input_files(self, paths):
+        self.submissions.append(tuple(paths) if isinstance(paths, list) else (paths,))
+
+
+class FakeSequentialUploadPage:
+    def __init__(self):
+        self.upload_input = _SequentialUploadInput()
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) in {
+            ("tab", "Elements", True),
+            ("tab", "Uploads", True),
+        }
+        return _ClickOnly()
+
+    def locator(self, selector):
+        assert selector == 'input[type="file"]'
+        return self.upload_input
+
+
+class FakeCurrentSidebarUploadPage:
+    """Current Canva sidebar exposes Uploads through Add elements, not a tab role."""
+
+    def __init__(self):
+        self.upload_input = _SequentialUploadInput()
+
+    def locator(self, selector):
+        assert selector == 'input[type="file"]'
+        return self.upload_input
+
+
+class FakeUploadInventoryPage(FakeCompletedUploadPage):
+    """Models the permanent Canva "By uploading" copy with unnamed video cards."""
+
+    def content(self):
+        return "Canva editor By uploading, you confirm that your content complies"
+
+
+class FakeRefreshableUploadPage(FakeUploadInventoryPage):
+    def __init__(self):
+        super().__init__(set())
+        self.reload_count = 0
+
+    def reload(self, *, wait_until):
+        assert wait_until == "domcontentloaded"
+        self.reload_count += 1
+
+
+class _InventoryCount:
+    def __init__(self, count):
+        self._count = count
+
+    def count(self):
+        return self._count
+
+
+class _HydratingUploadTab:
+    def __init__(self, page, panel_name):
+        self.page = page
+        self.panel_name = panel_name
+
+    def wait_for(self, *, state, timeout):
+        assert state == "visible"
+        assert timeout > 0
+        self.page.tabs_ready = True
+
+    def count(self):
+        return 1 if self.page.tabs_ready else 0
+
+    def click(self):
+        return None
+
+    def get_attribute(self, name):
+        assert name == "aria-controls"
+        return f"test-tabpanel-{self.panel_name}"
+
+
+class _UploadPanel:
+    def __init__(self, count):
+        self._count = count
+
+    def get_by_text(self, _name, *, exact=False):
+        return _InventoryCount(self._count)
+
+    def get_by_role(self, role, *, name, exact):
+        assert role == "button"
+        assert name == "Apply audio: voice.mp3"
+        assert exact is True
+        return _InventoryCount(self._count)
+
+
+class FakeHydratingUploadInventoryPage:
+    def __init__(self):
+        self.tabs_ready = False
+        self.video_tab = _HydratingUploadTab(self, "videos")
+        self.audio_tab = _HydratingUploadTab(self, "audio")
+        self.video_panel = _UploadPanel(6)
+        self.audio_panel = _UploadPanel(1)
+
+    def locator(self, selector):
+        selector = selector.removesuffix(":visible")
+        if selector.endswith('test-tabpanel-videos"]'):
+            return self.video_panel
+        if selector.endswith('test-tabpanel-audio"]'):
+            return self.audio_panel
+        if selector.endswith('-tabpanel-photos"]'):
+            return _InventoryCount(0)
+        if selector.endswith('-tabpanel-videos"]'):
+            return self.video_tab
+        if selector.endswith('-tabpanel-audio"]'):
+            return self.audio_tab
+        raise AssertionError(f"unexpected selector: {selector}")
+
+    def get_by_role(self, role, *, name, exact):
+        assert role == "tab"
+        assert exact is True
+        assert name in {"Elements", "Uploads"}
+        return _SidebarTab(self, name)
+
+
+class _UnmountingVideoUploadTab(_HydratingUploadTab):
+    def click(self):
+        self.page.audio_panel_unmounted = True
+
+
+class _UnmountingAudioPanel(_UploadPanel):
+    def get_by_role(self, role, *, name, exact):
+        if self.page.audio_panel_unmounted:
+            return _InventoryCount(0)
+        return super().get_by_role(role, name=name, exact=exact)
+
+
+class FakeUnmountingAudioPanelUploadInventoryPage(FakeHydratingUploadInventoryPage):
+    """Canva unmounts Audio's contents when the user switches back to Videos."""
+
+    def __init__(self):
+        super().__init__()
+        self.audio_panel_unmounted = False
+        self.video_tab = _UnmountingVideoUploadTab(self, "videos")
+        self.audio_panel = _UnmountingAudioPanel(1)
+        self.audio_panel.page = self
+
+
+class _NoVideoUploadTab:
+    def wait_for(self, *, state, timeout):
+        del state, timeout
+        raise canva.PlaywrightTimeoutError("Videos tab is absent after cleanup")
+
+    def count(self):
+        return 0
+
+
+class FakeZeroVideoUploadInventoryPage(FakeHydratingUploadInventoryPage):
+    """Models the verified post-clean state before current-job videos are uploaded."""
+
+    def __init__(self):
+        super().__init__()
+        self.video_panel = _UploadPanel(0)
+
+    def locator(self, selector):
+        selector = selector.removesuffix(":visible")
+        if selector.endswith('-tabpanel-videos"]'):
+            return _NoVideoUploadTab()
+        return super().locator(selector)
+
+
+class FakeNoMediaCategoryUploadInventoryPage(FakeZeroVideoUploadInventoryPage):
+    """Models a fresh Canva Uploads panel that shows only Images and Folders."""
+
+    def locator(self, selector):
+        selector = selector.removesuffix(":visible")
+        if selector.endswith('-tabpanel-photos"]'):
+            return _InventoryCount(1)
+        if selector.endswith('-tabpanel-audio"]'):
+            return _NoVideoUploadTab()
+        return super().locator(selector)
+
+
+class FakeVideoOnlyUploadInventoryPage(FakeHydratingUploadInventoryPage):
+    """Canva after video upload: Videos is present, while empty Audio is absent."""
+
+    def __init__(self):
+        super().__init__()
+        self.tabs_ready = True
+
+    def locator(self, selector):
+        selector = selector.removesuffix(":visible")
+        if selector.endswith('-tabpanel-audio"]'):
+            return _NoVideoUploadTab()
+        return super().locator(selector)
+
+
+class _DelayedAudioUploadTab(_HydratingUploadTab):
+    def __init__(self, page):
+        super().__init__(page, "audio")
+        self.clicked = False
+
+    def click(self):
+        assert self.page.tabs_ready is True
+        self.clicked = True
+
+    def wait_for(self, *, state, timeout):
+        super().wait_for(state=state, timeout=timeout)
+
+
+class FakeZeroVideoDelayedAudioTabPage(FakeZeroVideoUploadInventoryPage):
+    def __init__(self):
+        super().__init__()
+        self.audio_tab = _DelayedAudioUploadTab(self)
+
+
+class _LateAudioTab:
+    def __init__(self, page):
+        self.page = page
+        self.clicked = False
+
+    def count(self):
+        return 1 if self.page.elapsed_seconds >= 15 else 0
+
+    def click(self):
+        self.clicked = True
+
+    def get_attribute(self, name):
+        assert name == "aria-controls"
+        return "test-tabpanel-audio"
+
+
+class FakeLateAudioTabPage:
+    """Canva exposes existing Audio only after a delayed Uploads hydration."""
+
+    def __init__(self):
+        self.elapsed_seconds = 0.0
+        self.audio_tab = _LateAudioTab(self)
+        self.audio_panel = _UploadPanel(1)
+
+    def get_by_role(self, role, *, name, exact):
+        assert (role, name, exact) in {
+            ("tab", "Elements", True),
+            ("tab", "Uploads", True),
+        }
+        return _ClickOnly()
+
+    def locator(self, selector):
+        if selector == '[role="tab"][aria-controls$="-tabpanel-audio"]:visible':
+            return self.audio_tab
+        if selector == '[role="tabpanel"][id="test-tabpanel-audio"]':
+            return self.audio_panel
+        raise AssertionError(f"unexpected selector: {selector}")
+
+
+class _InvisibleAudioUploadTab(_HydratingUploadTab):
+    def __init__(self, page):
+        super().__init__(page, "audio")
+
+    def click(self):
+        raise canva.PlaywrightTimeoutError("stale hidden audio tab cannot be clicked")
+
+
+class FakeDuplicateAudioTabPage(FakeZeroVideoUploadInventoryPage):
+    """Models Canva retaining a hidden stale Uploads panel behind the live one."""
+
+    def __init__(self):
+        super().__init__()
+        self.hidden_audio_tab = _InvisibleAudioUploadTab(self)
+        self.visible_audio_tab = _HydratingUploadTab(self, "audio")
+
+    def locator(self, selector):
+        if selector == '[role="tab"][aria-controls$="-tabpanel-audio"]':
+            return self.hidden_audio_tab
+        if selector == '[role="tab"][aria-controls$="-tabpanel-audio"]:visible':
+            return self.visible_audio_tab
+        if selector == '[role="tab"][aria-controls$="-tabpanel-videos"]:visible':
+            return _NoVideoUploadTab()
+        return super().locator(selector)
+
+
+class _InvisibleVideoUploadTab:
+    def count(self):
+        return 1
+
+    def click(self):
+        raise canva.PlaywrightTimeoutError("stale hidden video tab cannot be clicked")
+
+
+class _VisibleVideoUploadTab:
+    def __init__(self):
+        self.clicked = False
+
+    def count(self):
+        return 1
+
+    def click(self):
+        self.clicked = True
+
+    def get_attribute(self, name):
+        assert name == "aria-controls"
+        return "test-tabpanel-videos"
+
+
+class FakeDuplicateVideoTabPage(FakeHydratingUploadInventoryPage):
+    """Models Canva retaining a hidden stale Videos tab behind the live tab."""
+
+    def __init__(self):
+        super().__init__()
+        self.hidden_video_tab = _InvisibleVideoUploadTab()
+        self.visible_video_tab = _VisibleVideoUploadTab()
+
+    def locator(self, selector):
+        if selector == '[role="tab"][aria-controls$="-tabpanel-videos"]':
+            return self.hidden_video_tab
+        if selector == '[role="tab"][aria-controls$="-tabpanel-videos"]:visible':
+            return self.visible_video_tab
+        return super().locator(selector)
+
+
+class _SidebarTab:
+    def __init__(self, page, name):
+        self.page = page
+        self.name = name
+
+    def click(self):
+        if hasattr(self.page, "sidebar_clicks"):
+            self.page.sidebar_clicks.append(self.name)
+
+
+class _ReactivatedAudioUploadTab(_DelayedAudioUploadTab):
+    def count(self):
+        if self.page.sidebar_clicks == ["Elements", "Uploads"]:
+            self.page.tabs_ready = True
+            return 1
+        return 0
+
+    def wait_for(self, *, state, timeout):
+        assert self.page.sidebar_clicks == ["Elements", "Uploads"]
+        super().wait_for(state=state, timeout=timeout)
+
+
+class FakeReactivatingUploadInventoryPage(FakeZeroVideoUploadInventoryPage):
+    """Models Canva requiring a side-panel transition to reveal Uploads media tabs."""
+
+    def __init__(self):
+        super().__init__()
+        self.sidebar_clicks = []
+        self.audio_tab = _ReactivatedAudioUploadTab(self)
+
+    def get_by_role(self, role, *, name, exact):
+        assert role == "tab"
+        assert exact is True
+        assert name in {"Elements", "Uploads"}
+        return _SidebarTab(self, name)
+
+
+def _assembly_job(*, speed=0.95, target_seconds=63.25, create_captions=True):
+    return SimpleNamespace(
+        id="job-canva-123",
+        canva_playback_speed=speed,
+        target_final_duration_seconds=target_seconds,
+        create_canva_captions=create_captions,
+    )
+
+
+def _assembly_client(page):
+    client_cls = getattr(canva, "CanvaAssemblyClient", None)
+    assert client_cls is not None, "Task 10 Canva production client is not implemented"
+    sessions = FakeCanvaSessions()
+    client = client_cls(
+        FakeCanvaBrowser(page),
+        sessions,
+        service_url="https://www.canva.com/design/demo/edit",
+        timeline_tolerance_seconds=1.0,
+    )
+    return client, sessions
+
+
+def _media(tmp_path):
+    clips = []
+    for index in range(1, 7):
+        clip = tmp_path / f"clip_{index:02d}.mp4"
+        clip.write_bytes(b"clip")
+        clips.append(clip)
+    audio = tmp_path / "voice.mp3"
+    audio.write_bytes(b"audio")
+    return clips, audio, tmp_path / "final.mp4"
+
+
+def test_canva_assembly_adds_audio_before_videos_without_timing_adjustment(tmp_path):
+    """Catches narration insertion after video or any duration/speed adjustment."""
+    page = FakeCanvaEditorPage()
+    client, sessions = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+
+    result = client.assemble_and_export(
+        _assembly_job(),
+        clips,
+        audio,
+        output,
+    )
+
+    assert result == output
+    assert output.read_bytes() == b"final-mp4"
+    assert sessions.calls == [("page", "canva", page, "job-canva-123")]
+    assert page.actions == [
+        (
+            "goto",
+            "https://www.canva.com/design/demo/edit",
+            {"wait_until": "domcontentloaded", "timeout": 180_000},
+        ),
+        ("clear_audio_timeline",),
+        ("upload", ("clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4", "voice.mp3")),
+        ("add_uploaded_audio", "voice.mp3"),
+        ("order", ("clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4")),
+        ("mute_source_audio",),
+        ("auto_captions",),
+        ("export_mp4_1080p",),
+        ("download", "final.mp4"),
+    ]
+
+
+def test_canva_reports_only_verified_postconditions(tmp_path):
+    page = FakeCanvaEditorPage()
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+    milestones = []
+
+    client.assemble_and_export(
+        _assembly_job(),
+        clips,
+        audio,
+        output,
+        progress=milestones.append,
+    )
+
+    assert milestones == [
+        "canva.timeline.cleared",
+        "canva.uploads.ready",
+        "canva.audio.inserted",
+        *[f"canva.video.inserted.{number}" for number in range(1, 7)],
+        "canva.source_audio.muted",
+        "canva.captions.requested",
+        "canva.captions.stable",
+        "canva.export.started",
+        "canva.export.downloaded",
+    ]
+
+
+def test_canva_exports_without_requesting_captions_when_job_disables_them(tmp_path):
+    page = FakeCanvaEditorPage()
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+    milestones = []
+
+    result = client.assemble_and_export(
+        _assembly_job(create_captions=False),
+        clips,
+        audio,
+        output,
+        progress=milestones.append,
+    )
+
+    assert result == output
+    assert ("auto_captions",) not in page.actions
+    assert "canva.captions.requested" not in milestones
+    assert "canva.captions.stable" not in milestones
+    assert "canva.captions.skipped" in milestones
+    assert ("export_mp4_1080p",) in page.actions
+
+
+def test_failed_caption_postcondition_does_not_emit_stable_milestone(
+    monkeypatch,
+    tmp_path,
+):
+    page = FakeCanvaEditorPage()
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+    milestones = []
+
+    def fail_captions(_page, *, requested):
+        requested()
+        raise canva.CanvaUIVerificationError("captions never stabilized")
+
+    monkeypatch.setattr(client, "_generate_auto_captions", fail_captions)
+
+    with pytest.raises(canva.CanvaUIVerificationError, match="never stabilized"):
+        client.assemble_and_export(
+            _assembly_job(),
+            clips,
+            audio,
+            output,
+            progress=milestones.append,
+        )
+
+    assert "canva.captions.requested" in milestones
+    assert "canva.captions.stable" not in milestones
+    assert "canva.export.started" not in milestones
+
+
+def test_canva_assembly_does_not_inspect_timeline_start_positions(tmp_path):
+    page = FakeConfirmedNonZeroNarrationPage()
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+
+    result = client.assemble_and_export(_assembly_job(), clips, audio, output)
+
+    assert result == output
+    assert output.read_bytes() == b"final-mp4"
+    assert ("verify_narration_zero", "voice.mp3") not in page.actions
+    assert ("verify_first_video_zero",) not in page.actions
+    assert ("export_mp4_1080p",) in page.actions
+
+
+def test_canva_accepts_accessible_zero_seconds_for_narration_position():
+    """Catches rejecting Canva's pixel-offset raw value when ARIA proves time zero."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    client._verify_narration_starts_at_zero(FakeAccessibleZeroNarrationPage(), "")
+
+
+def test_canva_does_not_drag_a_confirmed_nonzero_audio_track():
+    """Catches trimming narration content while trying to reposition the track."""
+    page = FakeCurrentCanvaAudioTimelinePage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    with pytest.raises(canva.CanvaUIVerificationError, match="narration.*time 0"):
+        client._verify_narration_starts_at_zero(page, "voice.mp3")
+
+    assert page.audio_track_selected is True
+    assert page.audio_position_text == "9.1 seconds"
+    assert page.mouse.moves == []
+
+
+def test_canva_auto_captions_accepts_all_selected_scope_and_uses_classic_style(
+    monkeypatch,
+):
+    """Catches rejecting Canva's current All-selected caption-scope wording."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 1.0
+    page = FakeCaptionStylePage()
+    monkeypatch.setattr(canva.time, "monotonic", lambda: page.elapsed_seconds)
+    monkeypatch.setattr(
+        canva.time,
+        "sleep",
+        lambda seconds: setattr(page, "elapsed_seconds", page.elapsed_seconds + seconds),
+    )
+
+    client._generate_auto_captions(page)
+
+    assert page.actions == [
+        ("select_clip", 1),
+        ("caption_control", "Captions"),
+        ("caption_control", "Classic"),
+        ("caption_control", "caption_audio_scope"),
+        ("caption_control", "All audio"),
+        ("caption_control", "Generate captions"),
+    ]
+
+
+def test_canva_waits_for_generated_caption_timeline_to_stabilize_before_returning(
+    monkeypatch,
+):
+    """Catches exporting as soon as Generate captions is clicked."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 1.0
+    page = FakeCaptionStylePage(
+        caption_ready_after_seconds=20.0,
+        caption_growth_after_seconds=22.0,
+    )
+    monkeypatch.setattr(canva.time, "monotonic", lambda: page.elapsed_seconds)
+    monkeypatch.setattr(
+        canva.time,
+        "sleep",
+        lambda seconds: setattr(page, "elapsed_seconds", page.elapsed_seconds + seconds),
+    )
+
+    client._generate_auto_captions(page)
+
+    assert page.elapsed_seconds >= 27.0
+
+
+def test_canva_stops_before_export_when_generated_captions_never_appear(monkeypatch):
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 1.0
+    page = FakeCaptionStylePage(caption_ready_after_seconds=91.0)
+    monkeypatch.setattr(canva.time, "monotonic", lambda: page.elapsed_seconds)
+    monkeypatch.setattr(
+        canva.time,
+        "sleep",
+        lambda seconds: setattr(page, "elapsed_seconds", page.elapsed_seconds + seconds),
+    )
+
+    with pytest.raises(
+        canva.CanvaUIVerificationError,
+        match="generated captions did not become ready before export",
+    ):
+        client._generate_auto_captions(page)
+
+    assert page.elapsed_seconds == 90.0
+
+
+def test_canva_waits_for_final_download_to_become_enabled_after_captions():
+    """Catches clicking the final Download while Canva still disables it for captions."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 0
+
+    control = client._wait_for_final_download_ready(FakeEventuallyEnabledDownloadPage())
+
+    assert control.is_enabled() is True
+
+
+def test_canva_waits_for_final_download_to_mount_after_export_sheet_transition():
+    """Catches failing while Canva replaces the Share sheet with the export sheet."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 0
+
+    control = client._wait_for_final_download_ready(FakeEventuallyMountedDownloadPage())
+
+    assert control.is_visible() is True
+    assert control.is_enabled() is True
+
+
+def test_canva_job_session_allows_bounded_time_for_new_design_editor_navigation(
+    tmp_path,
+):
+    """Catches the browser's 30-second default aborting a new Canva design before it hydrates."""
+    page = FakeCanvaEditorPage()
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+
+    client.assemble_and_export(_assembly_job(), clips, audio, output)
+
+    assert page.actions[0] == (
+        "goto",
+        "https://www.canva.com/design/demo/edit",
+        {"wait_until": "domcontentloaded", "timeout": 180_000},
+    )
+
+
+def test_canva_job_session_persists_resolved_editor_url_from_create_design_url():
+    page = FakeRedirectingCanvaEditorPage()
+    client, _ = _assembly_client(page)
+    client.service_url = "https://www.canva.com/design?create=template"
+    job = SimpleNamespace(id="job-canva-123", canva_design_url="")
+
+    with client.open_job_session(job) as session:
+        assert session.editor_url == "https://www.canva.com/design/DEMO/edit"
+
+
+def test_canva_job_session_accepts_editor_url_with_canva_share_key():
+    editor_url = "https://www.canva.com/design/DAHTXajc_u8/yctmTZbIUM0PKcUzWpXVZw/edit"
+
+    assert canva.CanvaAssemblyClient._editor_url(SimpleNamespace(url=editor_url)) == editor_url
+
+
+def test_canva_job_session_reuses_persisted_editor_url_without_create_design_url():
+    page = FakeCanvaEditorPage()
+    client, _ = _assembly_client(page)
+    client.service_url = "https://www.canva.com/design?create=template"
+    job = SimpleNamespace(
+        id="job-canva-123",
+        canva_design_url="https://www.canva.com/design/PERSISTED/edit",
+    )
+
+    with client.open_job_session(job) as session:
+        assert session.editor_url == "https://www.canva.com/design/PERSISTED/edit"
+
+    assert page.actions[0][1] == "https://www.canva.com/design/PERSISTED/edit"
+
+
+def test_canva_assembly_prepares_clean_workspace_before_upload_and_adds_clips_in_order(
+    tmp_path,
+):
+    """Catches upload or timeline insertion before the workspace is observably clean."""
+    page = FakePreparedCanvaEditorPage()
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+
+    client.assemble_and_export(_assembly_job(), clips, audio, output)
+
+    actions = page.actions
+    assert actions[:12] == [
+        (
+            "goto",
+            "https://www.canva.com/design/demo/edit",
+            {"wait_until": "domcontentloaded", "timeout": 180_000},
+        ),
+        ("clear_video_timeline",),
+        ("clear_audio_timeline",),
+        (
+            "clean_uploaded_videos",
+            (
+                "clip_01.mp4",
+                "clip_02.mp4",
+                "clip_03.mp4",
+                "clip_04.mp4",
+                "clip_05.mp4",
+                "clip_06.mp4",
+            ),
+        ),
+        ("upload", ("clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4", "voice.mp3")),
+        ("add_uploaded_audio", "voice.mp3"),
+        ("add_uploaded_clip", "clip_01.mp4", 0, 1),
+        ("add_uploaded_clip", "clip_02.mp4", 1, 2),
+        ("add_uploaded_clip", "clip_03.mp4", 2, 3),
+        ("add_uploaded_clip", "clip_04.mp4", 3, 4),
+        ("add_uploaded_clip", "clip_05.mp4", 4, 5),
+        ("add_uploaded_clip", "clip_06.mp4", 5, 6),
+    ]
+
+
+def test_canva_assembly_cleans_only_current_job_video_and_audio_names_before_upload(
+    tmp_path,
+):
+    """Catches account-wide cleanup and stale narration surviving into a new job."""
+    page = FakeManagedMediaCleanupPage()
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+
+    client.assemble_and_export(_assembly_job(), clips, audio, output)
+
+    assert page.actions[1:6] == [
+        ("clear_video_timeline",),
+        ("clear_audio_timeline",),
+        (
+            "clean_uploaded_videos",
+            (
+                "clip_01.mp4",
+                "clip_02.mp4",
+                "clip_03.mp4",
+                "clip_04.mp4",
+                "clip_05.mp4",
+                "clip_06.mp4",
+            ),
+        ),
+        ("clean_uploaded_audio", "voice.mp3"),
+        (
+            "upload",
+            (
+                "clip_01.mp4",
+                "clip_02.mp4",
+                "clip_03.mp4",
+                "clip_04.mp4",
+                "clip_05.mp4",
+                "clip_06.mp4",
+                "voice.mp3",
+            ),
+        ),
+    ]
+
+
+def test_canva_post_final_cleanup_clears_timeline_before_deleting_managed_uploads():
+    """Catches leaving the previous job's video and narration on the reusable design."""
+    page = FakeManagedMediaCleanupPage()
+    page.timeline_video_count = 7
+    client, _ = _assembly_client(page)
+
+    client._clean_open_page(page)
+
+    assert page.actions == [
+        ("clear_video_timeline",),
+        ("clear_audio_timeline",),
+        (
+            "clean_uploaded_videos",
+            (
+                "clip_01.mp4",
+                "clip_02.mp4",
+                "clip_03.mp4",
+                "clip_04.mp4",
+                "clip_05.mp4",
+                "clip_06.mp4",
+            ),
+        ),
+        ("clean_uploaded_audio", "voice.mp3"),
+    ]
+    assert page.timeline_video_count == 0
+
+
+def test_canva_timeline_cleanup_requeries_after_canva_unmounts_deleted_scene():
+    """Catches waiting on a stale trim-edge locator after a successful Delete."""
+    page = FakeUnmountingTimelinePage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.0
+    client.poll_seconds = 0.0
+
+    client._clear_video_timeline(page)
+
+    assert page.timeline_count == 0
+    assert page.locator_calls >= 2
+
+
+def test_canva_timeline_cleanup_ignores_captions_and_deletes_only_videos():
+    page = FakeCaptionedVideoTimelinePage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 0.0
+
+    client._clear_video_timeline(page)
+
+    assert page.video_count == 0
+    assert page.caption_count == 0
+    assert page.deleted_kinds == ["video", "video"]
+
+
+def test_canva_clean_uploaded_videos_accepts_missing_videos_tab_as_verified_zero_state():
+    """Catches treating Canva's absent Videos tab as an error after a successful cleanup."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    client._clean_uploaded_videos(FakeNoVideosTabPage())
+
+
+def test_canva_clean_uploaded_videos_accepts_hydrated_missing_tab_without_export_timeout(
+    monkeypatch,
+):
+    """Catches making a known zero-video UI state wait for the 180-second export timeout."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    clock = iter((0.0, 11.0, 31.0))
+    monkeypatch.setattr(canva.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(canva.time, "sleep", lambda _seconds: None)
+
+    client._clean_uploaded_videos(FakeHydratedNoVideosTabPage())
+
+
+def test_canva_audio_cleanup_accepts_missing_audio_tab_as_verified_zero(monkeypatch):
+    """An absent hydrated Audio category means there is no managed narration to delete."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    monkeypatch.setattr(client, "_open_hydrated_uploaded_audio", lambda _page, _name: None)
+
+    client._clean_uploaded_audio(object(), "voice.mp3")
+
+
+def test_canva_cleanup_reopens_transiently_missing_videos_tab_after_a_delete(monkeypatch):
+    """Catches treating Canva's post-delete panel hydration gap as a verified empty state."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    cards = _CleanupCards(2)
+    populated_panel = _CleanupPanel(cards)
+    empty_panel = _CleanupPanel(_CleanupCards(0))
+    opened_panels = iter(
+        (populated_panel, None, populated_panel, empty_panel, empty_panel)
+    )
+    deleted = []
+
+    monkeypatch.setattr(client, "_open_uploaded_videos", lambda _page: next(opened_panels))
+
+    def delete_one(_page, current_cards):
+        deleted.append(current_cards.count())
+        current_cards.count_value -= 1
+
+    monkeypatch.setattr(client, "_delete_uploaded_video_card", delete_one)
+
+    client._clean_uploaded_videos(object(), ("clip_01.mp4",))
+
+    assert deleted == [2, 1]
+
+
+def test_canva_cleanup_accepts_missing_videos_tab_only_after_retrying_post_delete(
+    monkeypatch,
+):
+    """Catches rejecting Canva's observed zero-video state after the final delete."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    cards = _CleanupCards(1)
+    populated_panel = _CleanupPanel(cards)
+    opened_panels = iter((populated_panel, None, None))
+
+    monkeypatch.setattr(client, "_open_uploaded_videos", lambda _page: next(opened_panels))
+    monkeypatch.setattr(
+        client,
+        "_delete_uploaded_video_card",
+        lambda _page, current_cards: setattr(current_cards, "count_value", 0),
+    )
+
+    client._clean_uploaded_videos(object())
+
+
+def test_canva_audio_cleanup_refreshes_once_before_rejecting_a_stale_nonempty_panel(
+    monkeypatch,
+):
+    """Catches Canva retaining deleted audio cards in a stale panel until an explicit refresh."""
+    page = FakeRefreshableAudioCleanupPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    initial = _CountedAudioPanel(1)
+    empty = _CountedAudioPanel(0)
+    stale = _CountedAudioPanel(1)
+    opened_panels = iter((initial, empty, stale, empty))
+    monkeypatch.setattr(client, "_open_uploaded_audio", lambda _page: next(opened_panels))
+    monkeypatch.setattr(
+        client,
+        "_delete_uploaded_audio_card",
+        lambda _page, cards, _name: setattr(cards, "count_value", 0),
+    )
+
+    client._clean_uploaded_audio(page, "voice.mp3")
+
+    assert page.reload_count == 1
+
+
+def test_canva_audio_cleanup_waits_for_cards_after_an_initial_hydration_zero(
+    monkeypatch,
+):
+    """Catches treating Canva's initial empty Audio panel as a verified cleanup."""
+    page = FakeRefreshableAudioCleanupPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 0.0
+    initial_empty = _CountedAudioPanel(0)
+    hydrated_card = _CountedAudioPanel(1)
+    empty = _CountedAudioPanel(0)
+    opened_panels = iter((initial_empty, hydrated_card, empty, empty))
+    deleted = []
+    monkeypatch.setattr(client, "_open_uploaded_audio", lambda _page: next(opened_panels))
+    monkeypatch.setattr(canva.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(canva.time, "sleep", lambda _seconds: None)
+
+    def delete_one(_page, cards, _name):
+        deleted.append(cards.count())
+        cards.count_value = 0
+
+    monkeypatch.setattr(client, "_delete_uploaded_audio_card", delete_one)
+
+    client._clean_uploaded_audio(page, "voice.mp3")
+
+    assert deleted == [1]
+
+
+def test_canva_delete_refreshes_once_before_rejecting_an_unchanged_card_count(
+    monkeypatch,
+):
+    """Catches failing before Canva's post-delete gallery refresh can hydrate."""
+    page = FakeRefreshableAudioCleanupPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.0
+    stale = _CountedAudioPanel(1)
+    empty = _CountedAudioPanel(0)
+    monkeypatch.setattr(
+        client,
+        "_open_uploaded_audio",
+        lambda _page: empty if page.reload_count else stale,
+    )
+
+    client._wait_for_fresh_card_count_decrease(
+        page,
+        1,
+        client._open_uploaded_audio,
+        lambda panel: panel.card,
+        "audio deletion was not observable",
+    )
+
+    assert page.reload_count == 1
+
+
+def test_canva_audio_delete_uses_generic_card_overlay_and_aria_delete(monkeypatch):
+    """Catches Canva Audio exposing generic details plus aria-labelled Delete."""
+    page = FakeGenericAudioDeletePage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 0.0
+    panel = _AudioDeletePanel(page.cards)
+    monkeypatch.setattr(client, "_open_uploaded_audio", lambda _page: panel)
+
+    client._delete_uploaded_audio_card(page, page.cards, "voice.mp3")
+
+    assert page.deleted is True
+    assert page.waited_for_delete is True
+
+
+def test_canva_open_uploaded_videos_uses_visible_tab_when_hidden_stale_tab_remains():
+    """Catches selecting Canva's hidden retained Videos tab instead of the live control."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    page = FakeDuplicateVideoTabPage()
+
+    panel = client._open_uploaded_videos(page)
+
+    assert panel is page.video_panel
+    assert page.visible_video_tab.clicked is True
+
+
+def test_canva_activates_current_sidebar_when_elements_and_uploads_are_not_tabs():
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    page = FakeLiveCanvaSidebarPage()
+
+    client._activate_uploads(page)
+
+    assert page.sidebar_clicks == ["Add elements", "Uploads"]
+
+
+def test_canva_open_uploaded_audio_reactivates_uploads_before_reading_media_tabs(
+    monkeypatch,
+):
+    """Catches skipping stale-audio cleanup when Canva leaves its Uploads sidebar closed."""
+    page = FakeReactivatingUploadInventoryPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 0.0
+    clock = iter((0.0, 31.0))
+    monkeypatch.setattr(canva.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(canva.time, "sleep", lambda _seconds: None)
+
+    assert client._open_uploaded_audio(page) is page.audio_panel
+    assert page.sidebar_clicks == ["Elements", "Uploads"]
+
+
+def test_canva_waits_for_card_menu_hydration_before_verifying_move_to_trash():
+    """Catches treating the immediate post-overlay menu hydration window as a hard failure."""
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 0.0
+
+    trash, trash_box = client._verified_trash_menu_item(FakeDelayedMediaMenuPage())
+
+    assert trash is not None
+    assert trash_box == {"x": 1.0, "y": 1.0, "width": 10.0, "height": 10.0}
+
+
+def test_canva_video_delete_requeries_live_card_count_after_canva_detaches_old_panel(
+    monkeypatch,
+):
+    """Catches waiting on a stale card locator after Canva has already trashed the video."""
+    page = FakeDetachedVideoDeletePage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.0
+    client.poll_seconds = 0.0
+    cards = _StaleDeleteCard()
+    monkeypatch.setattr(
+        client,
+        "_card_details_overlay",
+        lambda _page, _name, _box: (object(), {"x": 1.0, "y": 1.0, "width": 10.0, "height": 10.0}),
+    )
+    monkeypatch.setattr(
+        client,
+        "_verified_trash_menu_item",
+        lambda _page: (object(), {"x": 1.0, "y": 1.0, "width": 10.0, "height": 10.0}),
+    )
+    monkeypatch.setattr(client, "_open_uploaded_videos", lambda _page: _FreshDeletePanel(page))
+
+    client._delete_uploaded_video_card(page, cards)
+
+    assert page.deleted is True
+
+
+def test_canva_add_uploaded_clips_fails_closed_when_one_click_does_not_add_exactly_one_video(
+    tmp_path,
+):
+    """Catches advancing to later clips when Canva did not add the selected card."""
+    page = FakePreparedCanvaEditorPage(add_succeeds=False)
+    client, _ = _assembly_client(page)
+    client.export_timeout_seconds = 0.0
+    client.poll_seconds = 0.0
+    clips, _, _ = _media(tmp_path)
+
+    with pytest.raises(canva.CanvaUIVerificationError, match="timeline video count"):
+        client._add_uploaded_clips(page, [path.name for path in clips])
+
+    assert page.actions == [("add_uploaded_clip", "clip_01.mp4", 0, 0)]
+
+
+def test_canva_adds_narration_from_the_live_uploads_audio_panel_not_global_duplicates(
+    monkeypatch,
+):
+    """Catches hidden account-wide voice cards making the narration selector ambiguous."""
+    page = FakeScopedAudioAddPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    panel = _ScopedAudioPanel(page)
+    monkeypatch.setattr(client, "_open_uploaded_audio", lambda _page: panel)
+
+    client._add_uploaded_audio(page, "voice.mp3")
+
+    assert panel.card.clicked is True
+    assert page.timeline_count == 7
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_canva_audio_card_count_not_one_raises_sanitized_typed_evidence(
+    monkeypatch, count
+):
+    page = FakeScopedAudioAddPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    monkeypatch.setattr(client, "_open_uploaded_audio", lambda _page: _CountedAudioPanel(count))
+
+    with pytest.raises(canva.CanvaUIVerificationError, match=f"audio cards: {count}") as exc_info:
+        client._add_uploaded_audio(page, "voice.mp3")
+
+    assert exc_info.value.audio_card_count == count
+
+
+def test_canva_assembly_skips_playback_changes_when_speed_is_one(tmp_path):
+    """Catches an unnecessary speed edit on a job whose visual timing is already 1.0x."""
+    page = FakeCanvaEditorPage()
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+
+    client.assemble_and_export(
+        _assembly_job(speed=1.0, target_seconds=60.0),
+        clips,
+        audio,
+        output,
+    )
+
+    assert not any(action[0] in {"open_video_speed", "set_speed", "verify_speed"} for action in page.actions)
+    assert not any(action[0] in {"bound_final_end", "verify_timeline_end"} for action in page.actions)
+
+
+def test_canva_assembly_does_not_use_playback_controls(tmp_path):
+    """Catches reintroducing video speed or duration adjustment into assembly."""
+    page = FakeCanvaEditorPage(playback_verifies=False)
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+
+    result = client.assemble_and_export(_assembly_job(), clips, audio, output)
+
+    assert result == output
+    assert not any(action[0] in {"open_video_speed", "set_speed", "verify_speed"} for action in page.actions)
+
+
+def test_canva_assembly_rejects_an_export_without_a_completed_mp4_download(tmp_path):
+    """Catches a false success when the final Canva Download action never yields a file."""
+    page = FakeCanvaEditorPage(download_completes=False)
+    client, _ = _assembly_client(page)
+    clips, audio, output = _media(tmp_path)
+    error_cls = getattr(canva, "CanvaDownloadVerificationError", None)
+    assert error_cls is not None, "Task 10 typed download verification error is not implemented"
+
+    with pytest.raises(error_cls, match="download|export"):
+        client.assemble_and_export(_assembly_job(), clips, audio, output)
+
+    assert ("download", "final.mp4") in page.actions
+    assert not output.exists()
+
+
+def test_canva_upload_completion_accepts_observable_media_without_processing_text():
+    page = FakeCompletedUploadPage(
+        {
+            "clip_01.mp4",
+            "clip_02.mp4",
+            "clip_03.mp4",
+            "clip_04.mp4",
+            "clip_05.mp4",
+            "clip_06.mp4",
+            "voice.mp3",
+        }
+    )
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    client._wait_for_upload_completion(
+        page,
+        [
+            "clip_01.mp4",
+            "clip_02.mp4",
+            "clip_03.mp4",
+            "clip_04.mp4",
+            "clip_05.mp4",
+            "clip_06.mp4",
+            "voice.mp3",
+        ],
+    )
+
+
+def test_canva_upload_completion_accepts_card_proof_without_an_initial_inventory(
+    monkeypatch,
+):
+    page = FakeCompletedUploadPage(set())
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.0
+    client.poll_seconds = 0.0
+    monkeypatch.setattr(
+        client, "_uploaded_media_cards_complete", lambda _page, _names, _audio: True
+    )
+
+    client._wait_for_upload_completion(
+        page,
+        [*(f"clip_{index:02d}.mp4" for index in range(1, 7))],
+        baseline_inventory=None,
+    )
+
+
+def test_canva_uploads_video_batch_then_canonical_audio_and_verifies_each_set(
+    tmp_path, monkeypatch
+):
+    """Catches mixed Canva uploads silently dropping the canonical narration audio."""
+    page = FakeSequentialUploadPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    clips, audio, _ = _media(tmp_path)
+    inventory = iter(((0, 0),) * 8)
+    verified = []
+    monkeypatch.setattr(client, "_upload_inventory", lambda _page, _audio: next(inventory))
+    monkeypatch.setattr(
+        client,
+        "_wait_for_upload_completion",
+        lambda _page, names, **_kwargs: verified.append(tuple(names)),
+    )
+
+    client._upload_media(page, [*clips, audio])
+
+    assert page.upload_input.submissions == [
+        tuple(str(path) for path in clips),
+        (str(audio),),
+    ]
+    assert verified == [
+        tuple(path.name for path in clips),
+        (audio.name,),
+    ]
+
+
+def test_canva_upload_uses_current_sidebar_activation_before_file_input(tmp_path, monkeypatch):
+    """Catches the current Canva editor where Uploads is no longer a role=tab."""
+    page = FakeCurrentSidebarUploadPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    clips, audio, _ = _media(tmp_path)
+    activations = []
+    monkeypatch.setattr(client, "_activate_uploads", lambda _page: activations.append(True))
+    monkeypatch.setattr(client, "_upload_inventory", lambda _page, _audio: (0, 0))
+    monkeypatch.setattr(client, "_wait_for_upload_completion", lambda *_args, **_kwargs: None)
+
+    client._upload_media(page, [*clips, audio])
+
+    assert activations == [True]
+    assert page.upload_input.submissions == [
+        tuple(str(path) for path in clips),
+        (str(audio),),
+    ]
+
+
+def test_canva_upload_completion_rejects_complete_count_with_partial_duplicate_names(
+    monkeypatch,
+):
+    """Catches accepting a six-card count when Canva exposes a missing or duplicate clip."""
+    names = [*(f"clip_{index:02d}.mp4" for index in range(1, 7)), "voice.mp3"]
+    page = FakePartialNamedUploadPage(
+        {
+            "clip_01.mp4": 2,
+            "clip_02.mp4": 1,
+            "clip_03.mp4": 1,
+            "clip_04.mp4": 2,
+            "clip_05.mp4": 0,
+            "clip_06.mp4": 1,
+            "voice.mp3": 1,
+        }
+    )
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.0
+    client.poll_seconds = 0.0
+    monkeypatch.setattr(client, "_upload_inventory", lambda _page, _audio_name: (6, 1))
+
+    with pytest.raises(canva.CanvaUIVerificationError, match="upload completion"):
+        client._wait_for_upload_completion(page, names, baseline_inventory=(0, 0))
+
+
+def test_canva_upload_completion_accepts_card_scoped_media_when_global_audio_is_duplicated(
+    monkeypatch,
+):
+    """Catches rejecting a completed upload because account-global voice text is duplicated."""
+    names = [*(f"clip_{index:02d}.mp4" for index in range(1, 7)), "voice.mp3"]
+    page = FakePartialNamedUploadPage({name: 2 for name in names})
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    monkeypatch.setattr(client, "_upload_inventory", lambda _page, _audio_name: (6, 20))
+    monkeypatch.setattr(
+        client, "_uploaded_media_cards_complete", lambda _page, _names, _audio: True
+    )
+
+    client._wait_for_upload_completion(page, names, baseline_inventory=(0, 19))
+
+
+def test_canva_upload_inventory_waits_for_hydrated_media_tabs():
+    """Catches querying Canva's video/audio tabs before their post-click hydration."""
+    page = FakeHydratingUploadInventoryPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    assert client._upload_inventory(page, "voice.mp3") == (6, 1)
+
+
+def test_canva_upload_inventory_keeps_audio_count_when_videos_unmount_audio_panel():
+    """Catches Canva returning zero audio cards after its Videos-tab switch unmounts Audio."""
+    page = FakeUnmountingAudioPanelUploadInventoryPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    assert client._upload_inventory(page, "voice.mp3") == (6, 1)
+
+
+def test_canva_upload_inventory_accepts_missing_videos_tab_after_pre_clean():
+    """Catches pre-clean zero state blocking the upload baseline before new clips exist."""
+    page = FakeZeroVideoUploadInventoryPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    assert client._upload_inventory(page, "voice.mp3") == (0, 1)
+
+
+def test_canva_upload_inventory_defers_baseline_when_fresh_uploads_has_no_media_categories():
+    """Catches waiting for a non-existent Audio tab before the first video/audio upload."""
+    page = FakeNoMediaCategoryUploadInventoryPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    assert client._upload_inventory(page, "voice.mp3") is None
+
+
+def test_canva_upload_inventory_treats_missing_audio_tab_as_zero_after_video_upload():
+    """Catches waiting for an Audio tab Canva hides until narration is uploaded."""
+    page = FakeVideoOnlyUploadInventoryPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    assert client._upload_inventory(page, "voice.mp3") == (6, 0)
+
+
+def test_canva_upload_inventory_waits_for_audio_tab_before_selecting_it():
+    """Catches clicking Canva's Audio tab before its Uploads panel hydrates."""
+    page = FakeZeroVideoDelayedAudioTabPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    assert client._upload_inventory(page, "voice.mp3") == (0, 1)
+
+
+def test_canva_audio_cleanup_waits_for_delayed_existing_audio_tab(monkeypatch):
+    """Catches skipping stale narration cleanup while Canva hydrates Uploads."""
+    page = FakeLateAudioTabPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.poll_seconds = 5.0
+    monkeypatch.setattr(canva.time, "monotonic", lambda: page.elapsed_seconds)
+    monkeypatch.setattr(
+        canva.time,
+        "sleep",
+        lambda seconds: setattr(page, "elapsed_seconds", page.elapsed_seconds + seconds),
+    )
+
+    assert client._open_uploaded_audio(page) is page.audio_panel
+    assert page.audio_tab.clicked is True
+
+
+def test_canva_upload_inventory_uses_visible_audio_tab_when_stale_panel_remains():
+    """Catches selecting Canva's hidden stale Audio tab before the live panel."""
+    page = FakeDuplicateAudioTabPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    assert client._upload_inventory(page, "voice.mp3") == (0, 1)
+
+
+def test_canva_upload_inventory_reactivates_uploads_before_reading_media_tabs():
+    """Catches Canva keeping Uploads media tabs hidden when its sidebar is already selected."""
+    page = FakeReactivatingUploadInventoryPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+
+    assert client._upload_inventory(page, "voice.mp3") == (0, 1)
+
+
+def test_canva_upload_completion_accepts_scoped_media_card_increase_when_videos_omit_filenames(
+    monkeypatch,
+):
+    """Catches treating Canva's permanent "By uploading" help copy as upload activity."""
+    page = FakeUploadInventoryPage(set())
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.01
+    client.poll_seconds = 0.0
+    inventories = iter([(11, 4), (17, 5)])
+    monkeypatch.setattr(
+        client,
+        "_upload_inventory",
+        lambda _page, _audio_name: next(inventories),
+        raising=False,
+    )
+
+    client._wait_for_upload_completion(
+        page,
+        ["clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4", "voice.mp3"],
+        baseline_inventory=(11, 4),
+    )
+
+
+def test_canva_upload_completion_refreshes_once_before_rejecting_partial_progress(
+    monkeypatch,
+):
+    """Catches rejecting Canva uploads that finish only after its post-upload refresh."""
+    page = FakeRefreshableUploadPage()
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.0
+    client.poll_seconds = 0.0
+    inventories = iter(((2, 1), (6, 1)))
+    monkeypatch.setattr(client, "_upload_inventory", lambda _page, _audio: next(inventories))
+
+    client._wait_for_upload_completion(
+        page,
+        [*(f"clip_{index:02d}.mp4" for index in range(1, 7)), "voice.mp3"],
+        baseline_inventory=(0, 0),
+        audio_name="voice.mp3",
+    )
+
+    assert page.reload_count == 1
+
+
+def test_canva_upload_completion_rejects_unscoped_names_when_audio_panel_did_not_gain_voice(
+    monkeypatch,
+):
+    """Catches accepting stale/global filename text when Canva has not uploaded narration."""
+    expected = ["clip_01.mp4", "clip_02.mp4", "clip_03.mp4", "clip_04.mp4", "clip_05.mp4", "clip_06.mp4", "voice.mp3"]
+    page = FakeCompletedUploadPage(set(expected))
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.0
+    monkeypatch.setattr(client, "_upload_inventory", lambda _page, _audio_name: (6, 0))
+
+    with pytest.raises(canva.CanvaUIVerificationError, match="upload completion"):
+        client._wait_for_upload_completion(page, expected, baseline_inventory=(0, 0))
+
+
+def test_canva_upload_completion_fails_closed_when_any_media_name_is_absent():
+    page = FakeCompletedUploadPage({"clip_01.mp4"})
+    client, _ = _assembly_client(FakeCanvaEditorPage())
+    client.export_timeout_seconds = 0.0
+    error_cls = getattr(canva, "CanvaUIVerificationError", None)
+    assert error_cls is not None
+
+    with pytest.raises(error_cls, match="upload completion"):
+        client._wait_for_upload_completion(page, ["clip_01.mp4", "voice.mp3"])

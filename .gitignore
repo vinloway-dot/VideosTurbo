@@ -1,7 +1,9 @@
 .DS_Store
 /config.toml
 /config.toml.bak
+# Runtime state: generated media, browser profiles/locks, and SQLite DB/WAL/SHM.
 /storage/
+/.worktrees/
 /.idea/
 /app/services/__pycache__
 /app/__pycache__/

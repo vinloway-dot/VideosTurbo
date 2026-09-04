@@ -675,6 +675,12 @@ def get_video_materials(
             audio_duration=audio_duration * params.video_count,
             max_clip_duration=params.video_clip_duration,
             match_script_order=params.match_materials_to_script,
+            image_duration=params.image_duration,
+            image_motion=(
+                params.image_motion.value
+                if hasattr(params.image_motion, "value")
+                else str(params.image_motion)
+            ),
         )
         if not downloaded_videos:
             _mark_task_failed(
@@ -730,8 +736,16 @@ def _record_loomloom_run_reference(
 
 
 def generate_final_videos(
-    task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration
+    task_id,
+    params,
+    downloaded_videos,
+    audio_file,
+    subtitle_path,
+    audio_duration,
+    combined_video_override=None,
 ):
+    from app.services import stock_materials
+
     final_video_paths = []
     combined_video_paths = []
     warnings = []
@@ -741,33 +755,51 @@ def generate_final_videos(
         and bgm_service.should_use_bgm(params.bgm_type, params.bgm_volume)
     )
     # 多视频生成默认会打散素材以增加差异；但“按文案顺序匹配素材”追求的是
-    # 时间线稳定性和可解释性，所以开启后所有输出都使用顺序拼接。
+    # 时间线稳定性和可解释性，所以开启后所有输出都使用顺序拼接。Mixed 模式
+    # 会先在各自素材池内随机，再按 Video -> Image 交错，因此最终 compositor
+    # 必须顺序消费交错后的列表，不能再次全局打乱。
     if params.match_materials_to_script:
-        video_concat_mode = VideoConcatMode.sequential
+        requested_concat_mode = VideoConcatMode.sequential
     elif params.video_count == 1:
-        video_concat_mode = params.video_concat_mode
+        requested_concat_mode = params.video_concat_mode
     else:
-        video_concat_mode = VideoConcatMode.random
+        requested_concat_mode = VideoConcatMode.random
+    video_concat_mode = stock_materials.effective_concat_mode(
+        params.material_type,
+        requested_concat_mode,
+    )
+    clip_duration_overrides = stock_materials.build_clip_duration_overrides(
+        downloaded_videos,
+        material_type=params.material_type,
+        video_clip_duration=params.video_clip_duration,
+        image_duration=params.image_duration,
+    )
     video_transition_mode = params.video_transition_mode
 
     _progress = 50
     for i in range(params.video_count):
         index = i + 1
-        combined_video_path = path.join(
+        combined_video_path = combined_video_override or path.join(
             utils.task_dir(task_id), f"combined-{index}.mp4"
         )
-        logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
-        video.combine_videos(
-            combined_video_path=combined_video_path,
-            video_paths=downloaded_videos,
-            audio_file=audio_file,
-            video_aspect=params.video_aspect,
-            video_concat_mode=video_concat_mode,
-            video_transition_mode=video_transition_mode,
-            max_clip_duration=params.video_clip_duration,
-            threads=params.n_threads,
-            clip_speed=params.video_clip_speed,
-        )
+        if combined_video_override:
+            logger.info(
+                f"\n\n## using fixed six-clip timeline: {index} => {combined_video_path}"
+            )
+        else:
+            logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
+            video.combine_videos(
+                combined_video_path=combined_video_path,
+                video_paths=downloaded_videos,
+                audio_file=audio_file,
+                video_aspect=params.video_aspect,
+                video_concat_mode=video_concat_mode,
+                video_transition_mode=video_transition_mode,
+                max_clip_duration=params.video_clip_duration,
+                threads=params.n_threads,
+                clip_speed=params.video_clip_speed,
+                clip_duration_overrides=clip_duration_overrides,
+            )
 
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)
@@ -1231,7 +1263,7 @@ def _run_pipeline(
 
     # 2. Generate terms
     video_terms = ""
-    if params.video_source != "local":
+    if not params.six_clip_mode and params.video_source != "local":
         video_terms = generate_terms(task_id, params, video_script)
         if not video_terms:
             return _mark_task_failed(
@@ -1263,7 +1295,6 @@ def _run_pipeline(
             "audio",
             "failed to prepare narration audio",
         )
-
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=30)
 
     if stop_at == "audio":
@@ -1409,6 +1440,12 @@ def start(
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
 ):
     """执行任务流水线，并确保未预期异常也会转换成可查询的失败状态。"""
+    if stop_at == "video":
+        return _mark_task_failed(
+            task_id,
+            "preflight",
+            "LEGACY_VIDEO_GENERATION_RETIRED",
+        )
     try:
         return _run_pipeline(
             task_id,

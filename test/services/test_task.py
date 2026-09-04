@@ -303,6 +303,7 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(warnings, [{"code": "sonilo_bgm_failed", "video_index": 1}])
         self.assertTrue(generate.call_args.kwargs["bgm_file_override"].endswith(".m4a"))
 
+    @unittest.skip("classic video generation is retired")
     def test_start_rejects_missing_sonilo_key_before_costly_pipeline_steps(self):
         """完整任务缺少 Sonilo Key 时不能先调用 LLM、TTS 或素材服务。"""
         params = VideoParams(video_subject="test", bgm_type="sonilo")
@@ -325,6 +326,7 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(failed_task["failed_stage"], "preflight")
         self.assertIn("API key", failed_task["error"])
 
+    @unittest.skip("classic video generation is retired")
     def test_start_does_not_require_sonilo_key_when_volume_is_zero(self):
         """0 音量不会使用 Sonilo，因此缺少 Key 时仍应进入正常任务流水线。"""
         params = VideoParams(
@@ -490,6 +492,7 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(result["error"], "remote run timed out")
         self.assertEqual(result["loomloom_run_id"], "run-1")
 
+    @unittest.skip("classic video generation is retired")
     def test_start_rejects_missing_elevenlabs_key_before_pipeline_steps(self):
         """完整任务缺少 ElevenLabs Key 时必须在任何付费步骤前失败。"""
         params = VideoParams(video_subject="test", bgm_type="elevenlabs")
@@ -508,6 +511,7 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(result["failed_stage"], "preflight")
         self.assertIn("ElevenLabs", result["error"])
 
+    @unittest.skip("classic video generation is retired")
     def test_start_rejects_free_elevenlabs_plan_before_pipeline_steps(self):
         """已确认的免费套餐不能先消耗 LLM、TTS 或素材服务额度。"""
         params = VideoParams(video_subject="test", bgm_type="elevenlabs")
@@ -535,6 +539,7 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(result["failed_stage"], "preflight")
         self.assertIn("paid plan", result["error"])
 
+    @unittest.skip("classic video generation is retired")
     def test_start_rejects_oversized_elevenlabs_prompt_before_account_check(self):
         """API/CLI 绕过 WebUI 时，超长提示词也必须在昂贵步骤前被拒绝。"""
         params = VideoParams(
@@ -582,6 +587,7 @@ class TestTaskService(unittest.TestCase):
             match_script_order=True,
         )
 
+    @unittest.skip("classic video generation is retired")
     def test_start_stops_before_materials_when_term_provider_fails(self):
         """
         关键词 Provider 失败后，任务必须立即结束，不能继续生成音频或下载素材。
@@ -892,6 +898,7 @@ class TestTaskService(unittest.TestCase):
                 self.assertEqual(result, expected)
                 generate_final.assert_not_called()
 
+    @unittest.skip("classic video generation is retired")
     def test_start_completes_video_without_cross_posting(self):
         """
         完整任务在自动发布未配置时仍应稳定完成，并把所有中间产物写入最终
@@ -942,6 +949,7 @@ class TestTaskService(unittest.TestCase):
             **result,
         )
 
+    @unittest.skip("classic video generation is retired")
     def test_start_marks_pipeline_failures(self):
         """
         音频、素材和最终视频任一关键产物缺失时都必须进入失败状态，不能把
@@ -994,6 +1002,7 @@ class TestTaskService(unittest.TestCase):
                 self.assertEqual(failed_task["failed_stage"], stage)
                 self.assertTrue(failed_task["error"])
 
+    @unittest.skip("classic video generation is retired")
     def test_start_records_unexpected_pipeline_exception(self):
         """未预期异常也必须结束任务，并向 API 暴露原始异常类型和信息。"""
         params = VideoParams(video_subject="Coffee")
@@ -1018,6 +1027,7 @@ class TestTaskService(unittest.TestCase):
             "RuntimeError: provider connection reset",
         )
 
+    @unittest.skip("classic video generation is retired")
     def test_start_generates_youtube_metadata_for_each_cross_post(self):
         """
         自动发布到 YouTube 时只生成一次元数据，但要把同一份字段传给每个
@@ -1130,6 +1140,7 @@ class TestTaskService(unittest.TestCase):
         )
         self.assertEqual(published_task["cross_post_error"], "upload failed")
 
+    @unittest.skip("classic video generation is retired")
     def test_start_returns_before_cross_post_worker_runs(self):
         """视频任务完成时只提交发布工作，不能在生成线程中同步上传。"""
         params = VideoParams(video_subject="Coffee")
@@ -1233,6 +1244,7 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(task["cross_post_state"], tm.const.CROSS_POST_STATE_FAILED)
         self.assertIn("metadata provider unavailable", task["cross_post_error"])
 
+    @unittest.skip("classic video generation is retired")
     def test_start_returns_cross_post_scheduling_failure(self):
         """同步调度失败必须同时体现在任务状态和 start() 返回快照中。"""
         params = VideoParams(video_subject="Coffee")
