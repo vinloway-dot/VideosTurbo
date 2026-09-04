@@ -18,24 +18,34 @@ export default function(component) {
     source.addEventListener('job.completed', emit);
     source.addEventListener('job.incident', emit);
     source.addEventListener('sync_required', emit);
-    parent.__cloudAgentEventSource = {source, emit, pollTimer: null};
+    const probeSessionId = globalThis.crypto?.randomUUID?.()
+      || `${Date.now()}-${Math.random()}`;
+    parent.__cloudAgentEventSource = {
+      source,
+      emit,
+      pollTimer: null,
+      probeSessionId,
+      probeSequence: 0,
+    };
   }
   const state = parent.__cloudAgentEventSource;
   if (component.data.pollingEnabled && !state.pollTimer) {
-    state.pollTimer = setInterval(() => {
+    state.pollTimer = setTimeout(() => {
+      state.pollTimer = null;
+      state.probeSequence += 1;
       component.setTriggerValue('event', {
-        event_id: `status-probe-${Date.now()}`,
+        event_id: `status-probe-${state.probeSessionId}-${state.probeSequence}`,
         type: 'status_probe',
       });
     }, component.data.pollIntervalMs);
   } else if (!component.data.pollingEnabled && state.pollTimer) {
-    clearInterval(state.pollTimer);
+    clearTimeout(state.pollTimer);
     state.pollTimer = null;
   }
   return () => {
     const current = parent.__cloudAgentEventSource;
     if (current) {
-      if (current.pollTimer) clearInterval(current.pollTimer);
+      if (current.pollTimer) clearTimeout(current.pollTimer);
       current.source.close();
       delete parent.__cloudAgentEventSource;
     }

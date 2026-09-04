@@ -56,7 +56,7 @@ process.stdout.write(JSON.stringify(triggers));
     ]
 
 
-def test_event_renderer_emits_periodic_status_probe_and_cleans_up_timer():
+def test_event_renderer_emits_unique_one_shot_status_probe():
     renderer = cloud_agent_events._EVENT_RENDERER.replace(
         "export default function(component)", "const render = function(component)"
     )
@@ -67,14 +67,16 @@ class FakeEventSource {
   close() {}
 }
 globalThis.EventSource = FakeEventSource;
-const intervals = [];
+const timeouts = [];
 const cleared = [];
-globalThis.setInterval = (callback, delay) => {
-  intervals.push({callback, delay});
+globalThis.setTimeout = (callback, delay) => {
+  timeouts.push({callback, delay});
   return 7;
 };
-globalThis.clearInterval = (timer) => cleared.push(timer);
-Date.now = () => 12345;
+globalThis.clearTimeout = (timer) => cleared.push(timer);
+Object.defineProperty(globalThis, 'crypto', {
+  value: {randomUUID: () => 'session-1'},
+});
 const triggers = [];
 const component = {
   parentElement: {},
@@ -85,11 +87,13 @@ const component = {
   },
   setTriggerValue: (...args) => triggers.push(args),
 };
-const cleanup = render(component);
-intervals[0].callback();
+let cleanup = render(component);
+timeouts[0].callback();
+component.data.pollingEnabled = false;
+cleanup = render(component);
 cleanup();
 process.stdout.write(JSON.stringify({
-  delays: intervals.map((entry) => entry.delay),
+  delays: timeouts.map((entry) => entry.delay),
   triggers,
   cleared,
 }));
@@ -107,10 +111,13 @@ process.stdout.write(JSON.stringify({
         "triggers": [
             [
                 "event",
-                {"event_id": "status-probe-12345", "type": "status_probe"},
+                {
+                    "event_id": "status-probe-session-1-1",
+                    "type": "status_probe",
+                },
             ]
         ],
-        "cleared": [7],
+        "cleared": [],
     }
 
 
